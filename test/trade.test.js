@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { Interface } from "ethers";
+import { Interface, keccak256 } from "ethers";
 import {
   confirmExit,
   confirmPaperExit,
@@ -21,6 +21,10 @@ const WETH = "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73";
 const POOL = "0x3333333333333333333333333333333333333333";
 const WALLET = "0x5555555555555555555555555555555555555555";
 const ZERO = "0x0000000000000000000000000000000000000000";
+const RAW_BUY = "0x1234";
+const BUY_HASH = keccak256(RAW_BUY);
+const RAW_SELL = "0xabcd";
+const SELL_HASH = keccak256(RAW_SELL);
 const transfer = new Interface(["event Transfer(address indexed from,address indexed to,uint256 value)"]);
 
 function transferLog(from, to, value, address = TOKEN) {
@@ -129,17 +133,17 @@ describe("live trade safety", () => {
       prepareBuy: async (...args) => {
         prepareArgs = args;
         return {
-          hash: "0xbuy",
-          rawTx: "0xrawbuy",
+          hash: BUY_HASH,
+          rawTx: RAW_BUY,
           nonce: 7,
           broadcast: async () => {
-            assert.equal(saved.at(-1).pending.txHash, "0xbuy");
-            assert.equal(saved.at(-1).pending.rawTx, "0xrawbuy");
+            assert.equal(saved.at(-1).pending.txHash, BUY_HASH);
+            assert.equal(saved.at(-1).pending.rawTx, RAW_BUY);
             assert.equal(saved.at(-1).pending.nonce, 7);
             return {
-              hash: "0xbuy",
+              hash: BUY_HASH,
               wait: async () => ({
-                hash: "0xbuy",
+                hash: BUY_HASH,
                 status: 1,
                 logs: [transferLog(ZERO, WALLET, 100n)],
               }),
@@ -269,17 +273,17 @@ describe("live trade safety", () => {
       prepareSell: async (amount, minOut) => {
         sold = { amount, minOut };
         return {
-          hash: "0xsell",
-          rawTx: "0xrawsell",
+          hash: SELL_HASH,
+          rawTx: RAW_SELL,
           nonce: 8,
           broadcast: async () => {
-            assert.equal(writes.at(-1).pending.txHash, "0xsell");
-            assert.equal(writes.at(-1).pending.rawTx, "0xrawsell");
+            assert.equal(writes.at(-1).pending.txHash, SELL_HASH);
+            assert.equal(writes.at(-1).pending.rawTx, RAW_SELL);
             assert.equal(writes.at(-1).pending.nonce, 8);
             return {
-              hash: "0xsell",
+              hash: SELL_HASH,
               wait: async () => ({
-                hash: "0xsell",
+                hash: SELL_HASH,
                 status: 1,
                 logs: [transferLog(WALLET, POOL, 30n)],
               }),
@@ -331,13 +335,13 @@ describe("live trade safety", () => {
       token: TOKEN,
       wallet: WALLET,
       initialTokenAmount: undefined,
-      pending: { txHash: "0xbuy", rawTx: "0xrawbuy", nonce: 7, balanceBefore: "10" },
+      pending: { txHash: BUY_HASH, rawTx: RAW_BUY, nonce: 7, balanceBefore: "10" },
     };
     const updated = await reconcilePendingBuy(pending, {
       provider: {
         getTransactionReceipt: async () => ({
           status: 1,
-          hash: "0xbuy",
+          hash: BUY_HASH,
           logs: [transferLog(ZERO, WALLET, 100n)],
         }),
       },
@@ -364,12 +368,12 @@ describe("live trade safety", () => {
       state: "buy_pending",
       token: TOKEN,
       wallet: WALLET,
-      pending: { txHash: "0xbuy", rawTx: "0xrawbuy", nonce: 7 },
+      pending: { txHash: BUY_HASH, rawTx: RAW_BUY, nonce: 7 },
     };
     const result = await reconcilePendingBuy(pending, {
       provider: {
         getTransactionReceipt: async () => null,
-        getTransaction: async () => { lookups += 1; return { hash: "0xbuy" }; },
+        getTransaction: async () => { lookups += 1; return { hash: BUY_HASH }; },
         broadcastTransaction: async () => { broadcasts += 1; },
       },
       upsertPosition: () => { throw new Error("must not write"); },
@@ -386,7 +390,7 @@ describe("live trade safety", () => {
       state: "buy_pending",
       token: TOKEN,
       wallet: WALLET,
-      pending: { txHash: "0xbuy", rawTx: "0xrawbuy", nonce: 7 },
+      pending: { txHash: BUY_HASH, rawTx: RAW_BUY, nonce: 7 },
     };
     const result = await reconcilePendingBuy(pending, {
       provider: {
@@ -398,7 +402,7 @@ describe("live trade safety", () => {
       upsertPosition: () => { throw new Error("must not write"); },
     });
     assert.equal(result, null);
-    assert.deepEqual(broadcasts, ["0xrawbuy"]);
+    assert.deepEqual(broadcasts, [RAW_BUY]);
   });
 
   it("moves an unreplayable legacy pending buy to needs_review", async () => {
@@ -408,7 +412,7 @@ describe("live trade safety", () => {
       state: "buy_pending",
       token: TOKEN,
       wallet: WALLET,
-      pending: { txHash: "0xbuy" },
+      pending: { txHash: BUY_HASH },
     };
     const updated = await reconcilePendingBuy(pending, {
       provider: {
@@ -429,7 +433,7 @@ describe("live trade safety", () => {
       state: "buy_pending",
       token: TOKEN,
       wallet: WALLET,
-      pending: { txHash: "0xbuy", rawTx: "0xrawbuy", nonce: 7 },
+      pending: { txHash: BUY_HASH, rawTx: RAW_BUY, nonce: 7 },
     };
     const updated = await reconcilePendingBuy(pending, {
       provider: {
@@ -442,6 +446,31 @@ describe("live trade safety", () => {
     assert.equal(updated.state, "needs_review");
     assert.match(updated.reviewReason, /nonce was consumed/);
     assert.equal(writes.length, 1);
+  });
+
+  it("refuses to rebroadcast a pending payload whose hash does not match", async () => {
+    const writes = [];
+    let broadcasts = 0;
+    const pending = {
+      schemaVersion: 2,
+      state: "buy_pending",
+      token: TOKEN,
+      wallet: WALLET,
+      pending: { txHash: BUY_HASH, rawTx: RAW_SELL, nonce: 7 },
+    };
+    const updated = await reconcilePendingBuy(pending, {
+      provider: {
+        getTransactionReceipt: async () => null,
+        getTransaction: async () => null,
+        getTransactionCount: async () => 7,
+        broadcastTransaction: async () => { broadcasts += 1; },
+      },
+      upsertPosition: (position) => { writes.push(position); return position; },
+    });
+    assert.equal(updated.state, "needs_review");
+    assert.match(updated.reviewReason, /hash does not match/);
+    assert.equal(writes.length, 1);
+    assert.equal(broadcasts, 0);
   });
 
   it("recovers a partial pending exit and appends its trade atomically", async () => {
@@ -458,8 +487,8 @@ describe("live trade safety", () => {
       tp1Done: true,
       tp2Done: false,
       pending: {
-        txHash: "0xsell",
-        rawTx: "0xrawsell",
+        txHash: SELL_HASH,
+        rawTx: RAW_SELL,
         nonce: 8,
         stage: "tp2",
         reason: "take profit",
@@ -470,7 +499,7 @@ describe("live trade safety", () => {
       provider: {
         getTransactionReceipt: async () => ({
           status: 1,
-          hash: "0xsell",
+          hash: SELL_HASH,
           logs: [transferLog(WALLET, POOL, 30n)],
         }),
       },
@@ -500,8 +529,8 @@ describe("live trade safety", () => {
       initialTokenAmount: "70",
       remainingTokenAmount: "70",
       pending: {
-        txHash: "0xsell",
-        rawTx: "0xrawsell",
+        txHash: SELL_HASH,
+        rawTx: RAW_SELL,
         nonce: 8,
         stage: "sl",
         reason: "stop",
@@ -512,7 +541,7 @@ describe("live trade safety", () => {
       provider: {
         getTransactionReceipt: async () => ({
           status: 1,
-          hash: "0xsell",
+          hash: SELL_HASH,
           logs: [transferLog(WALLET, POOL, 70n)],
         }),
       },
@@ -537,7 +566,7 @@ describe("live trade safety", () => {
       schemaVersion: 2,
       state: "exit_pending",
       remainingTokenAmount: "70",
-      pending: { txHash: "0xsell", rawTx: "0xrawsell", nonce: 8 },
+      pending: { txHash: SELL_HASH, rawTx: RAW_SELL, nonce: 8 },
     };
     const updated = await reconcilePendingExit(position, {
       provider: {

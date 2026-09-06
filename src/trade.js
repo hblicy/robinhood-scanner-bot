@@ -423,6 +423,14 @@ function moveToReview(position, deps, reason) {
   return review;
 }
 
+function pendingPayloadMatchesHash(pending) {
+  try {
+    return keccak256(pending.rawTx).toLowerCase() === String(pending.txHash).toLowerCase();
+  } catch {
+    return false;
+  }
+}
+
 async function resolvePending(position, deps, action) {
   const pending = position.pending;
   if (!pending?.txHash) {
@@ -439,6 +447,9 @@ async function resolvePending(position, deps, action) {
   if (transaction) return {};
   if (!pending.rawTx || !Number.isInteger(pending.nonce)) {
     return { review: moveToReview(position, deps, `pending ${action} cannot be replayed safely`) };
+  }
+  if (!pendingPayloadMatchesHash(pending)) {
+    return { review: moveToReview(position, deps, `pending ${action} raw transaction hash does not match txHash`) };
   }
   const latestNonce = await deps.provider.getTransactionCount(position.wallet, "latest");
   if (latestNonce > pending.nonce) {
