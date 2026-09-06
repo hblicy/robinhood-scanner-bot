@@ -2,6 +2,7 @@ import dotenv from "dotenv";
 import { getAddress, ZeroAddress } from "ethers";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { validateBps, validatePositiveInteger } from "./safety.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 dotenv.config({ path: path.join(root, ".env") });
@@ -15,7 +16,8 @@ function envNum(name, fallback) {
   const v = env(name, "");
   if (v === "") return fallback;
   const n = Number(v);
-  return Number.isFinite(n) ? n : fallback;
+  if (!Number.isFinite(n)) throw new Error(`${name} must be numeric`);
+  return n;
 }
 
 function envBool(name, fallback = false) {
@@ -31,7 +33,6 @@ export const CHAIN = {
   id: 4663,
   name: "Robinhood Chain",
   rpc: env("RPC_URL", "https://rpc.mainnet.chain.robinhood.com"),
-  wss: env("WSS_URL", ""),
   explorer: "https://robinhoodchain.blockscout.com",
   dexScreener: "https://dexscreener.com/robinhood",
   geckoNetwork: "robinhood",
@@ -94,7 +95,7 @@ export const SETTINGS = {
   privateKey: env("PRIVATE_KEY"),
   buyAmountEth: env("BUY_AMOUNT_ETH", "0.01"),
   maxBuyEth: env("MAX_BUY_ETH", "0.03"),
-  slippageBps: envNum("SLIPPAGE_BPS", 1200),
+  slippageBps: validateBps("SLIPPAGE_BPS", envNum("SLIPPAGE_BPS", 1200)),
   gasLimit: envNum("GAS_LIMIT", 450000),
   tp1Mult: envNum("TP1_MULT", 2),
   tp1SellPct: envNum("TP1_SELL_PCT", 30),
@@ -103,6 +104,9 @@ export const SETTINGS = {
   tp3Mult: envNum("TP3_MULT", 10),
   slPct: envNum("SL_PCT", 50),
   positionPollMs: envNum("POSITION_POLL_MS", 8000),
+  maxQueueSize: validatePositiveInteger("MAX_QUEUE_SIZE", envNum("MAX_QUEUE_SIZE", 500)),
+  maxSeenEntries: validatePositiveInteger("MAX_SEEN_ENTRIES", envNum("MAX_SEEN_ENTRIES", 10_000)),
+  seenTtlMs: validatePositiveInteger("SEEN_TTL_MS", envNum("SEEN_TTL_MS", 86_400_000)),
 };
 
 export const NARRATIVE_WORDS = [

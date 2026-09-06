@@ -1,23 +1,14 @@
-import { Contract, Interface, JsonRpcProvider, WebSocketProvider, id, getAddress, ZeroAddress } from "ethers";
+import { Contract, Interface, JsonRpcProvider, id, getAddress, ZeroAddress } from "ethers";
 import { ADDR, CHAIN, SETTINGS, isQuote } from "./config.js";
 import { ERC20_ABI, PAIR_V2_ABI, V2_FACTORY_ABI, V3_FACTORY_ABI, V4_PM_ABI } from "./abis.js";
 
 let httpProvider;
-let wsProvider;
 
 export function getProvider() {
   if (!httpProvider) {
     httpProvider = new JsonRpcProvider(CHAIN.rpc, CHAIN.id, { staticNetwork: true });
   }
   return httpProvider;
-}
-
-export async function getWsProvider() {
-  if (!CHAIN.wss) return null;
-  if (!wsProvider) {
-    wsProvider = new WebSocketProvider(CHAIN.wss, CHAIN.id);
-  }
-  return wsProvider;
 }
 
 export async function withRetry(fn, tries = 3) {
@@ -73,11 +64,18 @@ function baseEvent({ source, venue, pool, token, quote, fee, blockNumber, txHash
     fee: fee ?? null,
     blockNumber: blockNumber ?? null,
     txHash: txHash ?? null,
-    createdAt: createdAt ?? Date.now(),
+    createdAt: createdAt ?? null,
   };
 }
 
-export async function getLogsChunked({ address, topics, fromBlock, toBlock, chunk = 400 }) {
+export async function getLogsChunked({
+  address,
+  topics,
+  fromBlock,
+  toBlock,
+  chunk = 400,
+  limit = SETTINGS.maxQueueSize,
+}) {
   const provider = getProvider();
   const out = [];
   let start = fromBlock;
@@ -92,17 +90,20 @@ export async function getLogsChunked({ address, topics, fromBlock, toBlock, chun
           toBlock: end,
         })
       );
-      out.push(...logs);
+      out.push(...logs.slice(0, Math.max(0, limit - out.length)));
     } catch (err) {
       if (chunk > 40) {
         const mid = Math.floor((start + end) / 2);
-        const left = await getLogsChunked({ address, topics, fromBlock: start, toBlock: mid, chunk: Math.floor(chunk / 2) });
-        const right = await getLogsChunked({ address, topics, fromBlock: mid + 1, toBlock: end, chunk: Math.floor(chunk / 2) });
+        const left = await getLogsChunked({ address, topics, fromBlock: start, toBlock: mid, chunk: Math.floor(chunk / 2), limit });
+        const right = left.length >= limit
+          ? []
+          : await getLogsChunked({ address, topics, fromBlock: mid + 1, toBlock: end, chunk: Math.floor(chunk / 2), limit: limit - left.length });
         out.push(...left, ...right);
       } else {
         throw err;
       }
     }
+    if (out.length >= limit) break;
     start = end + 1;
   }
   return out;
@@ -197,7 +198,22 @@ export async function scanOnchain(fromBlock, toBlock) {
     }
   }
 
-  return events;
+  return attachBlockTimes(events.slice(0, SETTINGS.maxQueueSize));
+}
+
+export async function attachBlockTimes(events, provider = getProvider()) {
+  const blockNumbers = [...new Set(events.map((event) => event.blockNumber).filter(Number.isInteger))];
+  const blocks = new Map();
+  await Promise.all(
+    blockNumbers.map(async (blockNumber) => {
+      const block = await provider.getBlock(blockNumber).catch(() => null);
+      blocks.set(blockNumber, block?.timestamp ? Number(block.timestamp) * 1000 : null);
+    })
+  );
+  return events.map((event) => ({
+    ...event,
+    createdAt: Number.isInteger(event.blockNumber) ? blocks.get(event.blockNumber) ?? null : event.createdAt ?? null,
+  }));
 }
 
 export async function readTokenMeta(token) {

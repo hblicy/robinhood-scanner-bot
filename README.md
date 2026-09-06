@@ -16,10 +16,10 @@
 | 交易量上升、买入主导、低市值 | Gecko / DexScreener 5 分钟买卖与成交 |
 | 浏览器看前 10 持仓、创建者有没有狂卖 | Blockscout holders + 创建者余额 |
 | GMGN 聪明钱 / 地毯 | 报告里带 GMGN 链接，需人工点开 |
-| 蜜罐 / 高税 | `eth_call` 模拟 V2「买入 → 授权 → 卖出」 |
-| 流动性可随时移除 | V2 LP 销毁比例 |
+| 蜜罐 / 高税 | V2 报价和转账只作诊断；没有可信完整 Router 模拟时保持“未完成”并禁止实盘 |
+| 流动性可随时移除 | 只检查 V2 LP 销毁比例，不声称第三方锁仓 |
 | 创建者是不是串子 | 创建者历史合约数量 |
-| 只买总资金 1–2% | `BUY_AMOUNT_ETH`（仅 paper/live） |
+| 控制单笔金额 | `BUY_AMOUNT_ETH` / `MAX_BUY_ETH` 是固定 ETH 额度，不代表钱包净值比例 |
 | 2x 卖 30%、5x 卖 30%、10x 清仓；跌 50% 止损 | `paper` / `live` 持仓轮询 |
 
 ## 快速开始
@@ -36,13 +36,13 @@ copy .env.example .env
 # 查一枚已有代币（把 CA 换掉）
 npm run check -- 0x你的合约
 
-# 扫最近新池，跑一轮就退出
+# 扫最近新池，跑一轮就退出；无论 .env MODE 如何都只读
 npm run scan
 
 # 持续监听 + Telegram（推荐先用这个）
 npm run watch
 
-# 监听 + 模拟买入 / 止盈止损（不发真实交易）
+# 监听 + 规则演示（不发真实交易，也不是收益回测）
 npm run paper
 ```
 
@@ -64,7 +64,9 @@ MIN_SCORE=55
 ENABLE_LIVE_TRADING=false  # 永远先保持 false
 ```
 
-实盘必须 **同时** 满足：`MODE=live`、`ENABLE_LIVE_TRADING=true`、`PRIVATE_KEY` 已填。漏一项就不会发交易。实盘目前只接 Uniswap V2 的 `swapExactETHForTokensSupportingFeeOnTransferTokens`。
+真实交易只允许显式执行 `node src/index.js live`，并且必须 **同时** 满足：`ENABLE_LIVE_TRADING=true`、`PRIVATE_KEY` 已填、报告为 `green`、DexScreener 数据精确绑定事件池、报价资产为 WETH、完整安全检查通过。`npm run watch` 和 `npm run scan` 不会因为 `.env` 中的 `MODE=live` 而发交易。
+
+当前版本没有可证明可靠的通用状态化 Router「买入 → 授权 → 卖出」模拟器，因此正向蜜罐结果保持“未完成”，`tradeReady` 不会成立，真实买入会被安全门拒绝。这是有意的 fail-closed 行为；接入支持完整 fork/state override 的验证器并增加回归测试前，不应取消该限制。
 
 公共 RPC `https://rpc.mainnet.chain.robinhood.com` 能跑，但 24/7 监听建议换成 Alchemy / QuickNode。链出块大约 100ms，日志范围不要开太大。
 
@@ -76,15 +78,18 @@ ENABLE_LIVE_TRADING=false  # 永远先保持 false
 - 5 分钟买盘 / 成交
 - 低市值 + 流动性相对市值
 - 前 10 持仓、创建者持仓、发币历史
-- 蜜罐模拟、税率、LP 锁/烧、是否可增发
+- 蜜罐诊断、LP 销毁比例、是否可增发
 
-`green`（建议小仓试）要求大约 75 分以上且红旗很少。蜜罐或超高税直接 `skip`。
+缺失的创建者、历史、权限、持仓或市场绑定数据不会再作为“安全”加分。`green` 还要求所有安全事实完整；当前完整买卖模拟不可用时最多进入人工复核。已确认的蜜罐负面证据直接 `skip`。
+
+候选队列有硬上限，处理完成或失败都会释放 in-flight 标记；`seen.json` 按 `SEEN_TTL_MS` 过期并最多保留 `MAX_SEEN_ENTRIES` 条。旧格式仓位会迁移为 `needs_review`，不会自动卖出。
 
 ## 明确不会做的事
 
 - 不夹子、不抢跑、不改 mempool
 - 不连钱包网页、不向你要助记词
 - 不保证赚钱；规则是启发式，会被针对性绕过
+- `paper` 只演示触发规则，不模拟滑点、手续费或真实成交，不能当作回测收益
 
 ## 网络参数（Robinhood Chain）
 

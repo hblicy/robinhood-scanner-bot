@@ -26,7 +26,6 @@ describe("formatAlert", () => {
         honeypot: false,
         buyTaxBps: 0,
         sellTaxBps: 0,
-        lpLocked: true,
         lpBurnedPct: 100,
       },
       score: 82,
@@ -44,5 +43,44 @@ describe("formatAlert", () => {
     assert.match(text, /82\/100/);
     assert.match(text, /DexScreener/);
     assert.match(text, /不自动买入/);
+  });
+
+  it("renders unknown safety facts without claiming they passed", () => {
+    const text = formatAlert({
+      token: "0x1111111111111111111111111111111111111111",
+      venue: "uniswap-v2",
+      creator: null,
+      meta: { symbol: "UNK", name: "Unknown" },
+      facts: {
+        ageMinutes: null,
+        mcapUsd: 0,
+        liquidityUsd: 0,
+        volume5m: 0,
+        buys5m: 0,
+        sells5m: 0,
+        hasTwitter: false,
+        hasTelegram: false,
+        narrativeHits: [],
+        top10Pct: null,
+        holderCount: null,
+        creatorPct: null,
+        deployerTokens: null,
+        honeypot: null,
+        buyTaxBps: null,
+        sellTaxBps: null,
+        lpUnknown: true,
+        lpBurnedPct: null,
+      },
+      score: 0,
+      verdict: "review",
+      red: [],
+      checks: [],
+      links: { dex: "https://example.test", explorer: "https://example.test", gmgn: "https://example.test" },
+      dex: null,
+    });
+    assert.match(text, /年龄<\/b> 未知/);
+    assert.match(text, /税 未知\/未知bps/);
+    assert.match(text, /LP 未验证/);
+    assert.doesNotMatch(text, /已锁/);
   });
 });

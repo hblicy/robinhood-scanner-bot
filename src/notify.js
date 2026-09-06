@@ -1,4 +1,5 @@
 import { SETTINGS, liveTradingAllowed } from "./config.js";
+import { safeErrorMessage } from "./safety.js";
 
 const VERDICT = {
   green: "🟢 可小仓试",
@@ -15,7 +16,9 @@ export function formatAlert(report) {
   lines.push("");
   lines.push(`<b>CA</b> <code>${token}</code>`);
   lines.push(`<b>池</b> ${esc(venue)} / ${esc(report.dex?.quoteSymbol || "WETH")}`);
-  lines.push(`<b>年龄</b> ${facts.ageMinutes.toFixed(1)} 分钟`);
+  lines.push(
+    `<b>年龄</b> ${Number.isFinite(facts.ageMinutes) ? `${facts.ageMinutes.toFixed(1)} 分钟` : "未知"}`
+  );
   lines.push(
     `<b>市值</b> $${fmt(facts.mcapUsd)}  ·  <b>流动性</b> $${fmt(facts.liquidityUsd)}` +
       (facts.mcapUsd ? `  (liq/mc ${((facts.liquidityUsd / facts.mcapUsd) * 100).toFixed(0)}%)` : "")
@@ -31,10 +34,17 @@ export function formatAlert(report) {
     `<b>持仓</b> 前10 ${facts.top10Pct == null ? "?" : facts.top10Pct.toFixed(1) + "%"}  ·  ${facts.holderCount ?? "?"} 人`
   );
   lines.push(
-    `<b>创建者</b> ${creator ? `<code>${short(creator)}</code>` : "?"} 持仓 ${facts.creatorPct?.toFixed(1) ?? "?"}%  · 历史发币 ${facts.deployerTokens}`
+    `<b>创建者</b> ${creator ? `<code>${short(creator)}</code>` : "?"} 持仓 ${facts.creatorPct?.toFixed(1) ?? "?"}%  · 历史发币 ${facts.deployerTokens ?? "未知"}`
   );
+  const buyTax = Number.isFinite(facts.buyTaxBps) ? facts.buyTaxBps : "未知";
+  const sellTax = Number.isFinite(facts.sellTaxBps) ? facts.sellTaxBps : "未知";
+  const lpStatus = facts.lpUnknown
+    ? "未验证"
+    : Number.isFinite(facts.lpBurnedPct)
+      ? `已烧 ${facts.lpBurnedPct.toFixed(0)}%`
+      : "未验证";
   lines.push(
-    `<b>安全</b> 蜜罐 ${facts.honeypot === false ? "通过" : facts.honeypot === true ? "失败" : "未完成"}  税 ${facts.buyTaxBps ?? 0}/${facts.sellTaxBps ?? 0}bps  LP ${facts.lpLocked || facts.lpBurnedPct >= 90 ? "已锁/已烧" : "可撤"}`
+    `<b>安全</b> 蜜罐 ${facts.honeypot === false ? "通过" : facts.honeypot === true ? "失败" : "未完成"}  税 ${buyTax}/${sellTax}bps  LP ${lpStatus}`
   );
   if (red.length) {
     lines.push("");
@@ -50,7 +60,7 @@ export function formatAlert(report) {
   lines.push(`<a href="${links.dex}">DexScreener</a> · <a href="${links.explorer}">Blockscout</a> · <a href="${links.gmgn}">GMGN</a>`);
   if (!liveTradingAllowed()) {
     lines.push("");
-    lines.push("<i>默认只报警，不自动买入。先小仓 1–2% 测试。</i>");
+    lines.push("<i>默认只报警，不自动买入。任何操作请使用独立小额钱包。</i>");
   }
   return lines.join("\n");
 }
@@ -86,7 +96,7 @@ export async function alertReport(report) {
   try {
     await sendTelegram(text);
   } catch (err) {
-    console.error("telegram failed:", err.message);
+    console.error("telegram failed:", safeErrorMessage(err));
   }
 }
 

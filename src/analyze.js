@@ -16,6 +16,7 @@ import {
   deployerHistory,
   dexScreener,
 } from "./market.js";
+import { safeErrorMessage } from "./safety.js";
 
 const erc20Iface = new Interface(ERC20_ABI);
 const SIM_FROM = "0x1000000000000000000000000000000000000001";
@@ -31,13 +32,23 @@ function hasNarrative(symbol, name) {
   return NARRATIVE_WORDS.filter((w) => s.includes(w));
 }
 
+async function settled(promise) {
+  try {
+    return { ok: true, value: await promise, error: null };
+  } catch (error) {
+    return { ok: false, value: null, error: safeErrorMessage(error) };
+  }
+}
+
 export function scoreFromFacts(f) {
   const checks = [];
   const red = [];
   let score = 0;
 
-  const age = f.ageMinutes ?? 999;
-  if (age <= SETTINGS.maxAgeMinutes) {
+  const age = Number.isFinite(f.ageMinutes) ? f.ageMinutes : null;
+  if (age === null) {
+    checks.push({ key: "age", ok: false, pts: 0, detail: "年龄未知" });
+  } else if (age <= SETTINGS.maxAgeMinutes) {
     score += 15;
     checks.push({ key: "age", ok: true, pts: 15, detail: `${age.toFixed(1)} 分钟` });
   } else if (age <= SETTINGS.maxAgeMinutes * 2) {
@@ -122,13 +133,12 @@ export function scoreFromFacts(f) {
     checks.push({ key: "holders", ok: false, pts: 0, detail: "持仓分布未知" });
   }
 
-  if (f.creatorDumping) {
-    checks.push({ key: "creator", ok: false, pts: 0, detail: `创建者仍持 ${f.creatorPct?.toFixed(1) ?? "?"}% 且在卖` });
-    red.push("创建者持续抛售");
-  } else if ((f.creatorPct || 0) <= 5) {
+  if (!f.creatorKnown || !Number.isFinite(f.creatorPct)) {
+    checks.push({ key: "creator", ok: false, pts: 0, detail: "创建者或持仓未知" });
+  } else if (f.creatorPct <= 5) {
     score += 10;
-    checks.push({ key: "creator", ok: true, pts: 10, detail: `创建者持仓 ${f.creatorPct?.toFixed(1) ?? 0}%` });
-  } else if ((f.creatorPct || 0) <= 15) {
+    checks.push({ key: "creator", ok: true, pts: 10, detail: `创建者持仓 ${f.creatorPct.toFixed(1)}%` });
+  } else if (f.creatorPct <= 15) {
     score += 4;
     checks.push({ key: "creator", ok: false, pts: 4, detail: `创建者持仓 ${f.creatorPct.toFixed(1)}%` });
   } else {
@@ -155,10 +165,10 @@ export function scoreFromFacts(f) {
   if (tax > SETTINGS.maxTaxBps) red.push(`税率 ${tax}bps 过高`);
 
   if (f.lpUnknown) {
-    checks.push({ key: "lp", ok: false, pts: 0, detail: "非 Uniswap V2，未检测 LP 锁" });
-  } else if (f.lpBurnedPct >= 90 || f.lpLocked) {
+    checks.push({ key: "lp", ok: false, pts: 0, detail: "未验证 V2 LP 销毁比例" });
+  } else if (f.lpBurnedPct >= 90) {
     score += 10;
-    checks.push({ key: "lp", ok: true, pts: 10, detail: f.lpLocked ? "LP 锁定" : `LP 已烧 ${f.lpBurnedPct.toFixed(0)}%` });
+    checks.push({ key: "lp", ok: true, pts: 10, detail: `LP 已烧 ${f.lpBurnedPct.toFixed(0)}%` });
   } else if (f.lpBurnedPct > 0) {
     score += 3;
     checks.push({ key: "lp", ok: false, pts: 3, detail: `LP 仅烧 ${f.lpBurnedPct.toFixed(0)}%，可撤池` });
@@ -168,7 +178,9 @@ export function scoreFromFacts(f) {
     red.push("流动性随时可撤");
   }
 
-  if (f.mintable && f.owner && f.owner !== ZeroAddress) {
+  if (!f.privilegesKnown) {
+    checks.push({ key: "mint", ok: false, pts: 0, detail: "增发/权限状态未知" });
+  } else if (f.mintable && f.owner && f.owner !== ZeroAddress) {
     checks.push({ key: "mint", ok: false, pts: 0, detail: "可铸造且 owner 未放弃" });
     red.push("可增发");
   } else {
@@ -181,8 +193,10 @@ export function scoreFromFacts(f) {
     });
   }
 
-  const prev = f.deployerTokens ?? 0;
-  if (prev <= 2) {
+  const prev = f.deployerTokens;
+  if (!f.deployerHistoryKnown || !Number.isFinite(prev)) {
+    checks.push({ key: "deployer", ok: false, pts: 0, detail: "创建者历史未知" });
+  } else if (prev <= 2) {
     score += 7;
     checks.push({ key: "deployer", ok: true, pts: 7, detail: `历史发币 ${prev}` });
   } else if (prev <= SETTINGS.maxDeployerTokens) {
@@ -194,38 +208,59 @@ export function scoreFromFacts(f) {
   }
 
   score = Math.max(0, Math.min(100, score) - red.length * 12);
+  checks.push({
+    key: "market",
+    ok: f.marketBound === true,
+    pts: 0,
+    detail: f.marketBound === true ? "市场数据与事件池一致" : "市场数据未绑定事件池",
+  });
+
   const hardFail = red.some((r) => /蜜罐|无法卖出|税率/.test(r));
   let verdict = "watch";
   if (hardFail) verdict = "skip";
-  else if (score >= 75 && red.length === 0 && f.honeypot === false) verdict = "green";
+  else if (
+    score >= 75 &&
+    red.length === 0 &&
+    f.honeypot === false &&
+    f.marketBound === true &&
+    f.securityComplete === true
+  ) verdict = "green";
   else if (score >= SETTINGS.minScore) verdict = "review";
   else verdict = "skip";
 
-  return { score, checks, red, verdict };
+  const paperReady = score >= 75 && red.length === 0 && f.honeypot !== true && f.marketBound === true;
+  return { score, checks, red, verdict, paperReady };
 }
 
 export async function analyze(event) {
   const token = getAddress(event.token);
-  const [meta, owner, flags, dex, bsToken, holders, creatorInfo] = await Promise.all([
-    readTokenMeta(token).catch(() => ({ name: "", symbol: "???", decimals: 18, totalSupply: 0n })),
-    readOwner(token).catch(() => null),
-    bytecodeFlags(token).catch(() => ({})),
-    dexScreener(token).catch(() => null),
-    blockscoutToken(token).catch(() => null),
-    blockscoutHolders(token, 25).catch(() => []),
-    blockscoutCreator(token).catch(() => null),
+  const [metaResult, ownerResult, flagsResult, dexResult, bsTokenResult, holdersResult, creatorResult] = await Promise.all([
+    settled(readTokenMeta(token)),
+    settled(readOwner(token)),
+    settled(bytecodeFlags(token)),
+    settled(dexScreener(token, event.pool ? { pool: event.pool, quote: event.quote } : {})),
+    settled(blockscoutToken(token)),
+    settled(blockscoutHolders(token, 25)),
+    settled(blockscoutCreator(token)),
   ]);
 
-  const createdAt = event.createdAt || dex?.pairCreatedAt || Date.now();
-  const ageMinutes = Math.max(0, (Date.now() - createdAt) / 60000);
+  const meta = metaResult.value || { name: "", symbol: "???", decimals: 18, totalSupply: 0n };
+  const owner = ownerResult.value;
+  const flags = flagsResult.value || {};
+  const dex = dexResult.value;
+  const bsToken = bsTokenResult.value;
+  const holders = holdersResult.value || [];
+  const creatorInfo = creatorResult.value;
 
-  let lpBurnedPct = 0;
-  let lpLocked = false;
+  const createdAt = event.createdAt || dex?.pairCreatedAt || null;
+  const ageMinutes = createdAt ? Math.max(0, (Date.now() - createdAt) / 60000) : null;
+
+  let lpBurnedPct = null;
   let poolInfo = null;
   if (event.venue === "uniswap-v2" && event.pool) {
-    poolInfo = await readV2Pool(event.pool).catch(() => null);
-    lpBurnedPct = poolInfo?.burnedPct || 0;
-    lpLocked = lpBurnedPct >= 90;
+    const poolResult = await settled(readV2Pool(event.pool));
+    poolInfo = poolResult.value;
+    lpBurnedPct = poolInfo?.burnedPct ?? null;
   }
 
   const supply = meta.totalSupply || bsToken?.totalSupply || 0n;
@@ -245,9 +280,15 @@ export async function analyze(event) {
   const top10Pct = supply > 0n && holders.length ? pct(top10, supply) : null;
 
   const creator = creatorInfo?.creator || null;
-  const creatorBal = creator ? holders.find((h) => h.address.toLowerCase() === creator.toLowerCase()) : null;
-  const creatorPct = creator && supply > 0n ? pct(creatorBal?.value || 0n, supply) : 0;
-  const history = creator ? await deployerHistory(creator).catch(() => ({ created: 0 })) : { created: 0 };
+  const creatorBalanceResult = creator
+    ? await settled(new Contract(token, ERC20_ABI, getProvider()).balanceOf(creator))
+    : { ok: false, value: null, error: "creator unavailable" };
+  const creatorKnown = creatorResult.ok && Boolean(creator) && creatorBalanceResult.ok && supply > 0n;
+  const creatorPct = creatorKnown ? pct(creatorBalanceResult.value, supply) : null;
+  const historyResult = creator
+    ? await settled(deployerHistory(creator))
+    : { ok: false, value: null, error: "creator unavailable" };
+  const history = historyResult.value;
 
   const hp = await honeypotCheck({
     token,
@@ -255,9 +296,24 @@ export async function analyze(event) {
     venue: event.venue,
     pool: event.pool,
     holders,
-  }).catch((err) => ({ honeypot: null, reason: err.message }));
+  }).catch((err) => ({ honeypot: null, complete: false, reason: safeErrorMessage(err), buyTaxBps: null, sellTaxBps: null }));
 
   const mkt = event.market || {};
+  const holdersKnown = holdersResult.ok && supply > 0n && holders.length > 0;
+  // Selector scanning is diagnostic only; it cannot prove proxy or non-standard privilege absence.
+  const privilegesKnown = false;
+  const deployerHistoryKnown = Boolean(historyResult.ok && history?.known);
+  const marketBound = dex?.marketBound === true;
+  const securityComplete = Boolean(
+    marketBound &&
+      holdersKnown &&
+      creatorKnown &&
+      privilegesKnown &&
+      deployerHistoryKnown &&
+      lpBurnedPct !== null &&
+      hp.complete === true &&
+      hp.honeypot === false
+  );
   const facts = {
     ageMinutes,
     hasTwitter: Boolean(dex?.twitter),
@@ -271,18 +327,22 @@ export async function analyze(event) {
     liquidityUsd: dex?.liquidityUsd || mkt.liquidityUsd || 0,
     top10Pct,
     holderCount: bsToken?.holders ?? holders.length,
-    creatorDumping: creatorPct > 8 && (dex?.sells5m || 0) > (dex?.buys5m || 0) * 1.5,
+    holdersKnown,
+    creatorKnown,
     creatorPct,
     honeypot: hp.honeypot,
     honeypotReason: hp.reason,
     buyTaxBps: hp.buyTaxBps,
     sellTaxBps: hp.sellTaxBps,
     lpBurnedPct,
-    lpLocked,
-    lpUnknown: event.venue !== "uniswap-v2",
+    lpUnknown: event.venue !== "uniswap-v2" || lpBurnedPct === null,
     mintable: Boolean(flags.mintable),
     owner,
-    deployerTokens: history.created,
+    privilegesKnown,
+    deployerTokens: history?.created ?? null,
+    deployerHistoryKnown,
+    marketBound,
+    securityComplete,
   };
 
   const scored = scoreFromFacts(facts);
@@ -303,6 +363,26 @@ export async function analyze(event) {
     facts,
     lp: poolInfo,
     honeypot: hp,
+    marketBound,
+    securityComplete,
+    tradeReady: securityComplete,
+    path:
+      event.venue === "uniswap-v2" &&
+      String(event.quote).toLowerCase() === ADDR.WETH.toLowerCase() &&
+      marketBound
+        ? [ADDR.WETH, token]
+        : null,
+    errorSources: [
+      ["token metadata", metaResult],
+      ["owner", ownerResult],
+      ["bytecode", flagsResult],
+      ["DexScreener pool", dexResult],
+      ["Blockscout token", bsTokenResult],
+      ["Blockscout holders", holdersResult],
+      ["Blockscout creator", creatorResult],
+      ["creator balance", creatorBalanceResult],
+      ["deployer history", historyResult],
+    ].filter(([, result]) => !result.ok).map(([source, result]) => ({ source, error: result.error })),
     ...scored,
     links: {
       dex: dex?.url || `https://dexscreener.com/robinhood/${token}`,
@@ -312,15 +392,23 @@ export async function analyze(event) {
   };
 }
 
-export async function honeypotCheck({ token, quote, venue, pool, holders = [] }) {
-  const flags = await bytecodeFlags(token);
+export async function honeypotCheck(
+  { token, quote, venue, pool, holders = [] },
+  dependencies = {}
+) {
+  const inspectBytecode = dependencies.bytecodeFlags || bytecodeFlags;
+  const quoteRoundTrip = dependencies.quoteRoundTrip || simulateV2Quotes;
+  const transferFromPool = dependencies.simulateTransferFromPool || simulateTransferFromPool;
+  const transfer = dependencies.simulateTransfer || simulateTransfer;
+  const flags = await inspectBytecode(token);
   const result = {
     honeypot: null,
+    complete: false,
     reason: "",
     buyOk: null,
     sellOk: null,
-    buyTaxBps: 0,
-    sellTaxBps: 0,
+    buyTaxBps: null,
+    sellTaxBps: null,
     flags,
   };
 
@@ -333,8 +421,10 @@ export async function honeypotCheck({ token, quote, venue, pool, holders = [] })
   const quoteAddr = isQuote(quote) && quote !== ADDR.NATIVE && quote !== ADDR.ZERO ? quote : ADDR.WETH;
 
   if (venue === "uniswap-v2") {
-    const sim = await simulateV2Quotes(token, quoteAddr);
-    Object.assign(result, sim);
+    const sim = await quoteRoundTrip(token, quoteAddr);
+    result.buyOk = sim.buyOk ?? null;
+    result.sellOk = sim.sellOk ?? null;
+    result.reason = sim.reason || "";
     if (sim.buyOk === false) {
       result.honeypot = true;
       result.reason = sim.reason || "无法报价买入";
@@ -348,7 +438,7 @@ export async function honeypotCheck({ token, quote, venue, pool, holders = [] })
   }
 
   if (pool) {
-    const fromPool = await simulateTransferFromPool(token, pool);
+    const fromPool = await transferFromPool(token, pool);
     if (fromPool === false) {
       result.honeypot = true;
       result.reason = "从池子转出失败";
@@ -367,7 +457,7 @@ export async function honeypotCheck({ token, quote, venue, pool, holders = [] })
   );
   if (seller && pool) {
     const amt = seller.value / 100n || 1n;
-    const sellXfer = await simulateTransfer(token, seller.address, pool, amt);
+    const sellXfer = await transfer(token, seller.address, pool, amt);
     if (sellXfer.ok === false) {
       result.honeypot = true;
       result.sellOk = false;
@@ -377,22 +467,12 @@ export async function honeypotCheck({ token, quote, venue, pool, holders = [] })
     result.sellOk = true;
   }
 
-  if (result.buyOk && result.sellOk) {
-    result.honeypot = false;
-    result.reason = result.reason || "买卖路径可报价，持仓可转出";
-    return result;
-  }
-
-  if (venue === "uniswap-v2" && result.buyOk && result.sellOk !== false) {
-    result.honeypot = false;
-    result.reason = "V2 买卖均可报价（未拿到持仓做转账复核）";
-    return result;
-  }
-
   if (flags.blacklist || flags.pausable) {
     result.reason = "合约含黑名单/暂停函数，需人工看";
+  } else if (result.buyOk && result.sellOk) {
+    result.reason = "报价/直接转账通过，但缺少完整 Router 买入-授权-卖出模拟";
   } else if (!result.reason) {
-    result.reason = "未完成完整买卖模拟";
+    result.reason = "未完成完整 Router 买入-授权-卖出模拟";
   }
   return result;
 }
@@ -405,8 +485,6 @@ async function simulateV2Quotes(token, quote) {
   const out = {
     buyOk: null,
     sellOk: null,
-    buyTaxBps: 0,
-    sellTaxBps: 0,
     reason: "",
   };
 
@@ -422,7 +500,7 @@ async function simulateV2Quotes(token, quote) {
     out.buyOk = true;
   } catch (err) {
     out.buyOk = false;
-    out.reason = `无法报价买入: ${err.shortMessage || err.message}`;
+    out.reason = `无法报价买入: ${safeErrorMessage(err)}`;
     return out;
   }
 
@@ -435,11 +513,9 @@ async function simulateV2Quotes(token, quote) {
       return out;
     }
     out.sellOk = true;
-    const lost = BUY_ETH > ethBack ? BUY_ETH - ethBack : 0n;
-    out.sellTaxBps = Math.min(10_000, Number((lost * 10000n) / BUY_ETH));
   } catch (err) {
     out.sellOk = false;
-    out.reason = `无法报价卖出: ${err.shortMessage || err.message}`;
+    out.reason = `无法报价卖出: ${safeErrorMessage(err)}`;
   }
 
   return out;
@@ -477,7 +553,7 @@ async function rawCall(tx, state = undefined) {
     await withRetry(() => provider.send("eth_call", payload), 2);
     return { ok: true };
   } catch (err) {
-    const msg = err?.error?.message || err.shortMessage || err.message || String(err);
+    const msg = safeErrorMessage(err?.error || err);
     if (state && /state override|extra param|3 params/i.test(msg)) {
       try {
         await provider.send("eth_call", payload.slice(0, 2));
