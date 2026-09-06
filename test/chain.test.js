@@ -2,11 +2,14 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { Interface } from "ethers";
 import { V4_PM_ABI } from "../src/abis.js";
+import { ADDR } from "../src/config.js";
 import {
   attachBlockTimes,
   findFirstBlockAtOrAfter,
   getLogsChunked,
   parseV4PoolLog,
+  scanOnchain,
+  withRetry,
 } from "../src/chain.js";
 
 describe("findFirstBlockAtOrAfter", () => {
@@ -29,6 +32,20 @@ describe("findFirstBlockAtOrAfter", () => {
       /timestamp.*block/i
     );
   });
+
+  it("retries a transient block lookup", async () => {
+    const attempts = new Map();
+    const block = await findFirstBlockAtOrAfter(1050_000, 10, {
+      getBlock: async (number) => {
+        const count = (attempts.get(number) || 0) + 1;
+        attempts.set(number, count);
+        if (number === 5 && count === 1) throw new Error("temporary RPC failure");
+        return { timestamp: 1000 + number * 10 };
+      },
+    }, (fn) => withRetry(fn, 3, async () => {}));
+    assert.equal(block, 5);
+    assert.equal(attempts.get(5), 2);
+  });
 });
 
 describe("getLogsChunked", () => {
@@ -49,6 +66,65 @@ describe("getLogsChunked", () => {
     });
     assert.equal(logs.length, 4);
   });
+
+  it("uses a 2000-block default chunk", async () => {
+    const ranges = [];
+    await getLogsChunked({
+      address: ADDR.V2_FACTORY,
+      topics: [],
+      fromBlock: 1,
+      toBlock: 2000,
+      provider: {
+        getLogs: async ({ fromBlock, toBlock }) => {
+          ranges.push([fromBlock, toBlock]);
+          return [];
+        },
+      },
+    });
+    assert.deepEqual(ranges, [[1, 2000]]);
+  });
+
+  it("splits a rejected large range without losing blocks", async () => {
+    const logs = await getLogsChunked({
+      address: ADDR.V2_FACTORY,
+      topics: [],
+      fromBlock: 1,
+      toBlock: 2000,
+      provider: {
+        getLogs: async ({ fromBlock, toBlock }) => {
+          if (toBlock - fromBlock + 1 > 1000) throw new Error("range too large");
+          return Array.from({ length: toBlock - fromBlock + 1 }, (_, i) => ({ blockNumber: fromBlock + i }));
+        },
+      },
+      retry: async (fn) => fn(),
+    });
+    assert.equal(logs.length, 2000);
+    assert.equal(new Set(logs.map(({ blockNumber }) => blockNumber)).size, 2000);
+  });
+});
+
+describe("scanOnchain parsing", () => {
+  for (const [venue, address] of [
+    ["uniswap-v2", ADDR.V2_FACTORY],
+    ["uniswap-v3", ADDR.V3_FACTORY],
+    ["uniswap-v4", ADDR.V4_POOL_MANAGER],
+  ]) {
+    it(`fails the range for a malformed ${venue} factory log`, async () => {
+      const malformed = {
+        topics: ["0xdeadbeef"],
+        data: "0x",
+        blockNumber: 123,
+        transactionHash: `0x${"01".repeat(32)}`,
+      };
+      await assert.rejects(
+        () => scanOnchain(100, 123, {
+          getLogs: async ({ address: requested }) => requested === address ? [malformed] : [],
+          attachTimes: async (events) => events,
+        }),
+        new RegExp(`${venue}.*123.*${"01".repeat(4)}`, "i")
+      );
+    });
+  }
 });
 
 describe("V4 pool discovery", () => {
@@ -95,10 +171,12 @@ describe("attachBlockTimes", () => {
     assert.equal(calls, 2);
   });
 
-  it("keeps age unknown when a block timestamp is unavailable", async () => {
-    const result = await attachBlockTimes([{ blockNumber: 10, createdAt: null }], {
-      getBlock: async () => null,
-    });
-    assert.equal(result[0].createdAt, null);
+  it("fails when an event block timestamp is unavailable", async () => {
+    await assert.rejects(
+      () => attachBlockTimes([{ blockNumber: 10, createdAt: null }], {
+        getBlock: async () => null,
+      }, async (fn) => fn()),
+      /timestamp.*block 10/i
+    );
   });
 });

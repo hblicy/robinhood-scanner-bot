@@ -11,14 +11,14 @@ export function getProvider() {
   return httpProvider;
 }
 
-export async function withRetry(fn, tries = 3) {
+export async function withRetry(fn, tries = 3, sleepImpl = sleep) {
   let last;
   for (let i = 0; i < tries; i++) {
     try {
       return await fn();
     } catch (err) {
       last = err;
-      await sleep(400 * (i + 1));
+      if (i < tries - 1) await sleepImpl(400 * (i + 1));
     }
   }
   throw last;
@@ -36,7 +36,12 @@ export async function getBlockNumber() {
   return withRetry(() => getProvider().getBlockNumber());
 }
 
-export async function findFirstBlockAtOrAfter(targetMs, head, provider = getProvider()) {
+export async function findFirstBlockAtOrAfter(
+  targetMs,
+  head,
+  provider = getProvider(),
+  retry = (fn) => withRetry(fn)
+) {
   if (!Number.isFinite(targetMs)) throw new Error("target timestamp must be finite");
   if (!Number.isInteger(head) || head < 0) throw new Error("head must be a non-negative integer");
 
@@ -45,7 +50,7 @@ export async function findFirstBlockAtOrAfter(targetMs, head, provider = getProv
   let first = head;
   while (low <= high) {
     const blockNumber = Math.floor((low + high) / 2);
-    const block = await provider.getBlock(blockNumber);
+    const block = await retry(() => provider.getBlock(blockNumber));
     const timestamp = Number(block?.timestamp);
     if (!Number.isFinite(timestamp)) {
       throw new Error(`cannot read timestamp for block ${blockNumber}`);
@@ -115,15 +120,16 @@ export async function getLogsChunked({
   topics,
   fromBlock,
   toBlock,
-  chunk = 400,
+  chunk = 2000,
   provider = getProvider(),
+  retry = (fn) => withRetry(fn),
 }) {
   const out = [];
   let start = fromBlock;
   while (start <= toBlock) {
     const end = Math.min(start + chunk - 1, toBlock);
     try {
-      const logs = await withRetry(() =>
+      const logs = await retry(() =>
         provider.getLogs({
           address,
           topics,
@@ -135,8 +141,9 @@ export async function getLogsChunked({
     } catch (err) {
       if (chunk > 40) {
         const mid = Math.floor((start + end) / 2);
-        const left = await getLogsChunked({ address, topics, fromBlock: start, toBlock: mid, chunk: Math.floor(chunk / 2), provider });
-        const right = await getLogsChunked({ address, topics, fromBlock: mid + 1, toBlock: end, chunk: Math.floor(chunk / 2), provider });
+        const nextChunk = Math.floor(chunk / 2);
+        const left = await getLogsChunked({ address, topics, fromBlock: start, toBlock: mid, chunk: nextChunk, provider, retry });
+        const right = await getLogsChunked({ address, topics, fromBlock: mid + 1, toBlock: end, chunk: nextChunk, provider, retry });
         out.push(...left, ...right);
       } else {
         throw err;
@@ -147,23 +154,38 @@ export async function getLogsChunked({
   return out;
 }
 
-export async function scanOnchain(fromBlock, toBlock) {
+function parseFactoryLog(log, venue, parser) {
+  try {
+    return parser(log);
+  } catch (cause) {
+    throw new Error(
+      `${venue} log parse failed at block ${log.blockNumber ?? "unknown"} tx ${log.transactionHash || "unknown"}`,
+      { cause }
+    );
+  }
+}
+
+export async function scanOnchain(
+  fromBlock,
+  toBlock,
+  { getLogs = getLogsChunked, attachTimes = attachBlockTimes } = {}
+) {
   const events = [];
 
   const [v2logs, v3logs, v4logs] = await Promise.all([
-    getLogsChunked({
+    getLogs({
       address: ADDR.V2_FACTORY,
       topics: [TOPICS.pairCreated],
       fromBlock,
       toBlock,
     }),
-    getLogsChunked({
+    getLogs({
       address: ADDR.V3_FACTORY,
       topics: [TOPICS.poolCreated],
       fromBlock,
       toBlock,
     }),
-    getLogsChunked({
+    getLogs({
       address: ADDR.V4_POOL_MANAGER,
       topics: [TOPICS.initialize],
       fromBlock,
@@ -172,67 +194,63 @@ export async function scanOnchain(fromBlock, toBlock) {
   ]);
 
   for (const log of v2logs) {
-    try {
+    const event = parseFactoryLog(log, "uniswap-v2", () => {
       const parsed = v2Iface.parseLog(log);
       const picked = pickToken(parsed.args.token0, parsed.args.token1);
-      if (!picked) continue;
-      events.push(
-        baseEvent({
-          source: "onchain",
-          venue: "uniswap-v2",
-          pool: parsed.args.pair,
-          token: picked.token,
-          quote: picked.quote,
-          blockNumber: Number(log.blockNumber),
-          txHash: log.transactionHash,
-        })
-      );
-    } catch {
-      /* ignore undecodable */
-    }
+      if (!picked) return null;
+      return baseEvent({
+        source: "onchain",
+        venue: "uniswap-v2",
+        pool: parsed.args.pair,
+        token: picked.token,
+        quote: picked.quote,
+        blockNumber: Number(log.blockNumber),
+        txHash: log.transactionHash,
+      });
+    });
+    if (event) events.push(event);
   }
 
   for (const log of v3logs) {
-    try {
+    const event = parseFactoryLog(log, "uniswap-v3", () => {
       const parsed = v3Iface.parseLog(log);
       const picked = pickToken(parsed.args.token0, parsed.args.token1);
-      if (!picked) continue;
-      events.push(
-        baseEvent({
-          source: "onchain",
-          venue: "uniswap-v3",
-          pool: parsed.args.pool,
-          token: picked.token,
-          quote: picked.quote,
-          fee: Number(parsed.args.fee),
-          blockNumber: Number(log.blockNumber),
-          txHash: log.transactionHash,
-        })
-      );
-    } catch {
-      /* ignore */
-    }
+      if (!picked) return null;
+      return baseEvent({
+        source: "onchain",
+        venue: "uniswap-v3",
+        pool: parsed.args.pool,
+        token: picked.token,
+        quote: picked.quote,
+        fee: Number(parsed.args.fee),
+        blockNumber: Number(log.blockNumber),
+        txHash: log.transactionHash,
+      });
+    });
+    if (event) events.push(event);
   }
 
   for (const log of v4logs) {
-    try {
-      const event = parseV4PoolLog(log);
-      if (event) events.push(event);
-    } catch {
-      /* ignore */
-    }
+    const event = parseFactoryLog(log, "uniswap-v4", () => parseV4PoolLog(log));
+    if (event) events.push(event);
   }
 
-  return attachBlockTimes(events);
+  return attachTimes(events);
 }
 
-export async function attachBlockTimes(events, provider = getProvider()) {
+export async function attachBlockTimes(
+  events,
+  provider = getProvider(),
+  retry = (fn) => withRetry(fn)
+) {
   const blockNumbers = [...new Set(events.map((event) => event.blockNumber).filter(Number.isInteger))];
   const blocks = new Map();
   await Promise.all(
     blockNumbers.map(async (blockNumber) => {
-      const block = await provider.getBlock(blockNumber).catch(() => null);
-      blocks.set(blockNumber, block?.timestamp ? Number(block.timestamp) * 1000 : null);
+      const block = await retry(() => provider.getBlock(blockNumber));
+      const timestamp = Number(block?.timestamp);
+      if (!Number.isFinite(timestamp)) throw new Error(`cannot read timestamp for block ${blockNumber}`);
+      blocks.set(blockNumber, timestamp * 1000);
     })
   );
   return events.map((event) => ({
