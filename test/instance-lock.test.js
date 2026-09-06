@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { acquireInstanceLock, acquireLockGuard } from "../src/instance-lock.js";
+import { acquireInstanceLock } from "../src/instance-lock.js";
 
 const dirs = [];
 
@@ -18,46 +18,45 @@ afterEach(() => {
 });
 
 describe("watch instance lock", () => {
-  it("allows only one live owner and releases its own lock", () => {
+  it("allows only one live owner and releases its own lock", async () => {
     const dir = tempDir();
-    const release = acquireInstanceLock(dir, { pid: 123, isPidAlive: () => true, now: () => 1 });
-    assert.throws(
-      () => acquireInstanceLock(dir, { pid: 456, isPidAlive: () => true, now: () => 2 }),
-      /already running.*123/i
+    const options = { lockPort: 38761, isPidAlive: () => false };
+    const release = await acquireInstanceLock(dir, { ...options, pid: 123, now: () => 1 });
+    await assert.rejects(
+      () => acquireInstanceLock(dir, { ...options, pid: 456, now: () => 2 }),
+      /already running|lock port.*in use/i
     );
-    release();
-    const releaseAgain = acquireInstanceLock(dir, { pid: 456, isPidAlive: () => true, now: () => 3 });
-    releaseAgain();
+    await release();
+    const releaseAgain = await acquireInstanceLock(dir, { ...options, pid: 456, now: () => 3 });
+    await releaseAgain();
   });
 
-  it("reclaims a valid lock whose process is gone", () => {
+  it("reclaims a valid lock whose process is gone", async () => {
     const dir = tempDir();
     fs.writeFileSync(path.join(dir, "watch.lock"), JSON.stringify({ pid: 123, createdAt: 1 }));
-    const release = acquireInstanceLock(dir, { pid: 456, isPidAlive: () => false, now: () => 2 });
+    const release = await acquireInstanceLock(dir, {
+      pid: 456,
+      lockPort: 38762,
+      isPidAlive: () => false,
+      now: () => 2,
+    });
     const lock = JSON.parse(fs.readFileSync(path.join(dir, "watch.lock"), "utf8"));
     assert.equal(lock.pid, 456);
-    release();
+    await release();
   });
 
-  it("does not overwrite an invalid lock file", () => {
+  it("does not overwrite an invalid lock file", async () => {
     const dir = tempDir();
     fs.writeFileSync(path.join(dir, "watch.lock"), "not-json");
-    assert.throws(
-      () => acquireInstanceLock(dir, { pid: 456, isPidAlive: () => false, now: () => 2 }),
+    await assert.rejects(
+      () => acquireInstanceLock(dir, {
+        pid: 456,
+        lockPort: 38763,
+        isPidAlive: () => false,
+        now: () => 2,
+      }),
       /cannot verify existing watch lock/i
     );
     assert.equal(fs.readFileSync(path.join(dir, "watch.lock"), "utf8"), "not-json");
-  });
-
-  it("serializes stale-lock recovery so another watch cannot race it", () => {
-    const dir = tempDir();
-    const releaseGuard = acquireLockGuard(dir, { pid: 123, now: () => 1 });
-    assert.throws(
-      () => acquireInstanceLock(dir, { pid: 456, isPidAlive: () => false, now: () => 2 }),
-      /lock acquisition already in progress.*123/i
-    );
-    releaseGuard();
-    const release = acquireInstanceLock(dir, { pid: 456, isPidAlive: () => false, now: () => 3 });
-    release();
   });
 });

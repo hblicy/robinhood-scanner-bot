@@ -234,7 +234,7 @@ export async function runReadOnlyCandidates(events, dependencies) {
 }
 
 async function watch() {
-  const releaseLock = acquireInstanceLock(DATA_DIR);
+  const releaseLock = await acquireInstanceLock(DATA_DIR);
   const releaseOnExit = () => releaseLock();
   process.once("exit", releaseOnExit);
   try {
@@ -333,7 +333,7 @@ async function watch() {
     await Promise.all(loops);
   } finally {
     process.removeListener("exit", releaseOnExit);
-    releaseLock();
+    await releaseLock();
   }
 }
 

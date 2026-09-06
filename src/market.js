@@ -59,7 +59,12 @@ export async function geckoNewPools(
       const picked = resolvePair(tokenRaw, quoteRaw);
       if (!picked) continue;
       const { token, quote } = picked;
-      if (!isEthAddress(a.address)) {
+      const venue = rel.dex?.data?.id || "unknown";
+      const poolAddress = isEthAddress(a.address) ? getAddress(a.address) : null;
+      const poolId = /v4/i.test(venue) && /^0x[0-9a-fA-F]{64}$/.test(String(a.address || ""))
+        ? String(a.address).toLowerCase()
+        : null;
+      if (!poolAddress && !poolId) {
         throw new Error(`Gecko pool address invalid on page ${page} row ${rowIndex}`);
       }
       const createdAt = Date.parse(a.pool_created_at);
@@ -71,8 +76,9 @@ export async function geckoNewPools(
       const tx = a.transactions?.m5 || a.transactions?.h1 || {};
       events.push({
         source: "gecko",
-        venue: rel.dex?.data?.id || "unknown",
-        pool: getAddress(a.address),
+        venue,
+        pool: poolAddress,
+        poolId,
         token: getAddress(token),
         quote,
         createdAt,

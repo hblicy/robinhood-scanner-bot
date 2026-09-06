@@ -153,4 +153,19 @@ describe("geckoNewPools", () => {
       /pool address.*page 1.*row 0/i
     );
   });
+
+  it("keeps a V4 pool id separate from the address-valued pool field", async () => {
+    const row = geckoRow(new Date(NOW).toISOString());
+    const poolId = `0x${"ab".repeat(32)}`;
+    row.attributes.address = poolId;
+    row.relationships.dex.data.id = "uniswap-v4-robinhood";
+    row.relationships.quote_token.data.id = "robinhood_0x0000000000000000000000000000000000000000";
+    const events = await geckoNewPools(1, {
+      fetchImpl: async () => jsonResponse({ data: [row] }),
+      now: () => NOW,
+      maxAgeMinutes: 30,
+    });
+    assert.equal(events[0].pool, null);
+    assert.equal(events[0].poolId, poolId);
+  });
 });
