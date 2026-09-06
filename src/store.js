@@ -2,8 +2,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { DATA_DIR, SETTINGS } from "./config.js";
 
+const STATE_VERSION = 3;
+
 function readJson(dataDir, file, fallback) {
-  fs.mkdirSync(dataDir, { recursive: true });
   const filePath = path.join(dataDir, file);
   if (!fs.existsSync(filePath)) return fallback;
   try {
@@ -13,9 +14,9 @@ function readJson(dataDir, file, fallback) {
   }
 }
 
-function writeJson(dataDir, file, value) {
+function atomicWriteState(dataDir, value) {
   fs.mkdirSync(dataDir, { recursive: true });
-  const filePath = path.join(dataDir, file);
+  const filePath = path.join(dataDir, "state.json");
   const tmp = `${filePath}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(value, null, 2));
   fs.renameSync(tmp, filePath);
@@ -48,21 +49,43 @@ export function createStore({
   now = Date.now,
   maxSeenEntries = 10_000,
   seenTtlMs = 86_400_000,
+  writeState = atomicWriteState,
 }) {
-  const seen = readJson(dataDir, "seen.json", {});
-  const rawPositions = readJson(dataDir, "positions.json", {});
-  const positions = migratePositions(rawPositions);
-  const trades = readJson(dataDir, "trades.json", []);
-
-  if (!seen || typeof seen !== "object" || Array.isArray(seen)) {
-    throw new Error("seen.json must contain an object");
+  let state;
+  const stateFile = path.join(dataDir, "state.json");
+  if (fs.existsSync(stateFile)) {
+    const loaded = readJson(dataDir, "state.json", null);
+    if (!loaded || loaded.schemaVersion !== STATE_VERSION) {
+      throw new Error(`state.json must use schemaVersion ${STATE_VERSION}`);
+    }
+    if (!loaded.seen || typeof loaded.seen !== "object" || Array.isArray(loaded.seen)) {
+      throw new Error("state.json seen must contain an object");
+    }
+    if (!Array.isArray(loaded.trades)) throw new Error("state.json trades must contain an array");
+    state = {
+      schemaVersion: STATE_VERSION,
+      seen: loaded.seen,
+      positions: migratePositions(loaded.positions),
+      trades: loaded.trades,
+    };
+  } else {
+    const seen = readJson(dataDir, "seen.json", {});
+    const rawPositions = readJson(dataDir, "positions.json", {});
+    const trades = readJson(dataDir, "trades.json", []);
+    if (!seen || typeof seen !== "object" || Array.isArray(seen)) {
+      throw new Error("seen.json must contain an object");
+    }
+    if (!Array.isArray(trades)) throw new Error("trades.json must contain an array");
+    state = {
+      schemaVersion: STATE_VERSION,
+      seen,
+      positions: migratePositions(rawPositions),
+      trades,
+    };
+    writeState(dataDir, state);
   }
-  if (!Array.isArray(trades)) throw new Error("trades.json must contain an array");
-  if (Object.values(rawPositions).some((position) => position?.schemaVersion !== 2)) {
-    writeJson(dataDir, "positions.json", positions);
-  }
 
-  function pruneSeen() {
+  function pruneSeen(seen) {
     const cutoff = now() - seenTtlMs;
     for (const [key, value] of Object.entries(seen)) {
       if (!value || !Number.isFinite(value.updatedAt) || value.updatedAt < cutoff) delete seen[key];
@@ -73,47 +96,76 @@ export function createStore({
     for (const [key] of newest.slice(maxSeenEntries)) delete seen[key];
   }
 
-  pruneSeen();
+  function commit(mutator) {
+    const draft = structuredClone(state);
+    const result = mutator(draft);
+    writeState(dataDir, draft);
+    state = draft;
+    return result == null ? result : structuredClone(result);
+  }
 
   return {
     hasSeen(token) {
-      pruneSeen();
-      return Boolean(seen[String(token).toLowerCase()]);
+      const item = state.seen[String(token).toLowerCase()];
+      return Boolean(item && Number.isFinite(item.updatedAt) && item.updatedAt >= now() - seenTtlMs);
     },
 
     markSeen(token, payload) {
       const key = String(token).toLowerCase();
-      seen[key] = { ...(seen[key] || {}), ...payload, token: key, updatedAt: now() };
-      pruneSeen();
-      writeJson(dataDir, "seen.json", seen);
-      return seen[key] || null;
+      return commit((draft) => {
+        draft.seen[key] = { ...(draft.seen[key] || {}), ...payload, token: key, updatedAt: now() };
+        pruneSeen(draft.seen);
+        return draft.seen[key] || null;
+      });
     },
 
     getSeen(token) {
-      pruneSeen();
-      return seen[String(token).toLowerCase()] || null;
+      const key = String(token).toLowerCase();
+      return this.hasSeen(key) ? structuredClone(state.seen[key]) : null;
     },
 
     listPositions() {
-      return Object.values(positions);
+      return structuredClone(Object.values(state.positions));
+    },
+
+    listTrades() {
+      return structuredClone(state.trades);
     },
 
     upsertPosition(position) {
-      positions[String(position.token).toLowerCase()] = position;
-      writeJson(dataDir, "positions.json", positions);
-      return position;
+      return commit((draft) => {
+        draft.positions[String(position.token).toLowerCase()] = structuredClone(position);
+        return position;
+      });
     },
 
     removePosition(token) {
-      delete positions[String(token).toLowerCase()];
-      writeJson(dataDir, "positions.json", positions);
+      return commit((draft) => {
+        delete draft.positions[String(token).toLowerCase()];
+        return null;
+      });
     },
 
     addTrade(trade) {
-      const saved = { ...trade, at: now() };
-      trades.push(saved);
-      writeJson(dataDir, "trades.json", trades);
-      return saved;
+      return commit((draft) => {
+        const saved = { ...trade, at: now() };
+        draft.trades.push(saved);
+        return saved;
+      });
+    },
+
+    commitPositionTrade(position, trade, { removeToken = null } = {}) {
+      if (!position && !removeToken) throw new Error("position or removeToken is required");
+      if (!trade || typeof trade !== "object") throw new Error("trade is required");
+      return commit((draft) => {
+        if (removeToken) delete draft.positions[String(removeToken).toLowerCase()];
+        if (position) {
+          draft.positions[String(position.token).toLowerCase()] = structuredClone(position);
+        }
+        const saved = { ...trade, at: now() };
+        draft.trades.push(saved);
+        return { position, trade: saved };
+      });
     },
   };
 }
@@ -135,6 +187,8 @@ export const hasSeen = (...args) => getDefaultStore().hasSeen(...args);
 export const markSeen = (...args) => getDefaultStore().markSeen(...args);
 export const getSeen = (...args) => getDefaultStore().getSeen(...args);
 export const listPositions = (...args) => getDefaultStore().listPositions(...args);
+export const listTrades = (...args) => getDefaultStore().listTrades(...args);
 export const upsertPosition = (...args) => getDefaultStore().upsertPosition(...args);
 export const removePosition = (...args) => getDefaultStore().removePosition(...args);
 export const addTrade = (...args) => getDefaultStore().addTrade(...args);
+export const commitPositionTrade = (...args) => getDefaultStore().commitPositionTrade(...args);
