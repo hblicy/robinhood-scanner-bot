@@ -1,26 +1,21 @@
-# Robinhood Chain 扫链机器人
+# Robinhood Chain 扫链推送机器人
 
-把 [加密狗这篇 Robinhood Chain Memecoin 教程](https://x.com/jiamigou/status/2075057589457735949) 里的人工扫链清单，做成可跑的监听 + Telegram 报警机器人。
+把 Robinhood Chain 新池发现、风险分析、评分和 Telegram 告警整合成一个只读机器人。
 
-默认 **只扫链、只报警，不自动买入**。这和原文建议一致：先熟悉工具 → 监听 + Telegram → 熟练后再考虑把规则代码化。
+本版本只有扫描与推送功能：不读取私钥，不创建钱包，不签名、授权或广播交易，也不维护模拟仓位。Memecoin 风险极高，本工具不是投资建议。
 
-> 新链早期 99% 的 Memecoin 会归零。这不是投资建议。私钥只放专用小钱包。
+## 能做什么
 
-## 原文对应关系
-
-| 教程步骤 | 机器人怎么做 |
+| 检查项 | 实现方式 |
 | --- | --- |
-| DexScreener 新交易对 + NOXA / 新池 | 链上监听 Uniswap V2 `PairCreated`、V3 `PoolCreated`、V4 `Initialize`；GeckoTerminal `new_pools` 覆盖 Pons 等发射台 |
-| 年龄 &lt; 30 分钟 | `MAX_AGE_MINUTES` |
-| 社交 / 叙事（Robinhood、GME、猫狗…） | DexScreener 社交链接 + 名称关键词 |
-| 交易量上升、买入主导、低市值 | Gecko / DexScreener 5 分钟买卖与成交 |
-| 浏览器看前 10 持仓、创建者有没有狂卖 | Blockscout holders + 创建者余额 |
-| GMGN 聪明钱 / 地毯 | 报告里带 GMGN 链接，需人工点开 |
-| 蜜罐 / 高税 | V2 报价和转账只作诊断；没有可信完整 Router 模拟时保持“未完成”并禁止实盘 |
-| 流动性可随时移除 | 只检查 V2 LP 销毁比例，不声称第三方锁仓 |
-| 创建者是不是串子 | 创建者历史合约数量 |
-| 控制单笔金额 | `BUY_AMOUNT_ETH` / `MAX_BUY_ETH` 是固定 ETH 额度，不代表钱包净值比例 |
-| 2x 卖 30%、5x 卖 30%、10x 清仓；跌 50% 止损 | `paper` / `live` 持仓轮询 |
+| 新池发现 | 链上监听 Uniswap V2 `PairCreated`、V3 `PoolCreated`、V4 `Initialize`，并读取 GeckoTerminal `new_pools` |
+| 年龄与市场数据 | 按 `MAX_AGE_MINUTES` 过滤，读取成交、买卖笔数、流动性和市值 |
+| 社交与叙事 | 读取 DexScreener 社交链接并匹配名称关键词 |
+| 持仓与创建者 | 读取 Blockscout holders、创建者余额和历史合约数量 |
+| 蜜罐与税率线索 | 通过只读 RPC 调用检查 V2 双向报价和代币转账行为 |
+| 流动性风险 | 检查 V2 LP 销毁比例；未知信息明确标为未完成 |
+
+分析结论是启发式筛选，不等于安全证明。缺失的市场绑定、持仓、权限或安全数据不会作为安全加分。
 
 ## 快速开始
 
@@ -30,78 +25,79 @@ npm install
 copy .env.example .env
 ```
 
-编辑 `.env`：至少填 Telegram（不填也能在终端看报警）。
+Telegram 可选；不配置时报告只打印到终端。
 
 ```bash
-# 查一枚已有代币（把 CA 换掉）
-npm run check -- 0x你的合约
-
-# 扫最近新池，跑一轮就退出；不读写 data/、不发 Telegram、不交易
-npm run scan
-
-# 持续监听 + Telegram（推荐先用这个）
+# 持续监听、终端输出，并在已配置时发送 Telegram
 npm run watch
 
-# 监听 + 规则演示（不发真实交易，也不是收益回测）
-npm run paper
+# 一次性扫描后退出；不写 data/，不发送 Telegram
+npm run scan
+
+# 只读分析指定代币
+npm run check -- 0x你的合约地址
 ```
 
-### Telegram
+只有 `watch`、`scan`、`check` 三个命令。`paper` 和 `live` 已移除，传入时会在连接 RPC、读取状态或发送通知前直接报错退出。
 
-1. 找 [@BotFather](https://t.me/BotFather) 创建机器人，拿到 token。
-2. 把机器人拉进你的频道/群，或先私聊它发一句 `/start`。
-3. 用 `https://api.telegram.org/bot<token>/getUpdates` 查 `chat.id`。
-4. 写入 `TELEGRAM_BOT_TOKEN` 和 `TELEGRAM_CHAT_ID`。
+## Telegram
 
-## 配置要点
+1. 找 [@BotFather](https://t.me/BotFather) 创建机器人并取得 token。
+2. 把机器人加入频道或群，或先私聊发送 `/start`。
+3. 通过 Telegram Bot API 的 `getUpdates` 方法查询 `chat.id`。
+4. 把值写入本地 `.env` 的 `TELEGRAM_BOT_TOKEN` 和 `TELEGRAM_CHAT_ID`。
 
-```
-MODE=watch                 # watch | paper | live
+不要提交 `.env`，也不要把 token 粘贴到日志或问题报告中。
+
+## 主要配置
+
+```dotenv
+RPC_URL=https://rpc.mainnet.chain.robinhood.com
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_CHAT_ID=
+
 MAX_AGE_MINUTES=30
 MIN_LIQUIDITY_USD=1500
 MAX_MCAP_USD=1500000
 MIN_SCORE=55
-ENABLE_LIVE_TRADING=false  # 永远先保持 false
+
+POLL_MS=2500
+GECKO_POLL_MS=15000
+ONCHAIN_SCAN=true
+GECKO_SCAN=true
+MAX_QUEUE_SIZE=500
+MAX_SEEN_ENTRIES=10000
+SEEN_TTL_MS=86400000
 ```
 
-真实交易只允许显式执行 `node src/index.js live`，并且必须 **同时** 满足：`ENABLE_LIVE_TRADING=true`、`PRIVATE_KEY` 已填、报告为 `green`、DexScreener 数据精确绑定事件池、报价资产为 WETH、完整安全检查通过。`npm run watch` 和 `npm run scan` 不会因为 `.env` 中的 `MODE=live` 而发交易。
+数值配置不合法时程序会明确报错。公共 RPC 可以用于试跑；长期监听建议使用稳定的专用 RPC。
 
-当前版本没有可证明可靠的通用状态化 Router「买入 → 授权 → 卖出」模拟器，因此正向蜜罐结果保持“未完成”，`tradeReady` 不会成立，真实买入会被安全门拒绝。这是有意的 fail-closed 行为；接入支持完整 fork/state override 的验证器并增加回归测试前，不应取消该限制。
+## 扫描恢复与本地状态
 
-公共 RPC `https://rpc.mainnet.chain.robinhood.com` 能跑，但 24/7 监听建议换成 Alchemy / QuickNode。链出块大约 100ms，日志范围不要开太大。
+`watch` 会写入 `data/state.json`，仅维护：
 
-## 分数怎么打
+- 已处理候选 `seen`，用于去重；
+- `cursors.onchain`，表示最后一个全部候选均处理成功的区块；
+- 旧版本留下的 `positions`、`trades` 历史字段，原样保留但不再读取、轮询或修改其业务内容。
 
-满分 100，大约按教程清单加权：
+首次运行按区块时间二分定位年龄窗口起点。已有游标时，从“已保存游标”和“当前年龄窗口起点”中较新的位置继续。某一区间只要有候选分析或 Telegram 推送失败，就不会推进游标；下一轮会重扫该区间，成功候选由 `seen` 去重，失败候选会重试。
 
-- 年龄、社交、叙事词
-- 5 分钟买盘 / 成交
-- 低市值 + 流动性相对市值
-- 前 10 持仓、创建者持仓、发币历史
-- 蜜罐诊断、LP 销毁比例、是否可增发
+`scan` 和 `check` 不创建或修改 `data/`，也不发送 Telegram。
 
-缺失的创建者、历史、权限、持仓或市场绑定数据不会再作为“安全”加分。`green` 还要求所有安全事实完整；当前完整买卖模拟不可用时最多进入人工复核。已确认的蜜罐负面证据直接 `skip`。
+## 明确不做
 
-候选队列有硬上限，但链上结果会在队列满时先处理再继续入队，不会因容量截断。持续模式的 seen、仓位和交易流水统一原子写入 `data/state.json`；seen 按 `SEEN_TTL_MS` 过期并最多保留 `MAX_SEEN_ENTRIES` 条。首次非只读运行会把旧 `seen.json`、`positions.json`、`trades.json` 迁移到 v3 状态，旧文件保留；旧格式仓位会进入 `needs_review`，不会自动卖出。
+- 不构造、签名、授权或广播链上交易；
+- 不提供模拟买卖、自动买入、止盈止损或仓位管理；
+- 不连接网页钱包，不索取助记词或私钥；
+- 不保证准确率或收益。
 
-实盘签名交易会在广播前以 pending 状态落盘。进程异常退出后只会重播完全相同的已签名交易；若 nonce 已被其他交易占用、旧 pending 缺少重播字段，或指定 receipt 无法证明实际 token 转移，仓位会转为 `needs_review`，不会猜测成交或签发替代交易。
+## 网络参数
 
-`POLL_MS`、`LOOKBACK_BLOCKS`、`GECKO_POLL_MS`、`POSITION_POLL_MS`、`GAS_LIMIT` 必须是正整数；`BUY_AMOUNT_ETH` 和 `MAX_BUY_ETH` 必须是可解析且大于零的 ETH 十进制数量。Telegram 已配置时发送失败最多重试三次，全部失败不会提前把候选标记为已通知。
-
-## 明确不会做的事
-
-- 不夹子、不抢跑、不改 mempool
-- 不连钱包网页、不向你要助记词
-- 不保证赚钱；规则是启发式，会被针对性绕过
-- `paper` 只演示触发规则，不模拟滑点、手续费或真实成交，不能当作回测收益
-
-## 网络参数（Robinhood Chain）
-
-| | |
+| 项目 | 值 |
 | --- | --- |
 | Chain ID | 4663 |
-| RPC | https://rpc.mainnet.chain.robinhood.com |
-| 浏览器 | https://robinhoodchain.blockscout.com |
+| RPC | `https://rpc.mainnet.chain.robinhood.com` |
+| 浏览器 | `https://robinhoodchain.blockscout.com` |
 | WETH | `0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73` |
 | Uniswap V2 Factory | `0x8bcEaA40B9AcdfAedF85AdF4FF01F5Ad6517937f` |
 | Uniswap V3 Factory | `0x1f7d7550B1b028f7571E69A784071F0205FD2EfA` |

@@ -364,13 +364,6 @@ export async function analyze(event) {
     honeypot: hp,
     marketBound,
     securityComplete,
-    tradeReady: securityComplete,
-    path:
-      event.venue === "uniswap-v2" &&
-      String(event.quote).toLowerCase() === ADDR.WETH.toLowerCase() &&
-      marketBound
-        ? [ADDR.WETH, token]
-        : null,
     errorSources: [
       ["token metadata", metaResult],
       ["owner", ownerResult],

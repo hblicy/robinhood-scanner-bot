@@ -1,5 +1,3 @@
-import { parseEther } from "ethers";
-
 export function sanitizeRpcUrl(value) {
   try {
     const url = new URL(value);
@@ -12,14 +10,7 @@ export function sanitizeRpcUrl(value) {
 
 export function safeErrorMessage(error) {
   const message = error?.shortMessage || error?.message || String(error);
-  return String(message).replace(/https?:\/\/[^\s"'<>)}]+/gi, (url) => sanitizeRpcUrl(url));
-}
-
-export function validateBps(name, value) {
-  if (!Number.isInteger(value) || value < 0 || value >= 10_000) {
-    throw new Error(`${name} must be an integer in [0, 10000)`);
-  }
-  return value;
+  return String(message).replace(/https?:\/\/\S+/gi, "[redacted URL]");
 }
 
 export function validatePositiveInteger(name, value) {
@@ -34,36 +25,4 @@ export function validatePositiveNumber(name, value) {
     throw new Error(`${name} must be a positive number`);
   }
   return value;
-}
-
-export function validatePositiveEth(name, value) {
-  let parsed;
-  try {
-    parsed = parseEther(String(value));
-  } catch (cause) {
-    throw new Error(`${name} must be a positive ETH amount`, { cause });
-  }
-  if (parsed <= 0n) throw new Error(`${name} must be a positive ETH amount`);
-  return String(value);
-}
-
-export function minOutFromQuote(quote, slippageBps) {
-  validateBps("SLIPPAGE_BPS", slippageBps);
-  const amount = BigInt(quote);
-  if (amount <= 0n) throw new Error("quote output must be positive");
-  const minOut = (amount * BigInt(10_000 - slippageBps)) / 10_000n;
-  if (minOut <= 0n) throw new Error("minimum output must be positive");
-  return minOut;
-}
-
-export function plannedExitAmount(position, sellPct) {
-  const pctBps = Math.trunc(Number(sellPct) * 100);
-  if (!Number.isInteger(pctBps) || pctBps <= 0 || pctBps > 10_000) {
-    throw new Error("SELL_PCT must be in (0, 100]");
-  }
-  const initial = BigInt(position.initialTokenAmount);
-  const remaining = BigInt(position.remainingTokenAmount);
-  if (sellPct >= 100) return remaining;
-  const planned = (initial * BigInt(pctBps)) / 10_000n;
-  return planned > remaining ? remaining : planned;
 }

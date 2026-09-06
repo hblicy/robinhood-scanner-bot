@@ -34,6 +34,10 @@ describe("push-only command surface", () => {
       /exactInputSingle/,
       /\.approve\(/,
       /paperReady/,
+      /tradeReady/,
+      /minOutFromQuote/,
+      /plannedExitAmount/,
+      /validatePositiveEth/,
     ];
     for (const pattern of forbidden) {
       assert.doesNotMatch(`${source}\n${example}`, pattern);
