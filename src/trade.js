@@ -1,14 +1,32 @@
-import { Contract, Wallet, formatEther, keccak256, parseEther } from "ethers";
+import { Contract, Interface, Wallet, formatEther, keccak256, parseEther } from "ethers";
 import { ADDR, SETTINGS, liveTradingAllowed } from "./config.js";
 import { V2_FACTORY_ABI, V2_ROUTER_ABI, ERC20_ABI } from "./abis.js";
 import { getProvider } from "./chain.js";
-import { addTrade, listPositions, removePosition, upsertPosition } from "./store.js";
+import { addTrade, commitPositionTrade, listPositions, removePosition, upsertPosition } from "./store.js";
 import { sendTelegram } from "./notify.js";
 import { dexScreener } from "./market.js";
 import { minOutFromQuote, plannedExitAmount, safeErrorMessage } from "./safety.js";
 
 function sameAddress(a, b) {
   return Boolean(a && b) && String(a).toLowerCase() === String(b).toLowerCase();
+}
+
+const transferIface = new Interface(["event Transfer(address indexed from,address indexed to,uint256 value)"]);
+
+export function netTransferAmount(receipt, token, wallet) {
+  let net = 0n;
+  for (const log of receipt?.logs || []) {
+    if (!sameAddress(log.address, token)) continue;
+    try {
+      const parsed = transferIface.parseLog(log);
+      if (!parsed) continue;
+      if (sameAddress(parsed.args.to, wallet)) net += BigInt(parsed.args.value);
+      if (sameAddress(parsed.args.from, wallet)) net -= BigInt(parsed.args.value);
+    } catch {
+      // A token receipt can contain events other than Transfer.
+    }
+  }
+  return net;
 }
 
 function buyWei() {
@@ -40,6 +58,7 @@ function defaultLiveDependencies(tokenAddress) {
     upsertPosition,
     removePosition,
     addTrade,
+    commitPositionTrade,
     notify: sendTelegram,
   };
 }
@@ -53,6 +72,7 @@ function defaultReconcileDependencies(position) {
     upsertPosition,
     removePosition,
     addTrade,
+    commitPositionTrade,
   };
 }
 
@@ -62,6 +82,8 @@ async function prepareSignedCall(wallet, provider, method, args) {
   const signed = await wallet.signTransaction(populated);
   return {
     hash: keccak256(signed),
+    rawTx: signed,
+    nonce: Number(populated.nonce),
     broadcast: () => provider.broadcastTransaction(signed),
   };
 }
@@ -132,6 +154,9 @@ export async function executeLiveBuy(report, supplied = null) {
     deadline,
     { value: amountIn, gasLimit: deps.gasLimit }
   );
+  if (!prepared.hash || !prepared.rawTx || !Number.isInteger(prepared.nonce)) {
+    throw new Error("prepared buy is missing durable transaction fields");
+  }
   let pending = {
     schemaVersion: 2,
     state: "buy_pending",
@@ -149,16 +174,22 @@ export async function executeLiveBuy(report, supplied = null) {
     tp2Done: false,
     openedAt: deps.now(),
     wallet: deps.wallet.address,
-    pending: { balanceBefore: balanceBefore.toString(), minOut: minOut.toString(), txHash: prepared.hash },
+    pending: {
+      balanceBefore: balanceBefore.toString(),
+      minOut: minOut.toString(),
+      txHash: prepared.hash,
+      rawTx: prepared.rawTx,
+      nonce: prepared.nonce,
+      preparedAt: deps.now(),
+    },
   };
   deps.upsertPosition(pending);
 
   try {
     const tx = await prepared.broadcast();
     const receipt = requireReceipt(await tx.wait(), "buy");
-    const balanceAfter = BigInt(await deps.token.balanceOf(deps.wallet.address));
-    const acquired = balanceAfter - balanceBefore;
-    if (acquired <= 0n) throw new Error("buy confirmed without a positive token balance delta");
+    const acquired = netTransferAmount(receipt, report.token, deps.wallet.address);
+    if (acquired <= 0n) throw new Error("buy confirmed without a positive receipt transfer");
     const position = {
       ...pending,
       state: "open",
@@ -167,8 +198,10 @@ export async function executeLiveBuy(report, supplied = null) {
       buyTx: receipt.hash || prepared.hash,
       pending: null,
     };
-    deps.upsertPosition(position);
-    deps.addTrade({ side: "buy", mode: "live", token: report.token, tx: position.buyTx, amount: acquired.toString() });
+    deps.commitPositionTrade(
+      position,
+      { side: "buy", mode: "live", token: report.token, tx: position.buyTx, amount: acquired.toString() }
+    );
     await deps.notify(`🟢 实盘买入 <b>${report.meta.symbol}</b>\n${position.buyTx}`).catch(() => {});
     return position;
   } catch (error) {
@@ -350,27 +383,46 @@ export async function exitPosition(position, action, supplied = null) {
   }
 }
 
+function moveToReview(position, deps, reason) {
+  const review = { ...position, state: "needs_review", reviewReason: reason };
+  deps.upsertPosition(review);
+  return review;
+}
+
+async function resolvePending(position, deps, action) {
+  const pending = position.pending;
+  if (!pending?.txHash) {
+    return { review: moveToReview(position, deps, `pending ${action} has no transaction hash`) };
+  }
+  const receipt = await deps.provider.getTransactionReceipt(pending.txHash);
+  if (receipt) {
+    if (receipt.status === 0) {
+      return { review: moveToReview(position, deps, `pending ${action} reverted`) };
+    }
+    return { receipt };
+  }
+  const transaction = await deps.provider.getTransaction(pending.txHash);
+  if (transaction) return {};
+  if (!pending.rawTx || !Number.isInteger(pending.nonce)) {
+    return { review: moveToReview(position, deps, `pending ${action} cannot be replayed safely`) };
+  }
+  const latestNonce = await deps.provider.getTransactionCount(position.wallet, "latest");
+  if (latestNonce > pending.nonce) {
+    return { review: moveToReview(position, deps, `pending ${action} nonce was consumed without its receipt`) };
+  }
+  await deps.provider.broadcastTransaction(pending.rawTx);
+  return {};
+}
+
 export async function reconcilePendingBuy(position, supplied = null) {
   const deps = supplied || defaultReconcileDependencies(position);
-  if (!position.pending?.txHash) {
-    const review = { ...position, state: "needs_review", reviewReason: "pending buy has no transaction hash" };
-    deps.upsertPosition(review);
-    return review;
-  }
-  const receipt = await deps.provider.getTransactionReceipt(position.pending.txHash);
+  const resolution = await resolvePending(position, deps, "buy");
+  if (resolution.review) return resolution.review;
+  const receipt = resolution.receipt;
   if (!receipt) return null;
-  if (receipt.status === 0) {
-    const review = { ...position, state: "needs_review", reviewReason: "pending buy reverted" };
-    deps.upsertPosition(review);
-    return review;
-  }
-  const balanceAfter = BigInt(await deps.token.balanceOf(position.wallet));
-  const balanceBefore = BigInt(position.pending.balanceBefore);
-  const acquired = balanceAfter - balanceBefore;
+  const acquired = netTransferAmount(receipt, position.token, position.wallet);
   if (acquired <= 0n) {
-    const review = { ...position, state: "needs_review", reviewReason: "confirmed buy has no balance delta" };
-    deps.upsertPosition(review);
-    return review;
+    return moveToReview(position, deps, "confirmed buy has no positive receipt transfer");
   }
   const updated = {
     ...position,
@@ -380,8 +432,10 @@ export async function reconcilePendingBuy(position, supplied = null) {
     buyTx: receipt.hash || position.pending.txHash,
     pending: null,
   };
-  deps.upsertPosition(updated);
-  deps.addTrade({ side: "buy", mode: "live", token: position.token, tx: updated.buyTx, amount: acquired.toString(), recovered: true });
+  deps.commitPositionTrade(
+    updated,
+    { side: "buy", mode: "live", token: position.token, tx: updated.buyTx, amount: acquired.toString(), recovered: true }
+  );
   return updated;
 }
 
