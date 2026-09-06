@@ -13,6 +13,10 @@ export class CandidateQueue {
     return this.items.length;
   }
 
+  get isFull() {
+    return this.items.length >= this.maxSize;
+  }
+
   enqueue(event) {
     const key = this.keyOf(event);
     if (!key || this.hasSeen(key) || this.pending.has(key) || this.inFlight.has(key)) return false;

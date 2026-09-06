@@ -5,7 +5,7 @@ import { hasSeen, listPositions, markSeen } from "./store.js";
 import { getBlockNumber, scanOnchain, sleep } from "./chain.js";
 import { geckoNewPools } from "./market.js";
 import { analyze } from "./analyze.js";
-import { alertReport, sendTelegram } from "./notify.js";
+import { alertReport, formatAlert, sendTelegram } from "./notify.js";
 import { createSingleFlightTick, maybeTrade, tickPositions } from "./trade.js";
 import { CandidateQueue } from "./queue.js";
 import { candidateKey, handleCandidate } from "./runtime.js";
@@ -70,6 +70,53 @@ async function reportReviewPositions() {
   ).catch((error) => console.error("position review telegram", safeErrorMessage(error)));
 }
 
+export async function processEvents(events, queue, runDrain) {
+  let accepted = 0;
+  for (const event of events) {
+    if (queue.isFull) await runDrain();
+    if (queue.enqueue(event)) accepted += 1;
+  }
+  await runDrain();
+  return accepted;
+}
+
+export async function runReadOnlyCandidates(events, dependencies) {
+  const queue = new CandidateQueue({
+    maxSize: dependencies.maxQueueSize,
+    hasSeen: () => false,
+    keyOf: candidateKey,
+  });
+  const reports = [];
+  const runDrain = async () => {
+    while (queue.size > 0) {
+      const event = queue.take();
+      try {
+        const report = await handleCandidate(
+          event,
+          { allowTrading: false, persistSeen: false, tradeMode: "watch" },
+          {
+            now: dependencies.now,
+            maxAgeMinutes: dependencies.maxAgeMinutes,
+            minScore: dependencies.minScore,
+            analyze: dependencies.analyze,
+            markSeen: () => {},
+            alertReport: dependencies.consoleAlert,
+            maybeTrade: async () => null,
+            log: dependencies.log,
+          }
+        );
+        if (report) reports.push(report);
+      } catch (error) {
+        dependencies.log(`handle failed ${event.token} ${safeErrorMessage(error)}`);
+      } finally {
+        queue.finish(event);
+      }
+    }
+  };
+  await processEvents(events, queue, runDrain);
+  return reports;
+}
+
 async function watch({ allowTrading }) {
   banner({ allowTrading });
   await reportReviewPositions();
@@ -95,8 +142,7 @@ async function watch({ allowTrading }) {
       if (SETTINGS.onchainScan && head > lastBlock) {
         const from = lastBlock + 1;
         const events = await scanOnchain(from, head);
-        let accepted = 0;
-        for (const event of events) if (enqueue(event)) accepted += 1;
+        const accepted = await processEvents(events, candidates, () => drain({ allowTrading, persistSeen: true }));
         if (events.length) console.log(`onchain ${from}-${head}: ${events.length} pools, ${accepted} new`);
         lastBlock = head;
       }
@@ -106,8 +152,7 @@ async function watch({ allowTrading }) {
           console.error("gecko", safeErrorMessage(error));
           return [];
         });
-        let accepted = 0;
-        for (const event of events) if (enqueue(event)) accepted += 1;
+        const accepted = await processEvents(events, candidates, () => drain({ allowTrading, persistSeen: true }));
         if (accepted) console.log(`gecko: ${events.length} pools, ${accepted} new`);
       }
       await drain({ allowTrading, persistSeen: true });
@@ -118,28 +163,47 @@ async function watch({ allowTrading }) {
   }
 }
 
-async function scanOnce() {
+async function scanOnce(supplied = null) {
+  const dependencies = supplied || {
+    settings: SETTINGS,
+    getBlockNumber,
+    scanOnchain,
+    geckoNewPools,
+    analyze,
+    consoleAlert: async (report) => {
+      console.log(formatAlert(report).replace(/<[^>]+>/g, ""));
+    },
+    log: console.log,
+  };
+  const settings = dependencies.settings;
   banner({ allowTrading: false });
-  const head = await getBlockNumber();
-  const from = Math.max(0, head - Math.max(SETTINGS.lookbackBlocks, 800));
-  console.log(`one-shot read-only scan blocks ${from}-${head} + gecko new_pools`);
+  const head = await dependencies.getBlockNumber();
+  const from = Math.max(0, head - Math.max(settings.lookbackBlocks, 800));
+  dependencies.log(`one-shot read-only scan blocks ${from}-${head} + gecko new_pools`);
   const [onchain, gecko] = await Promise.all([
-    SETTINGS.onchainScan
-      ? scanOnchain(from, head).catch((error) => {
-          console.error(safeErrorMessage(error));
+    settings.onchainScan
+      ? dependencies.scanOnchain(from, head).catch((error) => {
+          dependencies.log(safeErrorMessage(error));
           return [];
         })
       : [],
-    SETTINGS.geckoScan
-      ? geckoNewPools(3).catch((error) => {
-          console.error(safeErrorMessage(error));
+    settings.geckoScan
+      ? dependencies.geckoNewPools(3).catch((error) => {
+          dependencies.log(safeErrorMessage(error));
           return [];
         })
       : [],
   ]);
-  console.log(`candidates: onchain=${onchain.length} gecko=${gecko.length}`);
-  for (const event of [...onchain, ...gecko]) enqueue(event);
-  await drain({ allowTrading: false, persistSeen: false });
+  dependencies.log(`candidates: onchain=${onchain.length} gecko=${gecko.length}`);
+  return runReadOnlyCandidates([...onchain, ...gecko], {
+    maxQueueSize: settings.maxQueueSize,
+    maxAgeMinutes: settings.maxAgeMinutes,
+    minScore: settings.minScore,
+    now: dependencies.now || Date.now,
+    analyze: dependencies.analyze,
+    consoleAlert: dependencies.consoleAlert,
+    log: dependencies.log,
+  });
 }
 
 async function checkOne(token) {

@@ -14,9 +14,14 @@ describe("CandidateQueue", () => {
 
   it("refuses candidates above the hard limit", () => {
     const q = new CandidateQueue({ maxSize: 1, hasSeen: () => false });
+    assert.equal(q.isFull, false);
     assert.equal(q.enqueue({ token: "0x1" }), true);
+    assert.equal(q.isFull, true);
     assert.equal(q.enqueue({ token: "0x2" }), false);
     assert.equal(q.size, 1);
+    const event = q.take();
+    assert.equal(q.isFull, false);
+    q.finish(event);
   });
 
   it("refuses already seen candidates", () => {
