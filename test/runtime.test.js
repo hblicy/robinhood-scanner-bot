@@ -141,6 +141,34 @@ describe("scanner runtime", () => {
     assert.equal(analyzed, 1);
   });
 
+  it("uses discovery time for the age gate when processing was queued", async () => {
+    let analyzed = 0;
+    await handleCandidate(
+      {
+        venue: "uniswap-v2",
+        pool: "0xA",
+        token: "0x1",
+        createdAt: 1,
+        observedAt: 30 * 60_000 + 1,
+        source: "test",
+      },
+      { persistSeen: false },
+      {
+        now: () => 31 * 60_000 + 1,
+        maxAgeMinutes: 30,
+        minScore: 55,
+        analyze: async (candidate) => {
+          analyzed += 1;
+          return { ...candidate, verdict: "skip", score: 0, meta: { symbol: "QUEUED" }, honeypot: {} };
+        },
+        markSeen: () => {},
+        alertReport: async () => {},
+        log: () => {},
+      }
+    );
+    assert.equal(analyzed, 1);
+  });
+
   it("includes auxiliary error sources in quiet skip logs", async () => {
     const logs = [];
     await handleCandidate(

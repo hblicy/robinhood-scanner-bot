@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { acquireInstanceLock } from "../src/instance-lock.js";
+import { acquireInstanceLock, acquireLockGuard } from "../src/instance-lock.js";
 
 const dirs = [];
 
@@ -47,5 +47,17 @@ describe("watch instance lock", () => {
       /cannot verify existing watch lock/i
     );
     assert.equal(fs.readFileSync(path.join(dir, "watch.lock"), "utf8"), "not-json");
+  });
+
+  it("serializes stale-lock recovery so another watch cannot race it", () => {
+    const dir = tempDir();
+    const releaseGuard = acquireLockGuard(dir, { pid: 123, now: () => 1 });
+    assert.throws(
+      () => acquireInstanceLock(dir, { pid: 456, isPidAlive: () => false, now: () => 2 }),
+      /lock acquisition already in progress.*123/i
+    );
+    releaseGuard();
+    const release = acquireInstanceLock(dir, { pid: 456, isPidAlive: () => false, now: () => 3 });
+    release();
   });
 });

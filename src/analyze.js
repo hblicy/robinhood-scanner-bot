@@ -4,6 +4,7 @@ import { ERC20_ABI, V2_ROUTER_ABI } from "./abis.js";
 import {
   bytecodeFlags,
   getProvider,
+  isContractCallRevert,
   readOwner,
   readTokenMeta,
   readV2Pool,
@@ -535,6 +536,7 @@ async function simulateV2Quotes(token, quote) {
     }
     out.buyOk = true;
   } catch (err) {
+    if (!isContractCallRevert(err)) throw err;
     out.buyOk = false;
     out.reason = `无法报价买入: ${safeErrorMessage(err)}`;
     return out;
@@ -550,6 +552,7 @@ async function simulateV2Quotes(token, quote) {
     }
     out.sellOk = true;
   } catch (err) {
+    if (!isContractCallRevert(err)) throw err;
     out.sellOk = false;
     out.reason = `无法报价卖出: ${safeErrorMessage(err)}`;
   }
@@ -565,7 +568,7 @@ async function simulateTransfer(token, from, to, amount) {
 async function simulateTransferFromPool(token, pool) {
   const provider = getProvider();
   const erc = new Contract(token, ERC20_ABI, provider);
-  const bal = await erc.balanceOf(pool).catch(() => 0n);
+  const bal = await erc.balanceOf(pool);
   if (bal === 0n) return null;
   const amt = bal / 1000n || 1n;
   const data = erc20Iface.encodeFunctionData("transfer", [SIM_FROM, amt]);
@@ -573,8 +576,11 @@ async function simulateTransferFromPool(token, pool) {
   return call.ok;
 }
 
-async function rawCall(tx, state = undefined) {
-  const provider = getProvider();
+export async function rawCall(
+  tx,
+  state = undefined,
+  { provider = getProvider(), retry = (fn) => withRetry(fn, 2) } = {}
+) {
   const payload = [
     {
       from: tx.from,
@@ -586,18 +592,20 @@ async function rawCall(tx, state = undefined) {
   ];
   if (state) payload.push(state);
   try {
-    await withRetry(() => provider.send("eth_call", payload), 2);
+    await retry(() => provider.send("eth_call", payload));
     return { ok: true };
   } catch (err) {
     const msg = safeErrorMessage(err?.error || err);
     if (state && /state override|extra param|3 params/i.test(msg)) {
       try {
-        await provider.send("eth_call", payload.slice(0, 2));
+        await retry(() => provider.send("eth_call", payload.slice(0, 2)));
         return { ok: true };
       } catch (err2) {
-        return { ok: false, error: err2.shortMessage || err2.message };
+        if (!isContractCallRevert(err2)) throw err2;
+        return { ok: false, error: safeErrorMessage(err2) };
       }
     }
+    if (!isContractCallRevert(err)) throw err;
     return { ok: false, error: msg };
   }
 }

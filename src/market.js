@@ -54,10 +54,14 @@ export async function geckoNewPools(
       const rel = row.relationships || {};
       const tokenRaw = relAddr(rel.base_token?.data?.id);
       const quoteRaw = relAddr(rel.quote_token?.data?.id);
-      if (!tokenRaw) continue;
+      if (!tokenRaw) throw new Error(`Gecko base_token invalid on page ${page} row ${rowIndex}`);
+      if (!quoteRaw) throw new Error(`Gecko quote_token invalid on page ${page} row ${rowIndex}`);
       const picked = resolvePair(tokenRaw, quoteRaw);
       if (!picked) continue;
       const { token, quote } = picked;
+      if (!isEthAddress(a.address)) {
+        throw new Error(`Gecko pool address invalid on page ${page} row ${rowIndex}`);
+      }
       const createdAt = Date.parse(a.pool_created_at);
       if (!Number.isFinite(createdAt)) {
         throw new Error(`Gecko pool_created_at invalid on page ${page} row ${rowIndex}`);
@@ -68,7 +72,7 @@ export async function geckoNewPools(
       events.push({
         source: "gecko",
         venue: rel.dex?.data?.id || "unknown",
-        pool: isEthAddress(a.address) ? getAddress(a.address) : null,
+        pool: getAddress(a.address),
         token: getAddress(token),
         quote,
         createdAt,

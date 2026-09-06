@@ -321,6 +321,71 @@ describe("scanner orchestration", () => {
     assert.match(result.errors[0].message, /onchain.*rpc unavailable/i);
   });
 
+  it("starts Gecko without waiting for a slow onchain source", async () => {
+    const order = [];
+    let releaseOnchain;
+    const onchainGate = new Promise((resolve) => { releaseOnchain = resolve; });
+    const iteration = runWatchIteration(
+      { lastBlock: 5, lastGecko: 0 },
+      {
+        settings: {
+          onchainScan: true,
+          geckoScan: true,
+          confirmationBlocks: 2,
+          maxAgeMinutes: 30,
+          geckoPollMs: 10,
+        },
+        now: () => 100,
+        getBlockNumber: async () => 10,
+        getOnchainCursor: () => 5,
+        findFirstBlockAtOrAfter: async () => 1,
+        scanOnchain: async () => {
+          order.push("onchain");
+          await onchainGate;
+          return [];
+        },
+        setOnchainCursor: () => {},
+        geckoNewPools: async () => { order.push("gecko"); return []; },
+        handleEvents: async () => ({ accepted: 0, handled: 0, failed: 0 }),
+        log: () => {},
+      }
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    const startedTogether = order.includes("gecko");
+    releaseOnchain();
+    await iteration;
+    assert.equal(startedTogether, true);
+  });
+
+  it("analyzes candidates with bounded parallelism", async () => {
+    let active = 0;
+    let maxActive = 0;
+    const events = Array.from({ length: 5 }, (_, index) => ({
+      token: `0x${index}`,
+      venue: "uniswap-v2",
+      pool: `0xpool${index}`,
+      source: "test",
+      createdAt: null,
+    }));
+    await runReadOnlyCandidates(events, {
+      maxQueueSize: 10,
+      maxAgeMinutes: 30,
+      minScore: 55,
+      analysisConcurrency: 2,
+      now: () => 1,
+      analyze: async (candidate) => {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        await new Promise((resolve) => setImmediate(resolve));
+        active -= 1;
+        return { ...candidate, score: 0, verdict: "skip", meta: { symbol: "TEST" }, honeypot: {} };
+      },
+      consoleAlert: async () => {},
+      log: () => {},
+    });
+    assert.equal(maxActive, 2);
+  });
+
   it("commits a confirmed chain range even when Gecko fails", async () => {
     const ranges = [];
     const cursors = [];

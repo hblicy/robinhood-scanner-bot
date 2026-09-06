@@ -9,12 +9,35 @@ import { candidateKey, handleCandidate } from "./runtime.js";
 import { safeErrorMessage, sanitizeRpcUrl } from "./safety.js";
 import { acquireInstanceLock } from "./instance-lock.js";
 
+const DEFAULT_ANALYSIS_CONCURRENCY = 2;
 const candidates = new CandidateQueue({
   maxSize: SETTINGS.maxQueueSize,
   hasSeen,
   keyOf: candidateKey,
 });
 let draining = false;
+
+async function drainQueue(queue, concurrency, handle) {
+  let handled = 0;
+  let failed = 0;
+  while (queue.size > 0) {
+    const batch = [];
+    while (batch.length < concurrency && queue.size > 0) batch.push(queue.take());
+    const results = await Promise.all(batch.map(async (event) => {
+      try {
+        await handle(event);
+        return true;
+      } catch {
+        return false;
+      } finally {
+        queue.finish(event);
+      }
+    }));
+    handled += results.filter(Boolean).length;
+    failed += results.filter((ok) => !ok).length;
+  }
+  return { handled, failed };
+}
 
 function enqueue(event) {
   const accepted = candidates.enqueue(event);
@@ -27,11 +50,8 @@ function enqueue(event) {
 async function drain({ persistSeen = true }) {
   if (draining) return { handled: 0, failed: 0 };
   draining = true;
-  let handled = 0;
-  let failed = 0;
   try {
-    while (candidates.size > 0) {
-      const event = candidates.take();
+    return await drainQueue(candidates, DEFAULT_ANALYSIS_CONCURRENCY, async (event) => {
       try {
         await handleCandidate(
           event,
@@ -46,18 +66,14 @@ async function drain({ persistSeen = true }) {
             log: console.log,
           }
         );
-        handled += 1;
       } catch (error) {
-        failed += 1;
         console.error("handle failed", event.token, safeErrorMessage(error));
-      } finally {
-        candidates.finish(event);
+        throw error;
       }
-    }
+    });
   } finally {
     draining = false;
   }
-  return { handled, failed };
 }
 
 export async function processEvents(events, queue, runDrain) {
@@ -100,7 +116,9 @@ export async function initialOnchainCursor({
 export async function runWatchIteration(state, dependencies) {
   const { settings } = dependencies;
   const errors = [];
-  if (settings.onchainScan) {
+  const observedAt = dependencies.now();
+  const runOnchain = async () => {
+    if (!settings.onchainScan) return;
     try {
       const latestHead = await dependencies.getBlockNumber();
       const safeHead = latestHead - (settings.confirmationBlocks ?? 0);
@@ -119,7 +137,10 @@ export async function runWatchIteration(state, dependencies) {
           { from, head: safeHead },
           {
             scanOnchain: dependencies.scanOnchain,
-            handleEvents: dependencies.handleEvents,
+            handleEvents: (events) => dependencies.handleEvents(
+              events.map((event) => ({ ...event, observedAt: event.observedAt ?? observedAt })),
+              "onchain"
+            ),
             setOnchainCursor: dependencies.setOnchainCursor,
           }
         );
@@ -136,14 +157,17 @@ export async function runWatchIteration(state, dependencies) {
       errors.push(error);
       dependencies.log(error.message);
     }
-  }
+  };
 
-  const currentTime = dependencies.now();
-  if (settings.geckoScan && currentTime - state.lastGecko >= settings.geckoPollMs) {
-    state.lastGecko = currentTime;
+  const runGecko = async () => {
+    if (!settings.geckoScan || observedAt - state.lastGecko < settings.geckoPollMs) return;
+    state.lastGecko = observedAt;
     try {
       const events = await dependencies.geckoNewPools(1);
-      const result = await dependencies.handleEvents(events);
+      const result = await dependencies.handleEvents(
+        events.map((event) => ({ ...event, observedAt: event.observedAt ?? observedAt })),
+        "gecko"
+      );
       if (result.accepted) {
         dependencies.log(`gecko: ${events.length} pools, ${result.accepted} new`);
       }
@@ -153,7 +177,8 @@ export async function runWatchIteration(state, dependencies) {
       errors.push(error);
       dependencies.log(error.message);
     }
-  }
+  };
+  await Promise.all([runOnchain(), runGecko()]);
   return { state, errors };
 }
 
@@ -165,11 +190,12 @@ export async function runReadOnlyCandidates(events, dependencies) {
   });
   const reports = [];
   const failures = [];
+  const observedAt = dependencies.now();
   const runDrain = async () => {
-    let handled = 0;
-    let failed = 0;
-    while (queue.size > 0) {
-      const event = queue.take();
+    return drainQueue(
+      queue,
+      dependencies.analysisConcurrency ?? DEFAULT_ANALYSIS_CONCURRENCY,
+      async (event) => {
       try {
         const report = await handleCandidate(
           event,
@@ -185,18 +211,19 @@ export async function runReadOnlyCandidates(events, dependencies) {
           }
         );
         if (report) reports.push(report);
-        handled += 1;
       } catch (error) {
-        failed += 1;
         failures.push({ event, error });
         dependencies.log(`handle failed ${event.token} ${safeErrorMessage(error)}`);
-      } finally {
-        queue.finish(event);
+        throw error;
       }
-    }
-    return { handled, failed };
+      }
+    );
   };
-  await processEvents(events, queue, runDrain);
+  await processEvents(
+    events.map((event) => ({ ...event, observedAt: event.observedAt ?? observedAt })),
+    queue,
+    runDrain
+  );
   if (failures.length) {
     throw new AggregateError(
       failures.map(({ error }) => error),
@@ -219,10 +246,53 @@ async function watch() {
     }
 
     const state = { lastBlock: null, lastGecko: 0 };
-
-    while (true) {
-      await runWatchIteration(state, {
-        settings: SETTINGS,
+    const claimed = new Set();
+    const createSourceProcessor = () => {
+      const inner = new CandidateQueue({
+        maxSize: SETTINGS.maxQueueSize,
+        hasSeen: (key) => hasSeen(key) || claimed.has(key),
+        keyOf: candidateKey,
+      });
+      const queue = {
+        get size() { return inner.size; },
+        get isFull() { return inner.isFull; },
+        enqueue(event) {
+          const accepted = inner.enqueue(event);
+          if (accepted) claimed.add(candidateKey(event));
+          return accepted;
+        },
+        take: () => inner.take(),
+        finish(event) {
+          inner.finish(event);
+          claimed.delete(candidateKey(event));
+        },
+      };
+      return (events) => processEvents(events, queue, () => drainQueue(
+        queue,
+        DEFAULT_ANALYSIS_CONCURRENCY,
+        async (event) => {
+          try {
+            await handleCandidate(
+              event,
+              { persistSeen: true },
+              {
+                now: Date.now,
+                maxAgeMinutes: SETTINGS.maxAgeMinutes,
+                minScore: SETTINGS.minScore,
+                analyze,
+                markSeen,
+                alertReport,
+                log: console.log,
+              }
+            );
+          } catch (error) {
+            console.error("handle failed", event.token, safeErrorMessage(error));
+            throw error;
+          }
+        }
+      ));
+    };
+    const common = {
         now: Date.now,
         getBlockNumber,
         getOnchainCursor,
@@ -230,15 +300,37 @@ async function watch() {
         scanOnchain,
         setOnchainCursor,
         geckoNewPools,
-        handleEvents: (events) => processEvents(
-          events,
-          candidates,
-          () => drain({ persistSeen: true })
-        ),
         log: console.log,
-      });
-      await sleep(SETTINGS.pollMs);
+    };
+    const loops = [];
+    if (SETTINGS.onchainScan) {
+      const handleEvents = createSourceProcessor();
+      loops.push((async () => {
+        while (true) {
+          await runWatchIteration(state, {
+            ...common,
+            settings: { ...SETTINGS, geckoScan: false },
+            handleEvents,
+          });
+          await sleep(SETTINGS.pollMs);
+        }
+      })());
     }
+    if (SETTINGS.geckoScan) {
+      const handleEvents = createSourceProcessor();
+      loops.push((async () => {
+        while (true) {
+          await runWatchIteration(state, {
+            ...common,
+            settings: { ...SETTINGS, onchainScan: false },
+            handleEvents,
+          });
+          const nextPoll = state.lastGecko + SETTINGS.geckoPollMs;
+          await sleep(Math.max(1, nextPoll - Date.now()));
+        }
+      })());
+    }
+    await Promise.all(loops);
   } finally {
     process.removeListener("exit", releaseOnExit);
     releaseLock();

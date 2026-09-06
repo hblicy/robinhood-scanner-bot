@@ -32,6 +32,54 @@ export function toHex(n) {
   return "0x" + BigInt(n).toString(16);
 }
 
+function errorDetails(error) {
+  const values = [];
+  const pending = [error];
+  const visited = new Set();
+  while (pending.length) {
+    const current = pending.shift();
+    if (!current || visited.has(current)) continue;
+    if (typeof current === "object") visited.add(current);
+    values.push(current);
+    if (typeof current === "object") {
+      pending.push(current.cause, current.error, current.info?.error);
+    }
+  }
+  return values;
+}
+
+export function isContractCallRevert(error) {
+  const details = errorDetails(error);
+  if (details.some((value) => {
+    const status = Number(typeof value === "object" ? value.status || value.statusCode : NaN);
+    const code = typeof value === "object" ? String(value.code || "").toUpperCase() : "";
+    return [401, 403, 408, 429, 500, 502, 503, 504].includes(status) ||
+      ["NETWORK_ERROR", "SERVER_ERROR", "TIMEOUT"].includes(code);
+  })) return false;
+  return details.some((value) => {
+    const code = typeof value === "object" ? String(value.code || "").toUpperCase() : "";
+    const message = typeof value === "string"
+      ? value
+      : `${value.shortMessage || ""} ${value.message || ""}`;
+    return code === "CALL_EXCEPTION" || /execution reverted|call exception|revert(?:ed)?\b/i.test(message);
+  });
+}
+
+export function isLogRangeLimitError(error) {
+  const details = errorDetails(error);
+  if (details.some((value) => {
+    const status = Number(typeof value === "object" ? value.status || value.statusCode : NaN);
+    const code = typeof value === "object" ? String(value.code || "").toUpperCase() : "";
+    return [401, 403, 429].includes(status) || ["NETWORK_ERROR", "SERVER_ERROR", "TIMEOUT"].includes(code);
+  })) return false;
+  return details.some((value) => {
+    const message = typeof value === "string"
+      ? value
+      : `${value.shortMessage || ""} ${value.message || ""}`;
+    return /range too large|block range|too many (?:logs|results)|query returned more than|response size|result set too large|exceed(?:s|ed)? (?:the )?(?:maximum|max).*range/i.test(message);
+  });
+}
+
 export async function getBlockNumber() {
   return withRetry(() => getProvider().getBlockNumber());
 }
@@ -139,9 +187,9 @@ export async function getLogsChunked({
       );
       out.push(...logs);
     } catch (err) {
-      if (chunk > 40) {
+      if (end - start + 1 > 40 && isLogRangeLimitError(err)) {
         const mid = Math.floor((start + end) / 2);
-        const nextChunk = Math.floor(chunk / 2);
+        const nextChunk = Math.max(40, Math.floor((end - start + 1) / 2));
         const left = await getLogsChunked({ address, topics, fromBlock: start, toBlock: mid, chunk: nextChunk, provider, retry });
         const right = await getLogsChunked({ address, topics, fromBlock: mid + 1, toBlock: end, chunk: nextChunk, provider, retry });
         out.push(...left, ...right);
@@ -270,28 +318,32 @@ export async function readTokenMeta(token) {
   return { name, symbol, decimals: Number(decimals), totalSupply };
 }
 
-export async function readOwner(token) {
-  const c = new Contract(token, ERC20_ABI, getProvider());
+export async function readOwnerFromContract(c) {
   try {
     return getAddress(await c.owner());
-  } catch {
+  } catch (error) {
+    if (!isContractCallRevert(error)) throw error;
     try {
       return getAddress(await c.getOwner());
-    } catch {
+    } catch (fallbackError) {
+      if (!isContractCallRevert(fallbackError)) throw fallbackError;
       return null;
     }
   }
 }
 
-export async function readV2Pool(pool) {
-  const c = new Contract(pool, PAIR_V2_ABI, getProvider());
+export async function readOwner(token) {
+  return readOwnerFromContract(new Contract(token, ERC20_ABI, getProvider()));
+}
+
+export async function readV2PoolFromContract(c) {
   const [token0, token1, reserves, lpSupply, deadLp, zeroLp] = await Promise.all([
     c.token0(),
     c.token1(),
     c.getReserves(),
     c.totalSupply(),
-    c.balanceOf(ADDR.DEAD).catch(() => 0n),
-    c.balanceOf(ZeroAddress).catch(() => 0n),
+    c.balanceOf(ADDR.DEAD),
+    c.balanceOf(ZeroAddress),
   ]);
   const burned = deadLp + zeroLp;
   const burnedPct = lpSupply === 0n ? 0 : Number((burned * 10000n) / lpSupply) / 100;
@@ -304,6 +356,10 @@ export async function readV2Pool(pool) {
     burnedLp: burned,
     burnedPct,
   };
+}
+
+export async function readV2Pool(pool) {
+  return readV2PoolFromContract(new Contract(pool, PAIR_V2_ABI, getProvider()));
 }
 
 export async function bytecodeFlags(token) {

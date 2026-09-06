@@ -7,6 +7,8 @@ import {
   attachBlockTimes,
   findFirstBlockAtOrAfter,
   getLogsChunked,
+  readOwnerFromContract,
+  readV2PoolFromContract,
   parseV4PoolLog,
   scanOnchain,
   withRetry,
@@ -100,6 +102,61 @@ describe("getLogsChunked", () => {
     });
     assert.equal(logs.length, 2000);
     assert.equal(new Set(logs.map(({ blockNumber }) => blockNumber)).size, 2000);
+  });
+
+  it("does not split a permanent authorization failure", async () => {
+    let calls = 0;
+    const denied = Object.assign(new Error("HTTP 403 forbidden"), { status: 403 });
+    await assert.rejects(
+      () => getLogsChunked({
+        address: ADDR.V2_FACTORY,
+        topics: [],
+        fromBlock: 1,
+        toBlock: 2000,
+        provider: {
+          getLogs: async () => { calls += 1; throw denied; },
+        },
+        retry: (fn) => withRetry(fn, 3, async () => {}),
+      }),
+      (error) => error === denied
+    );
+    assert.equal(calls, 3);
+  });
+});
+
+describe("optional contract reads", () => {
+  it("propagates transport errors while probing owner methods", async () => {
+    const unavailable = Object.assign(new Error("rpc offline"), { code: "NETWORK_ERROR" });
+    await assert.rejects(
+      () => readOwnerFromContract({ owner: async () => { throw unavailable; } }),
+      (error) => error === unavailable
+    );
+  });
+
+  it("does not treat a nested rate limit as a contract revert", async () => {
+    const rateLimit = Object.assign(new Error("request failed"), {
+      code: "CALL_EXCEPTION",
+      error: { status: 429, message: "too many requests" },
+    });
+    await assert.rejects(
+      () => readOwnerFromContract({ owner: async () => { throw rateLimit; } }),
+      (error) => error === rateLimit
+    );
+  });
+
+  it("propagates LP balance lookup failures", async () => {
+    const unavailable = Object.assign(new Error("rpc offline"), { code: "NETWORK_ERROR" });
+    const contract = {
+      token0: async () => "0x1111111111111111111111111111111111111111",
+      token1: async () => "0x2222222222222222222222222222222222222222",
+      getReserves: async () => [1n, 1n],
+      totalSupply: async () => 2n,
+      balanceOf: async () => { throw unavailable; },
+    };
+    await assert.rejects(
+      () => readV2PoolFromContract(contract),
+      (error) => error === unavailable
+    );
   });
 });
 

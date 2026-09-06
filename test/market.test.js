@@ -127,4 +127,30 @@ describe("geckoNewPools", () => {
     );
     assert.equal(calls, 2);
   });
+
+  it("rejects a malformed token relationship instead of silently skipping it", async () => {
+    const row = geckoRow(new Date(NOW).toISOString());
+    row.relationships.base_token.data.id = "robinhood_not-an-address";
+    await assert.rejects(
+      () => geckoNewPools(1, {
+        fetchImpl: async () => jsonResponse({ data: [row] }),
+        now: () => NOW,
+        maxAgeMinutes: 30,
+      }),
+      /base_token.*page 1.*row 0/i
+    );
+  });
+
+  it("rejects a malformed pool address instead of returning an unbound event", async () => {
+    const row = geckoRow(new Date(NOW).toISOString());
+    row.attributes.address = "not-an-address";
+    await assert.rejects(
+      () => geckoNewPools(1, {
+        fetchImpl: async () => jsonResponse({ data: [row] }),
+        now: () => NOW,
+        maxAgeMinutes: 30,
+      }),
+      /pool address.*page 1.*row 0/i
+    );
+  });
 });

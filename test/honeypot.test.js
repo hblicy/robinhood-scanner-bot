@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { honeypotCheck } from "../src/analyze.js";
+import { honeypotCheck, rawCall } from "../src/analyze.js";
 
 const input = {
   token: "0x1111111111111111111111111111111111111111",
@@ -31,5 +31,37 @@ describe("honeypotCheck", () => {
     });
     assert.equal(result.honeypot, true);
     assert.match(result.reason, /buy quote reverted/);
+  });
+
+  it("does not convert transport failures into honeypot evidence", async () => {
+    const transportError = Object.assign(new Error("upstream timed out"), { code: "NETWORK_ERROR" });
+    await assert.rejects(
+      () => rawCall(
+        { from: input.pool, to: input.token, data: "0x" },
+        undefined,
+        {
+          provider: { send: async () => { throw transportError; } },
+          retry: async (fn) => fn(),
+        }
+      ),
+      (error) => error === transportError
+    );
+  });
+
+  it("keeps an execution revert as concrete transfer evidence", async () => {
+    const result = await rawCall(
+      { from: input.pool, to: input.token, data: "0x" },
+      undefined,
+      {
+        provider: {
+          send: async () => {
+            throw Object.assign(new Error("execution reverted"), { code: "CALL_EXCEPTION" });
+          },
+        },
+        retry: async (fn) => fn(),
+      }
+    );
+    assert.equal(result.ok, false);
+    assert.match(result.error, /reverted/i);
   });
 });

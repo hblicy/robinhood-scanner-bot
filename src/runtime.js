@@ -5,8 +5,9 @@ export function candidateKey(event) {
 }
 
 export async function handleCandidate(event, options, dependencies) {
+  const ageReference = Number.isFinite(event.observedAt) ? event.observedAt : dependencies.now();
   const ageMinutes = event.createdAt
-    ? Math.max(0, (dependencies.now() - event.createdAt) / 60_000)
+    ? Math.max(0, (ageReference - event.createdAt) / 60_000)
     : null;
   const key = candidateKey(event);
   if (ageMinutes !== null && ageMinutes > dependencies.maxAgeMinutes) {
