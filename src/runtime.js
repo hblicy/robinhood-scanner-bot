@@ -9,7 +9,7 @@ export async function handleCandidate(event, options, dependencies) {
     ? Math.max(0, (dependencies.now() - event.createdAt) / 60_000)
     : null;
   const key = candidateKey(event);
-  if (ageMinutes !== null && ageMinutes > dependencies.maxAgeMinutes * 2) {
+  if (ageMinutes !== null && ageMinutes > dependencies.maxAgeMinutes) {
     if (options.persistSeen !== false) {
       dependencies.markSeen(key, { token: event.token, skipped: "too-old", ageMinutes });
     }
@@ -24,7 +24,11 @@ export async function handleCandidate(event, options, dependencies) {
     report.honeypot?.honeypot === true ||
     report.score >= dependencies.minScore;
   if (shouldAlert) await dependencies.alertReport(report);
-  else dependencies.log(`quiet skip ${report.meta.symbol} ${report.score}/100 ${report.verdict}`);
+  else {
+    const errorSources = [...new Set((report.errorSources || []).map(({ source }) => source))];
+    const suffix = errorSources.length ? ` data-errors=${errorSources.join(",")}` : "";
+    dependencies.log(`quiet skip ${report.meta.symbol} ${report.score}/100 ${report.verdict}${suffix}`);
+  }
   if (options.persistSeen !== false) {
     dependencies.markSeen(key, {
       token: report.token,

@@ -97,4 +97,72 @@ describe("scanner runtime", () => {
     );
     assert.deepEqual(order, ["alert", "seen"]);
   });
+
+  it("skips candidates immediately after the configured age window", async () => {
+    let analyzed = 0;
+    const seen = [];
+    const now = 31 * 60_000;
+    const result = await handleCandidate(
+      { venue: "uniswap-v2", pool: "0xA", token: "0x1", createdAt: 0.9 * 60_000, source: "test" },
+      { persistSeen: true },
+      {
+        now: () => now,
+        maxAgeMinutes: 30,
+        minScore: 55,
+        analyze: async () => { analyzed += 1; },
+        markSeen: (_key, payload) => { seen.push(payload); },
+        alertReport: async () => {},
+        log: () => {},
+      }
+    );
+    assert.equal(result, null);
+    assert.equal(analyzed, 0);
+    assert.equal(seen[0].skipped, "too-old");
+  });
+
+  it("analyzes a candidate exactly on the age boundary", async () => {
+    let analyzed = 0;
+    await handleCandidate(
+      { venue: "uniswap-v2", pool: "0xA", token: "0x1", createdAt: 1, source: "test" },
+      { persistSeen: false },
+      {
+        now: () => 30 * 60_000 + 1,
+        maxAgeMinutes: 30,
+        minScore: 55,
+        analyze: async (candidate) => {
+          analyzed += 1;
+          return { ...candidate, verdict: "skip", score: 0, meta: { symbol: "OLD" }, honeypot: {} };
+        },
+        markSeen: () => {},
+        alertReport: async () => {},
+        log: () => {},
+      }
+    );
+    assert.equal(analyzed, 1);
+  });
+
+  it("includes auxiliary error sources in quiet skip logs", async () => {
+    const logs = [];
+    await handleCandidate(
+      { venue: "uniswap-v2", pool: "0xA", token: "0x1", createdAt: null, source: "test" },
+      { persistSeen: false },
+      {
+        now: () => 1,
+        maxAgeMinutes: 30,
+        minScore: 55,
+        analyze: async (candidate) => ({
+          ...candidate,
+          verdict: "skip",
+          score: 0,
+          meta: { symbol: "QUIET" },
+          honeypot: {},
+          errorSources: [{ source: "Blockscout holders" }],
+        }),
+        markSeen: () => {},
+        alertReport: async () => {},
+        log: (line) => { logs.push(line); },
+      }
+    );
+    assert.match(logs.join("\n"), /Blockscout holders/);
+  });
 });

@@ -181,4 +181,42 @@ describe("scanner orchestration", () => {
     assert.deepEqual(ranges, [[3, 10]]);
     assert.deepEqual(calls, { seen: 0, telegram: 0, console: 1 });
   });
+
+  it("processes every one-shot candidate before aggregating failures", async () => {
+    const alerted = [];
+    await assert.rejects(
+      () => runReadOnlyCandidates(
+        [
+          { token: "0x1", venue: "uniswap-v2", pool: "0xa", source: "test" },
+          { token: "0x2", venue: "uniswap-v2", pool: "0xb", source: "test" },
+          { token: "0x3", venue: "uniswap-v2", pool: "0xc", source: "test" },
+        ],
+        {
+          maxQueueSize: 1,
+          maxAgeMinutes: 30,
+          minScore: 55,
+          now: () => 1,
+          analyze: async (candidate) => {
+            if (candidate.token === "0x2") throw new Error("core data unavailable for 0x2");
+            return {
+              ...candidate,
+              score: 90,
+              verdict: "green",
+              meta: { symbol: candidate.token },
+              red: [],
+              honeypot: {},
+            };
+          },
+          consoleAlert: async (report) => { alerted.push(report.token); },
+          log: () => {},
+        }
+      ),
+      (error) => {
+        assert.ok(error instanceof AggregateError);
+        assert.match(error.message, /0x2/);
+        return true;
+      }
+    );
+    assert.deepEqual(alerted, ["0x1", "0x3"]);
+  });
 });

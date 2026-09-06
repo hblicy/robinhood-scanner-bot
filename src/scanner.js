@@ -103,6 +103,7 @@ export async function runReadOnlyCandidates(events, dependencies) {
     keyOf: candidateKey,
   });
   const reports = [];
+  const failures = [];
   const runDrain = async () => {
     let handled = 0;
     let failed = 0;
@@ -126,6 +127,7 @@ export async function runReadOnlyCandidates(events, dependencies) {
         handled += 1;
       } catch (error) {
         failed += 1;
+        failures.push({ event, error });
         dependencies.log(`handle failed ${event.token} ${safeErrorMessage(error)}`);
       } finally {
         queue.finish(event);
@@ -134,6 +136,12 @@ export async function runReadOnlyCandidates(events, dependencies) {
     return { handled, failed };
   };
   await processEvents(events, queue, runDrain);
+  if (failures.length) {
+    throw new AggregateError(
+      failures.map(({ error }) => error),
+      `candidate analysis failed: ${failures.map(({ event }) => event.token).join(", ")}`
+    );
+  }
   return reports;
 }
 
