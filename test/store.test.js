@@ -43,10 +43,13 @@ describe("createStore", () => {
 
     const store = openStore(dir);
     store.markSeen("pool", { score: 80 });
+    store.setOnchainCursor(123);
 
     const saved = JSON.parse(fs.readFileSync(path.join(dir, "state.json"), "utf8"));
     assert.deepEqual(saved.positions, positions);
     assert.deepEqual(saved.trades, trades);
+    assert.equal(saved.cursors.onchain, 123);
+    assert.equal(openStore(dir).getOnchainCursor(), 123);
   });
 
   it("persists and reloads a monotonic onchain cursor", () => {

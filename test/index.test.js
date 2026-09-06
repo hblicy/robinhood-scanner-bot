@@ -6,7 +6,7 @@ import {
   processOnchainRange,
   runReadOnlyCandidates,
   scanOnce,
-} from "../src/index.js";
+} from "../src/scanner.js";
 import { CandidateQueue } from "../src/queue.js";
 
 describe("scanner orchestration", () => {
@@ -73,10 +73,14 @@ describe("scanner orchestration", () => {
 
   it("advances the persisted onchain cursor only after a fully successful range", async () => {
     const cursorWrites = [];
+    const scannedRanges = [];
     const success = await processOnchainRange(
       { from: 10, head: 20 },
       {
-        scanOnchain: async () => [{ token: "0x1" }],
+        scanOnchain: async (from, head) => {
+          scannedRanges.push([from, head]);
+          return [{ token: "0x1" }];
+        },
         handleEvents: async () => ({ accepted: 1, handled: 1, failed: 0 }),
         setOnchainCursor: (block) => cursorWrites.push(block),
       }
@@ -84,15 +88,31 @@ describe("scanner orchestration", () => {
     const failed = await processOnchainRange(
       { from: 21, head: 30 },
       {
-        scanOnchain: async () => [{ token: "0x2" }],
+        scanOnchain: async (from, head) => {
+          scannedRanges.push([from, head]);
+          return [{ token: "0x2" }];
+        },
         handleEvents: async () => ({ accepted: 1, handled: 0, failed: 1 }),
+        setOnchainCursor: (block) => cursorWrites.push(block),
+      }
+    );
+    const retried = await processOnchainRange(
+      { from: 21, head: 30 },
+      {
+        scanOnchain: async (from, head) => {
+          scannedRanges.push([from, head]);
+          return [{ token: "0x2" }];
+        },
+        handleEvents: async () => ({ accepted: 1, handled: 1, failed: 0 }),
         setOnchainCursor: (block) => cursorWrites.push(block),
       }
     );
 
     assert.equal(success.complete, true);
     assert.equal(failed.complete, false);
-    assert.deepEqual(cursorWrites, [20]);
+    assert.equal(retried.complete, true);
+    assert.deepEqual(scannedRanges, [[10, 20], [21, 30], [21, 30]]);
+    assert.deepEqual(cursorWrites, [20, 30]);
   });
 
   it("processes one-shot candidates without persistent or Telegram dependencies", async () => {

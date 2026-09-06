@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { spawnSync } from "node:child_process";
 import * as scanner from "../src/index.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -49,5 +50,19 @@ describe("push-only command surface", () => {
     assert.equal(typeof scanner.assertSupportedCommand, "function");
     assert.throws(() => scanner.assertSupportedCommand("paper"), /commands: watch \| scan \| check <token>/);
     assert.throws(() => scanner.assertSupportedCommand("live"), /commands: watch \| scan \| check <token>/);
+  });
+
+  it("rejects removed commands before loading invalid scanner configuration", () => {
+    for (const command of ["paper", "live"]) {
+      const result = spawnSync(process.execPath, ["src/index.js", command], {
+        cwd: root,
+        env: { ...process.env, MAX_AGE_MINUTES: "0", MAX_QUEUE_SIZE: "0" },
+        encoding: "utf8",
+      });
+      const output = `${result.stdout}${result.stderr}`;
+      assert.notEqual(result.status, 0);
+      assert.match(output, /commands: watch \| scan \| check <token>/);
+      assert.doesNotMatch(output, /MAX_AGE_MINUTES|MAX_QUEUE_SIZE|Robinhood Chain scanner/);
+    }
   });
 });
