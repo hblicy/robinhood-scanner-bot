@@ -20,7 +20,7 @@ afterEach(() => {
 describe("watch instance lock", () => {
   it("allows only one live owner and releases its own lock", async () => {
     const dir = tempDir();
-    const options = { lockPort: 38761, isPidAlive: () => false };
+    const options = { lockPort: 38761 };
     const release = await acquireInstanceLock(dir, { ...options, pid: 123, now: () => 1 });
     await assert.rejects(
       () => acquireInstanceLock(dir, { ...options, pid: 456, now: () => 2 }),
@@ -31,13 +31,13 @@ describe("watch instance lock", () => {
     await releaseAgain();
   });
 
-  it("reclaims a valid lock whose process is gone", async () => {
+  it("replaces a stale diagnostic lock even when its pid was reused", async () => {
     const dir = tempDir();
     fs.writeFileSync(path.join(dir, "watch.lock"), JSON.stringify({ pid: 123, createdAt: 1 }));
     const release = await acquireInstanceLock(dir, {
       pid: 456,
       lockPort: 38762,
-      isPidAlive: () => false,
+      isPidAlive: () => true,
       now: () => 2,
     });
     const lock = JSON.parse(fs.readFileSync(path.join(dir, "watch.lock"), "utf8"));
@@ -45,18 +45,15 @@ describe("watch instance lock", () => {
     await release();
   });
 
-  it("does not overwrite an invalid lock file", async () => {
+  it("recovers a truncated diagnostic lock after the OS lock was released", async () => {
     const dir = tempDir();
     fs.writeFileSync(path.join(dir, "watch.lock"), "not-json");
-    await assert.rejects(
-      () => acquireInstanceLock(dir, {
-        pid: 456,
-        lockPort: 38763,
-        isPidAlive: () => false,
-        now: () => 2,
-      }),
-      /cannot verify existing watch lock/i
-    );
-    assert.equal(fs.readFileSync(path.join(dir, "watch.lock"), "utf8"), "not-json");
+    const release = await acquireInstanceLock(dir, {
+      pid: 456,
+      lockPort: 38763,
+      now: () => 2,
+    });
+    assert.equal(JSON.parse(fs.readFileSync(path.join(dir, "watch.lock"), "utf8")).pid, 456);
+    await release();
   });
 });
