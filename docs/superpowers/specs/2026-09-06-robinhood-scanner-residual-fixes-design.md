@@ -24,7 +24,7 @@
 
 ### V4 池身份
 
-V4 `Initialize` 事件的 `id` 保存到事件 `pool` 字段。候选键继续使用 `venue|pool|token`，因此同一 token 的多个 V4 池不会碰撞。V4 仍只参与发现和告警，不进入实盘交易。
+V4 `Initialize` 事件的 `id` 保存到独立 `poolId` 字段，`pool` 继续只表示可校验的 EVM 地址。候选键使用 `venue|(poolId 或 pool)|token`，因此同一 token 的多个 V4 池不会碰撞，同时不会误把 32 字节 pool ID 传给只接受地址的 DexScreener 绑定逻辑。V4 仍只参与发现和告警，不进入实盘交易。
 
 ### 真正只读的一次性扫描
 
@@ -100,7 +100,7 @@ store 对每次变更创建内存 draft，先把完整 draft 写入 `state.json.
 
 所有修复遵循测试先行，每一项先运行并确认因旧行为而失败，再实现最小改动：
 
-- `chain.test.js`：事件数超过队列容量仍全部返回；两个同 token V4 pool ID 不同。
+- `chain.test.js`：事件数超过队列容量仍全部返回；两个同 token V4 `poolId` 不同且 `pool` 保持 null。
 - `queue.test.js` / `runtime.test.js` / 新的 index 测试：队列背压不丢事件；scan 不初始化 store、不标记 seen、不发 Telegram、不交易。
 - `trade.test.js`：raw transaction 持久化；广播前崩溃后重播；已在 mempool 时等待；nonce 被占用时 needs_review；旧 pending 不永久等待；买卖仅按 receipt Transfer 日志结算。
 - `store.test.js`：旧文件迁移；原子仓位+流水提交；写盘失败不污染内存；完全退出在同一次提交中删除仓位并追加流水。
