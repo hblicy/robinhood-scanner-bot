@@ -45,4 +45,36 @@ describe("Telegram delivery", () => {
     );
     assert.equal(attempts, 3);
   });
+
+  it("aborts a stuck request and retries with a fresh signal", async () => {
+    let attempts = 0;
+    const signals = [];
+    const delivery = sendTelegramWith("hello", {
+      settings,
+      timeoutMs: 1,
+      fetchImpl: async (_url, { signal }) => {
+        attempts += 1;
+        signals.push(signal);
+        return new Promise((_resolve, reject) => {
+          signal?.addEventListener("abort", () => reject(new Error("request aborted")), { once: true });
+        });
+      },
+      sleep: async () => {},
+      log: () => {},
+    });
+    await assert.rejects(
+      Promise.race([
+        delivery,
+        new Promise((_resolve, reject) => setTimeout(() => reject(new Error("test deadline")), 100)),
+      ]),
+      (error) => {
+        assert.doesNotMatch(error.message, /test deadline/);
+        assert.match(error.message, /after 3 attempts/);
+        return true;
+      }
+    );
+    assert.equal(attempts, 3);
+    assert.equal(new Set(signals).size, 3);
+    assert.ok(signals.every((signal) => signal.aborted));
+  });
 });

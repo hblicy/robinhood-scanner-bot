@@ -76,6 +76,7 @@ export async function sendTelegramWith(text, {
   fetchImpl = fetch,
   sleep = delay,
   log = console.log,
+  timeoutMs = 10000,
 } = {}) {
   if (!settings.telegramToken || !settings.telegramChat) {
     log("\n--- telegram (not configured) ---\n" + text.replace(/<[^>]+>/g, "") + "\n");
@@ -84,10 +85,13 @@ export async function sendTelegramWith(text, {
   const url = `https://api.telegram.org/bot${settings.telegramToken}/sendMessage`;
   let lastError;
   for (let attempt = 0; attempt < 3; attempt += 1) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     try {
       const res = await fetchImpl(url, {
         method: "POST",
         headers: { "content-type": "application/json" },
+        signal: ctrl.signal,
         body: JSON.stringify({
           chat_id: settings.telegramChat,
           text,
@@ -100,6 +104,8 @@ export async function sendTelegramWith(text, {
     } catch (error) {
       lastError = error;
       if (attempt < 2) await sleep(200 * (2 ** attempt));
+    } finally {
+      clearTimeout(timer);
     }
   }
   throw new Error(`telegram send failed after 3 attempts: ${safeErrorMessage(lastError)}`, { cause: lastError });

@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { DATA_DIR, SETTINGS } from "./config.js";
 
 const STATE_VERSION = 3;
@@ -17,9 +18,13 @@ function readJson(dataDir, file, fallback) {
 function atomicWriteState(dataDir, value) {
   fs.mkdirSync(dataDir, { recursive: true });
   const filePath = path.join(dataDir, "state.json");
-  const tmp = `${filePath}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(value, null, 2));
-  fs.renameSync(tmp, filePath);
+  const tmp = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(value, null, 2));
+    fs.renameSync(tmp, filePath);
+  } finally {
+    if (fs.existsSync(tmp)) fs.rmSync(tmp, { force: true });
+  }
 }
 
 function validateHistory(positions, trades, source = "state.json") {
@@ -113,7 +118,13 @@ export function createStore({
     markSeen(token, payload) {
       const key = String(token).toLowerCase();
       return commit((draft) => {
-        draft.seen[key] = { ...(draft.seen[key] || {}), ...payload, token: key, updatedAt: now() };
+        const existing = draft.seen[key] || {};
+        draft.seen[key] = {
+          ...existing,
+          ...payload,
+          token: payload?.token ?? existing.token ?? key,
+          updatedAt: now(),
+        };
         pruneSeen(draft.seen);
         return draft.seen[key] || null;
       });

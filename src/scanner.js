@@ -1,4 +1,4 @@
-import { SETTINGS, CHAIN } from "./config.js";
+import { SETTINGS, CHAIN, DATA_DIR } from "./config.js";
 import { getOnchainCursor, hasSeen, markSeen, setOnchainCursor } from "./store.js";
 import { findFirstBlockAtOrAfter, getBlockNumber, scanOnchain, sleep } from "./chain.js";
 import { geckoNewPools } from "./market.js";
@@ -7,6 +7,7 @@ import { alertReport, formatAlert, sendTelegram } from "./notify.js";
 import { CandidateQueue } from "./queue.js";
 import { candidateKey, handleCandidate } from "./runtime.js";
 import { safeErrorMessage, sanitizeRpcUrl } from "./safety.js";
+import { acquireInstanceLock } from "./instance-lock.js";
 
 const candidates = new CandidateQueue({
   maxSize: SETTINGS.maxQueueSize,
@@ -206,33 +207,41 @@ export async function runReadOnlyCandidates(events, dependencies) {
 }
 
 async function watch() {
-  banner();
-  if (SETTINGS.telegramToken) {
-    await sendTelegram(
-      `🤖 Robinhood 扫链机器人已启动\n仅扫描和报警，不包含交易功能\n年龄 &lt; ${SETTINGS.maxAgeMinutes} 分钟 · 最低分 ${SETTINGS.minScore}`
-    ).catch((error) => console.error("startup telegram:", safeErrorMessage(error)));
-  }
+  const releaseLock = acquireInstanceLock(DATA_DIR);
+  const releaseOnExit = () => releaseLock();
+  process.once("exit", releaseOnExit);
+  try {
+    banner();
+    if (SETTINGS.telegramToken) {
+      await sendTelegram(
+        `🤖 Robinhood 扫链机器人已启动\n仅扫描和报警，不包含交易功能\n年龄 &lt; ${SETTINGS.maxAgeMinutes} 分钟 · 最低分 ${SETTINGS.minScore}`
+      ).catch((error) => console.error("startup telegram:", safeErrorMessage(error)));
+    }
 
-  const state = { lastBlock: null, lastGecko: 0 };
+    const state = { lastBlock: null, lastGecko: 0 };
 
-  while (true) {
-    await runWatchIteration(state, {
-      settings: SETTINGS,
-      now: Date.now,
-      getBlockNumber,
-      getOnchainCursor,
-      findFirstBlockAtOrAfter,
-      scanOnchain,
-      setOnchainCursor,
-      geckoNewPools,
-      handleEvents: (events) => processEvents(
-        events,
-        candidates,
-        () => drain({ persistSeen: true })
-      ),
-      log: console.log,
-    });
-    await sleep(SETTINGS.pollMs);
+    while (true) {
+      await runWatchIteration(state, {
+        settings: SETTINGS,
+        now: Date.now,
+        getBlockNumber,
+        getOnchainCursor,
+        findFirstBlockAtOrAfter,
+        scanOnchain,
+        setOnchainCursor,
+        geckoNewPools,
+        handleEvents: (events) => processEvents(
+          events,
+          candidates,
+          () => drain({ persistSeen: true })
+        ),
+        log: console.log,
+      });
+      await sleep(SETTINGS.pollMs);
+    }
+  } finally {
+    process.removeListener("exit", releaseOnExit);
+    releaseLock();
   }
 }
 

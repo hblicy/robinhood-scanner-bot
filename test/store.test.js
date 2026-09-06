@@ -152,4 +152,23 @@ describe("createStore", () => {
     const state = JSON.parse(fs.readFileSync(path.join(dir, "state.json"), "utf8"));
     assert.deepEqual(state.cursors, {});
   });
+
+  it("keeps the real token address in a composite seen entry", () => {
+    const dir = tempDir();
+    const store = openStore(dir);
+    const key = `uniswap-v2|0xpool|${TOKEN}`;
+    store.markSeen(key, { token: TOKEN, score: 80 });
+    const state = JSON.parse(fs.readFileSync(path.join(dir, "state.json"), "utf8"));
+    assert.equal(state.seen[key.toLowerCase()].token, TOKEN);
+  });
+
+  it("does not reuse or overwrite a fixed state.json.tmp file", () => {
+    const dir = tempDir();
+    const foreignTemp = path.join(dir, "state.json.tmp");
+    fs.writeFileSync(foreignTemp, "foreign-writer");
+    openStore(dir);
+    assert.equal(fs.readFileSync(foreignTemp, "utf8"), "foreign-writer");
+    const transientFiles = fs.readdirSync(dir).filter((name) => /^state\.json\..+\.tmp$/.test(name));
+    assert.deepEqual(transientFiles, []);
+  });
 });
