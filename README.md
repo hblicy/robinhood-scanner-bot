@@ -36,7 +36,7 @@ copy .env.example .env
 # 查一枚已有代币（把 CA 换掉）
 npm run check -- 0x你的合约
 
-# 扫最近新池，跑一轮就退出；无论 .env MODE 如何都只读
+# 扫最近新池，跑一轮就退出；不读写 data/、不发 Telegram、不交易
 npm run scan
 
 # 持续监听 + Telegram（推荐先用这个）
@@ -82,7 +82,11 @@ ENABLE_LIVE_TRADING=false  # 永远先保持 false
 
 缺失的创建者、历史、权限、持仓或市场绑定数据不会再作为“安全”加分。`green` 还要求所有安全事实完整；当前完整买卖模拟不可用时最多进入人工复核。已确认的蜜罐负面证据直接 `skip`。
 
-候选队列有硬上限，处理完成或失败都会释放 in-flight 标记；`seen.json` 按 `SEEN_TTL_MS` 过期并最多保留 `MAX_SEEN_ENTRIES` 条。旧格式仓位会迁移为 `needs_review`，不会自动卖出。
+候选队列有硬上限，但链上结果会在队列满时先处理再继续入队，不会因容量截断。持续模式的 seen、仓位和交易流水统一原子写入 `data/state.json`；seen 按 `SEEN_TTL_MS` 过期并最多保留 `MAX_SEEN_ENTRIES` 条。首次非只读运行会把旧 `seen.json`、`positions.json`、`trades.json` 迁移到 v3 状态，旧文件保留；旧格式仓位会进入 `needs_review`，不会自动卖出。
+
+实盘签名交易会在广播前以 pending 状态落盘。进程异常退出后只会重播完全相同的已签名交易；若 nonce 已被其他交易占用、旧 pending 缺少重播字段，或指定 receipt 无法证明实际 token 转移，仓位会转为 `needs_review`，不会猜测成交或签发替代交易。
+
+`POLL_MS`、`LOOKBACK_BLOCKS`、`GECKO_POLL_MS`、`POSITION_POLL_MS`、`GAS_LIMIT` 必须是正整数；`BUY_AMOUNT_ETH` 和 `MAX_BUY_ETH` 必须是可解析且大于零的 ETH 十进制数量。Telegram 已配置时发送失败最多重试三次，全部失败不会提前把候选标记为已通知。
 
 ## 明确不会做的事
 
