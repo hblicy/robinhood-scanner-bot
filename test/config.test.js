@@ -16,11 +16,7 @@ function loadConfig(overrides = {}) {
         ...process.env,
         POLL_MS: "2500",
         GECKO_POLL_MS: "15000",
-        POSITION_POLL_MS: "8000",
-        LOOKBACK_BLOCKS: "120",
-        GAS_LIMIT: "450000",
-        BUY_AMOUNT_ETH: "0.01",
-        MAX_BUY_ETH: "0.03",
+        MAX_AGE_MINUTES: "30",
         ...overrides,
       },
       encoding: "utf8",
@@ -31,10 +27,9 @@ function loadConfig(overrides = {}) {
 describe("configuration validation", () => {
   for (const [name, value] of [
     ["POLL_MS", "0"],
-    ["POSITION_POLL_MS", "-1"],
-    ["LOOKBACK_BLOCKS", "1.5"],
-    ["BUY_AMOUNT_ETH", "-1"],
-    ["MAX_BUY_ETH", "0"],
+    ["GECKO_POLL_MS", "1.5"],
+    ["MAX_AGE_MINUTES", "0"],
+    ["MAX_AGE_MINUTES", "NaN"],
   ]) {
     it(`rejects invalid ${name}`, () => {
       const result = loadConfig({ [name]: value });
@@ -43,7 +38,7 @@ describe("configuration validation", () => {
     });
   }
 
-  it("accepts valid positive intervals and ETH amounts", () => {
+  it("accepts valid positive intervals and age windows", () => {
     const result = loadConfig();
     assert.equal(result.status, 0, result.stderr);
   });

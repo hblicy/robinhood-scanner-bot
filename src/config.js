@@ -2,7 +2,7 @@ import dotenv from "dotenv";
 import { getAddress, ZeroAddress } from "ethers";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { validatePositiveInteger } from "./safety.js";
+import { validatePositiveInteger, validatePositiveNumber } from "./safety.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 dotenv.config({ path: path.join(root, ".env") });
@@ -77,7 +77,7 @@ export const QUOTE_ADDRESSES = new Set(
 export const SETTINGS = {
   telegramToken: env("TELEGRAM_BOT_TOKEN"),
   telegramChat: env("TELEGRAM_CHAT_ID"),
-  maxAgeMinutes: envNum("MAX_AGE_MINUTES", 30),
+  maxAgeMinutes: validatePositiveNumber("MAX_AGE_MINUTES", envNum("MAX_AGE_MINUTES", 30)),
   minLiquidityUsd: envNum("MIN_LIQUIDITY_USD", 1500),
   maxMcapUsd: envNum("MAX_MCAP_USD", 1_500_000),
   minScore: envNum("MIN_SCORE", 55),
@@ -86,7 +86,6 @@ export const SETTINGS = {
   maxDeployerTokens: envNum("MAX_DEPLOYER_TOKENS", 8),
   requireSocial: envBool("REQUIRE_SOCIAL", false),
   pollMs: validatePositiveInteger("POLL_MS", envNum("POLL_MS", 2500)),
-  lookbackBlocks: validatePositiveInteger("LOOKBACK_BLOCKS", envNum("LOOKBACK_BLOCKS", 120)),
   geckoPollMs: validatePositiveInteger("GECKO_POLL_MS", envNum("GECKO_POLL_MS", 15000)),
   onchainScan: envBool("ONCHAIN_SCAN", true),
   geckoScan: envBool("GECKO_SCAN", true),

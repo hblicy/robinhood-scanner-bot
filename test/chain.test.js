@@ -2,7 +2,34 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { Interface } from "ethers";
 import { V4_PM_ABI } from "../src/abis.js";
-import { attachBlockTimes, getLogsChunked, parseV4PoolLog } from "../src/chain.js";
+import {
+  attachBlockTimes,
+  findFirstBlockAtOrAfter,
+  getLogsChunked,
+  parseV4PoolLog,
+} from "../src/chain.js";
+
+describe("findFirstBlockAtOrAfter", () => {
+  it("finds the first block inside the age window with logarithmic lookups", async () => {
+    let calls = 0;
+    const block = await findFirstBlockAtOrAfter(1550_000, 100, {
+      getBlock: async (number) => {
+        calls += 1;
+        return { timestamp: 1000 + number * 10 };
+      },
+    });
+
+    assert.equal(block, 55);
+    assert.ok(calls <= 7, `expected at most 7 lookups, got ${calls}`);
+  });
+
+  it("fails when a block timestamp cannot be read", async () => {
+    await assert.rejects(
+      () => findFirstBlockAtOrAfter(1000, 10, { getBlock: async () => null }),
+      /timestamp.*block/i
+    );
+  });
+});
 
 describe("getLogsChunked", () => {
   it("does not truncate logs at queue capacity", async () => {

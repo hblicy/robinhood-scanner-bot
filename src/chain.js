@@ -36,6 +36,30 @@ export async function getBlockNumber() {
   return withRetry(() => getProvider().getBlockNumber());
 }
 
+export async function findFirstBlockAtOrAfter(targetMs, head, provider = getProvider()) {
+  if (!Number.isFinite(targetMs)) throw new Error("target timestamp must be finite");
+  if (!Number.isInteger(head) || head < 0) throw new Error("head must be a non-negative integer");
+
+  let low = 0;
+  let high = head;
+  let first = head;
+  while (low <= high) {
+    const blockNumber = Math.floor((low + high) / 2);
+    const block = await provider.getBlock(blockNumber);
+    const timestamp = Number(block?.timestamp);
+    if (!Number.isFinite(timestamp)) {
+      throw new Error(`cannot read timestamp for block ${blockNumber}`);
+    }
+    if (timestamp * 1000 >= targetMs) {
+      first = blockNumber;
+      high = blockNumber - 1;
+    } else {
+      low = blockNumber + 1;
+    }
+  }
+  return first;
+}
+
 const v2Iface = new Interface(V2_FACTORY_ABI);
 const v3Iface = new Interface(V3_FACTORY_ABI);
 const v4Iface = new Interface(V4_PM_ABI);

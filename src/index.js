@@ -1,8 +1,8 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { SETTINGS, CHAIN } from "./config.js";
-import { hasSeen, markSeen, setOnchainCursor } from "./store.js";
-import { getBlockNumber, scanOnchain, sleep } from "./chain.js";
+import { getOnchainCursor, hasSeen, markSeen, setOnchainCursor } from "./store.js";
+import { findFirstBlockAtOrAfter, getBlockNumber, scanOnchain, sleep } from "./chain.js";
 import { geckoNewPools } from "./market.js";
 import { analyze } from "./analyze.js";
 import { alertReport, formatAlert, sendTelegram } from "./notify.js";
@@ -86,6 +86,18 @@ export async function processOnchainRange({ from, head }, dependencies) {
   return { events, ...result, complete };
 }
 
+export async function initialOnchainCursor({
+  head,
+  savedCursor,
+  maxAgeMinutes,
+  now,
+  findFirstBlockAtOrAfter: findBoundary,
+}) {
+  const cutoff = now() - maxAgeMinutes * 60_000;
+  const firstRelevantBlock = await findBoundary(cutoff, head);
+  return Math.min(head, Math.max(savedCursor ?? -1, firstRelevantBlock - 1));
+}
+
 export async function runReadOnlyCandidates(events, dependencies) {
   const queue = new CandidateQueue({
     maxSize: dependencies.maxQueueSize,
@@ -135,7 +147,14 @@ async function watch() {
     ).catch((error) => console.error("startup telegram:", safeErrorMessage(error)));
   }
 
-  let lastBlock = Math.max(0, (await getBlockNumber()) - SETTINGS.lookbackBlocks);
+  const initialHead = await getBlockNumber();
+  let lastBlock = await initialOnchainCursor({
+    head: initialHead,
+    savedCursor: getOnchainCursor(),
+    maxAgeMinutes: SETTINGS.maxAgeMinutes,
+    now: Date.now,
+    findFirstBlockAtOrAfter,
+  });
   let lastGecko = 0;
 
   while (true) {
@@ -186,6 +205,7 @@ async function scanOnce(supplied = null) {
   const dependencies = supplied || {
     settings: SETTINGS,
     getBlockNumber,
+    findFirstBlockAtOrAfter,
     scanOnchain,
     geckoNewPools,
     analyze,
@@ -197,7 +217,12 @@ async function scanOnce(supplied = null) {
   const settings = dependencies.settings;
   banner();
   const head = await dependencies.getBlockNumber();
-  const from = Math.max(0, head - Math.max(settings.lookbackBlocks, 800));
+  const from = settings.onchainScan
+    ? await dependencies.findFirstBlockAtOrAfter(
+        (dependencies.now || Date.now)() - settings.maxAgeMinutes * 60_000,
+        head
+      )
+    : head;
   dependencies.log(`one-shot read-only scan blocks ${from}-${head} + gecko new_pools`);
   const [onchain, gecko] = await Promise.all([
     settings.onchainScan

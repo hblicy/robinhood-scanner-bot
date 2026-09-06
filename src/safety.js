@@ -29,6 +29,13 @@ export function validatePositiveInteger(name, value) {
   return value;
 }
 
+export function validatePositiveNumber(name, value) {
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new Error(`${name} must be a positive number`);
+  }
+  return value;
+}
+
 export function validatePositiveEth(name, value) {
   let parsed;
   try {

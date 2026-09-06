@@ -1,6 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
+  initialOnchainCursor,
   processEvents,
   processOnchainRange,
   runReadOnlyCandidates,
@@ -9,6 +10,30 @@ import {
 import { CandidateQueue } from "../src/queue.js";
 
 describe("scanner orchestration", () => {
+  it("starts at the newer of the saved cursor and age-window boundary", async () => {
+    const findFirstBlockAtOrAfter = async () => 40;
+    assert.equal(
+      await initialOnchainCursor({
+        head: 100,
+        savedCursor: null,
+        maxAgeMinutes: 30,
+        now: () => 2_000_000,
+        findFirstBlockAtOrAfter,
+      }),
+      39
+    );
+    assert.equal(
+      await initialOnchainCursor({
+        head: 100,
+        savedCursor: 70,
+        maxAgeMinutes: 30,
+        now: () => 2_000_000,
+        findFirstBlockAtOrAfter,
+      }),
+      70
+    );
+  });
+
   it("drains a full queue and retries the current event", async () => {
     const queue = new CandidateQueue({ maxSize: 1, hasSeen: () => false });
     const handled = [];
@@ -101,9 +126,9 @@ describe("scanner orchestration", () => {
 
   it("keeps scanOnce free of persistent and Telegram calls", async () => {
     const calls = { seen: 0, telegram: 0, console: 0 };
+    const ranges = [];
     const reports = await scanOnce({
       settings: {
-        lookbackBlocks: 1,
         maxQueueSize: 1,
         onchainScan: true,
         geckoScan: false,
@@ -111,9 +136,11 @@ describe("scanner orchestration", () => {
         maxAgeMinutes: 30,
       },
       getBlockNumber: async () => 10,
-      scanOnchain: async () => [
-        { token: "0x1", venue: "uniswap-v2", pool: "0xa", source: "test" },
-      ],
+      findFirstBlockAtOrAfter: async () => 3,
+      scanOnchain: async (from, head) => {
+        ranges.push([from, head]);
+        return [{ token: "0x1", venue: "uniswap-v2", pool: "0xa", source: "test" }];
+      },
       geckoNewPools: async () => [],
       analyze: async (event) => ({
         ...event,
@@ -131,6 +158,7 @@ describe("scanner orchestration", () => {
     });
 
     assert.equal(reports.length, 1);
+    assert.deepEqual(ranges, [[3, 10]]);
     assert.deepEqual(calls, { seen: 0, telegram: 0, console: 1 });
   });
 });

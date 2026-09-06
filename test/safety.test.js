@@ -6,6 +6,7 @@ import {
   sanitizeRpcUrl,
   validateBps,
   validatePositiveInteger,
+  validatePositiveNumber,
   safeErrorMessage,
 } from "../src/safety.js";
 
@@ -50,6 +51,11 @@ describe("safety helpers", () => {
     assert.throws(() => validatePositiveInteger("MAX_QUEUE_SIZE", 0), /MAX_QUEUE_SIZE/);
     assert.throws(() => validatePositiveInteger("MAX_QUEUE_SIZE", 1.5), /MAX_QUEUE_SIZE/);
     assert.equal(validatePositiveInteger("MAX_QUEUE_SIZE", 500), 500);
+  });
+
+  it("rejects invalid positive numeric limits", () => {
+    assert.throws(() => validatePositiveNumber("MAX_AGE_MINUTES", 0), /MAX_AGE_MINUTES/);
+    assert.equal(validatePositiveNumber("MAX_AGE_MINUTES", 0.5), 0.5);
   });
 
   it("computes a non-zero minimum output", () => {
