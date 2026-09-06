@@ -4,9 +4,11 @@ import { Interface } from "ethers";
 import {
   confirmExit,
   confirmPaperExit,
+  createPaperPosition,
   createSingleFlightTick,
   executeLiveBuy,
   exitPosition,
+  maybeTrade,
   netTransferAmount,
   reconcilePendingExit,
   reconcilePendingBuy,
@@ -58,6 +60,37 @@ describe("live trade safety", () => {
       ],
     };
     assert.equal(netTransferAmount(receipt, TOKEN, WALLET), 95n);
+  });
+
+  it("rejects paper positions without a positive entry price", () => {
+    for (const priceUsd of [0, null, Number.NaN]) {
+      assert.throws(
+        () => createPaperPosition(report({ dex: { ...report().dex, priceUsd } }), 10n, 1000),
+        /paper entry price must be positive/
+      );
+    }
+  });
+
+  it("commits a paper buy and its trade in one operation", async () => {
+    const commits = [];
+    const position = await maybeTrade(
+      report({ paperReady: true }),
+      {
+        mode: "paper",
+        listPositions: () => [],
+        amountIn: 10n,
+        now: () => 1000,
+        commitPositionTrade: (nextPosition, trade, options) => {
+          commits.push({ position: nextPosition, trade, options });
+        },
+        notify: async () => {},
+        log: () => {},
+      }
+    );
+    assert.equal(position.entryPriceUsd, 1);
+    assert.equal(commits.length, 1);
+    assert.equal(commits[0].position.token, TOKEN);
+    assert.equal(commits[0].trade.side, "buy");
   });
 
   it("rejects incomplete, unbound or non-WETH live reports", () => {

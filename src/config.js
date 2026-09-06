@@ -2,7 +2,7 @@ import dotenv from "dotenv";
 import { getAddress, ZeroAddress } from "ethers";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { validateBps, validatePositiveInteger } from "./safety.js";
+import { validateBps, validatePositiveEth, validatePositiveInteger } from "./safety.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 dotenv.config({ path: path.join(root, ".env") });
@@ -86,24 +86,24 @@ export const SETTINGS = {
   maxTaxBps: envNum("MAX_TAX_BPS", 500),
   maxDeployerTokens: envNum("MAX_DEPLOYER_TOKENS", 8),
   requireSocial: envBool("REQUIRE_SOCIAL", false),
-  pollMs: envNum("POLL_MS", 2500),
-  lookbackBlocks: envNum("LOOKBACK_BLOCKS", 120),
-  geckoPollMs: envNum("GECKO_POLL_MS", 15000),
+  pollMs: validatePositiveInteger("POLL_MS", envNum("POLL_MS", 2500)),
+  lookbackBlocks: validatePositiveInteger("LOOKBACK_BLOCKS", envNum("LOOKBACK_BLOCKS", 120)),
+  geckoPollMs: validatePositiveInteger("GECKO_POLL_MS", envNum("GECKO_POLL_MS", 15000)),
   onchainScan: envBool("ONCHAIN_SCAN", true),
   geckoScan: envBool("GECKO_SCAN", true),
   enableLiveTrading: envBool("ENABLE_LIVE_TRADING", false),
   privateKey: env("PRIVATE_KEY"),
-  buyAmountEth: env("BUY_AMOUNT_ETH", "0.01"),
-  maxBuyEth: env("MAX_BUY_ETH", "0.03"),
+  buyAmountEth: validatePositiveEth("BUY_AMOUNT_ETH", env("BUY_AMOUNT_ETH", "0.01")),
+  maxBuyEth: validatePositiveEth("MAX_BUY_ETH", env("MAX_BUY_ETH", "0.03")),
   slippageBps: validateBps("SLIPPAGE_BPS", envNum("SLIPPAGE_BPS", 1200)),
-  gasLimit: envNum("GAS_LIMIT", 450000),
+  gasLimit: validatePositiveInteger("GAS_LIMIT", envNum("GAS_LIMIT", 450000)),
   tp1Mult: envNum("TP1_MULT", 2),
   tp1SellPct: envNum("TP1_SELL_PCT", 30),
   tp2Mult: envNum("TP2_MULT", 5),
   tp2SellPct: envNum("TP2_SELL_PCT", 30),
   tp3Mult: envNum("TP3_MULT", 10),
   slPct: envNum("SL_PCT", 50),
-  positionPollMs: envNum("POSITION_POLL_MS", 8000),
+  positionPollMs: validatePositiveInteger("POSITION_POLL_MS", envNum("POSITION_POLL_MS", 8000)),
   maxQueueSize: validatePositiveInteger("MAX_QUEUE_SIZE", envNum("MAX_QUEUE_SIZE", 500)),
   maxSeenEntries: validatePositiveInteger("MAX_SEEN_ENTRIES", envNum("MAX_SEEN_ENTRIES", 10_000)),
   seenTtlMs: validatePositiveInteger("SEEN_TTL_MS", envNum("SEEN_TTL_MS", 86_400_000)),

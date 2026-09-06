@@ -2,7 +2,7 @@ import { Contract, Interface, Wallet, formatEther, keccak256, parseEther } from 
 import { ADDR, SETTINGS, liveTradingAllowed } from "./config.js";
 import { V2_FACTORY_ABI, V2_ROUTER_ABI, ERC20_ABI } from "./abis.js";
 import { getProvider } from "./chain.js";
-import { addTrade, commitPositionTrade, listPositions, removePosition, upsertPosition } from "./store.js";
+import { commitPositionTrade, listPositions, upsertPosition } from "./store.js";
 import { sendTelegram } from "./notify.js";
 import { dexScreener } from "./market.js";
 import { minOutFromQuote, plannedExitAmount, safeErrorMessage } from "./safety.js";
@@ -56,8 +56,6 @@ function defaultLiveDependencies(tokenAddress) {
     prepareBuy: (...args) => prepareSignedCall(wallet, provider, router.swapExactETHForTokensSupportingFeeOnTransferTokens, args),
     prepareSell: (...args) => prepareSignedCall(wallet, provider, router.swapExactTokensForETHSupportingFeeOnTransferTokens, args),
     upsertPosition,
-    removePosition,
-    addTrade,
     commitPositionTrade,
     notify: sendTelegram,
   };
@@ -70,8 +68,6 @@ function defaultReconcileDependencies(position) {
     token: new Contract(position.token, ERC20_ABI, provider),
     wallet: { address: position.wallet },
     upsertPosition,
-    removePosition,
-    addTrade,
     commitPositionTrade,
   };
 }
@@ -214,20 +210,12 @@ export async function executeLiveBuy(report, supplied = null) {
   }
 }
 
-export async function maybeTrade(report) {
-  if (SETTINGS.mode !== "paper" && SETTINGS.mode !== "live") return null;
-  if (SETTINGS.mode === "live") {
-    if (report.verdict !== "green") return null;
-    if (!liveTradingAllowed()) throw new Error("live trading gate is off");
-    return executeLiveBuy(report);
+export function createPaperPosition(report, amountIn, now = Date.now()) {
+  const entryPriceUsd = Number(report.dex?.priceUsd);
+  if (!Number.isFinite(entryPriceUsd) || entryPriceUsd <= 0) {
+    throw new Error("paper entry price must be positive");
   }
-  if (report.paperReady !== true || report.venue !== "uniswap-v2") return null;
-  if (listPositions().some((position) => sameAddress(position.token, report.token) && position.state !== "closed")) {
-    console.log(`skip paper trade: active position already exists for ${report.token}`);
-    return null;
-  }
-  const amountIn = buyWei();
-  const position = upsertPosition({
+  return {
     schemaVersion: 2,
     state: "open",
     token: report.token,
@@ -239,14 +227,48 @@ export async function maybeTrade(report) {
     mode: "paper",
     amountInEth: formatEther(amountIn),
     entryUsd: report.facts.mcapUsd || report.facts.priceUsd || 0,
-    entryPriceUsd: report.dex?.priceUsd || 0,
+    entryPriceUsd,
     remainingPct: 100,
     tp1Done: false,
     tp2Done: false,
-    openedAt: Date.now(),
-  });
-  addTrade({ side: "buy", mode: "paper", token: report.token, symbol: report.meta.symbol, amountInEth: position.amountInEth });
-  await sendTelegram(
+    openedAt: now,
+  };
+}
+
+export async function maybeTrade(report, supplied = null) {
+  const deps = supplied || {
+    mode: SETTINGS.mode,
+    listPositions,
+    amountIn: buyWei(),
+    now: Date.now,
+    commitPositionTrade,
+    notify: sendTelegram,
+    log: console.log,
+  };
+  if (deps.mode !== "paper" && deps.mode !== "live") return null;
+  if (deps.mode === "live") {
+    if (report.verdict !== "green") return null;
+    if (!liveTradingAllowed()) throw new Error("live trading gate is off");
+    return executeLiveBuy(report);
+  }
+  if (report.paperReady !== true || report.venue !== "uniswap-v2") return null;
+  if (deps.listPositions().some((position) => sameAddress(position.token, report.token) && position.state !== "closed")) {
+    deps.log(`skip paper trade: active position already exists for ${report.token}`);
+    return null;
+  }
+  let position;
+  try {
+    position = createPaperPosition(report, BigInt(deps.amountIn), deps.now());
+  } catch (error) {
+    if (error?.message !== "paper entry price must be positive") throw error;
+    deps.log(`skip paper trade: missing positive entry price for ${report.token}`);
+    return null;
+  }
+  deps.commitPositionTrade(
+    position,
+    { side: "buy", mode: "paper", token: report.token, symbol: report.meta.symbol, amountInEth: position.amountInEth }
+  );
+  await deps.notify(
     `📝 模拟买入 <b>${report.meta.symbol}</b> ${position.amountInEth} ETH\n<code>${report.token}</code>`
   ).catch(() => {});
   return position;

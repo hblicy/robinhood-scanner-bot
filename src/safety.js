@@ -1,3 +1,5 @@
+import { parseEther } from "ethers";
+
 export function sanitizeRpcUrl(value) {
   try {
     const url = new URL(value);
@@ -25,6 +27,17 @@ export function validatePositiveInteger(name, value) {
     throw new Error(`${name} must be a positive integer`);
   }
   return value;
+}
+
+export function validatePositiveEth(name, value) {
+  let parsed;
+  try {
+    parsed = parseEther(String(value));
+  } catch (cause) {
+    throw new Error(`${name} must be a positive ETH amount`, { cause });
+  }
+  if (parsed <= 0n) throw new Error(`${name} must be a positive ETH amount`);
+  return String(value);
 }
 
 export function minOutFromQuote(quote, slippageBps) {
