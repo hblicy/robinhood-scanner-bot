@@ -5,6 +5,7 @@ import {
   processEvents,
   processOnchainRange,
   runReadOnlyCandidates,
+  runWatchIteration,
   scanOnce,
 } from "../src/scanner.js";
 import { CandidateQueue } from "../src/queue.js";
@@ -218,5 +219,160 @@ describe("scanner orchestration", () => {
       }
     );
     assert.deepEqual(alerted, ["0x1", "0x3"]);
+  });
+
+  it("does not touch RPC when one-shot onchain discovery is disabled", async () => {
+    let rpcCalls = 0;
+    const reports = await scanOnce({
+      settings: {
+        maxQueueSize: 2,
+        onchainScan: false,
+        geckoScan: true,
+        minScore: 55,
+        maxAgeMinutes: 30,
+        confirmationBlocks: 2,
+      },
+      getBlockNumber: async () => { rpcCalls += 1; throw new Error("RPC_CALLED"); },
+      findFirstBlockAtOrAfter: async () => { rpcCalls += 1; throw new Error("RPC_CALLED"); },
+      scanOnchain: async () => { rpcCalls += 1; throw new Error("RPC_CALLED"); },
+      geckoNewPools: async () => [
+        { token: "0x1", venue: "uniswap-v2", pool: "0xa", source: "gecko" },
+      ],
+      analyze: async (candidate) => ({
+        ...candidate,
+        score: 90,
+        verdict: "green",
+        meta: { symbol: "GECKO" },
+        red: [],
+        honeypot: {},
+      }),
+      consoleAlert: async () => {},
+      log: () => {},
+      now: () => 1,
+    });
+    assert.equal(rpcCalls, 0);
+    assert.equal(reports.length, 1);
+  });
+
+  it("processes a healthy source before reporting another source failure", async () => {
+    const alerted = [];
+    await assert.rejects(
+      () => scanOnce({
+        settings: {
+          maxQueueSize: 2,
+          onchainScan: true,
+          geckoScan: true,
+          minScore: 55,
+          maxAgeMinutes: 30,
+          confirmationBlocks: 2,
+        },
+        getBlockNumber: async () => 10,
+        findFirstBlockAtOrAfter: async () => 3,
+        scanOnchain: async () => { throw new Error("rpc unavailable"); },
+        geckoNewPools: async () => [
+          { token: "0x1", venue: "uniswap-v2", pool: "0xa", source: "gecko" },
+        ],
+        analyze: async (candidate) => ({
+          ...candidate,
+          score: 90,
+          verdict: "green",
+          meta: { symbol: "GECKO" },
+          red: [],
+          honeypot: {},
+        }),
+        consoleAlert: async (report) => { alerted.push(report.token); },
+        log: () => {},
+        now: () => 1,
+      }),
+      (error) => {
+        assert.ok(error instanceof AggregateError);
+        assert.match(error.message, /onchain/i);
+        return true;
+      }
+    );
+    assert.deepEqual(alerted, ["0x1"]);
+  });
+
+  it("keeps Gecko running when the watch RPC source fails", async () => {
+    let geckoCalls = 0;
+    const result = await runWatchIteration(
+      { lastBlock: null, lastGecko: 0 },
+      {
+        settings: {
+          onchainScan: true,
+          geckoScan: true,
+          confirmationBlocks: 2,
+          maxAgeMinutes: 30,
+          geckoPollMs: 10,
+        },
+        now: () => 100,
+        getBlockNumber: async () => { throw new Error("rpc unavailable"); },
+        getOnchainCursor: () => null,
+        findFirstBlockAtOrAfter: async () => 1,
+        scanOnchain: async () => [],
+        setOnchainCursor: () => {},
+        geckoNewPools: async () => { geckoCalls += 1; return []; },
+        handleEvents: async () => ({ accepted: 0, handled: 0, failed: 0 }),
+        log: () => {},
+      }
+    );
+    assert.equal(geckoCalls, 1);
+    assert.equal(result.errors.length, 1);
+    assert.match(result.errors[0].message, /onchain.*rpc unavailable/i);
+  });
+
+  it("commits a confirmed chain range even when Gecko fails", async () => {
+    const ranges = [];
+    const cursors = [];
+    const state = { lastBlock: null, lastGecko: 0 };
+    const result = await runWatchIteration(state, {
+      settings: {
+        onchainScan: true,
+        geckoScan: true,
+        confirmationBlocks: 2,
+        maxAgeMinutes: 30,
+        geckoPollMs: 10,
+      },
+      now: () => 100,
+      getBlockNumber: async () => 10,
+      getOnchainCursor: () => 5,
+      findFirstBlockAtOrAfter: async () => 1,
+      scanOnchain: async (from, head) => { ranges.push([from, head]); return []; },
+      setOnchainCursor: (block) => { cursors.push(block); },
+      geckoNewPools: async () => { throw new Error("gecko unavailable"); },
+      handleEvents: async () => ({ accepted: 0, handled: 0, failed: 0 }),
+      log: () => {},
+    });
+    assert.deepEqual(ranges, [[6, 8]]);
+    assert.deepEqual(cursors, [8]);
+    assert.equal(state.lastBlock, 8);
+    assert.equal(result.errors.length, 1);
+    assert.match(result.errors[0].message, /gecko unavailable/i);
+  });
+
+  it("does not use RPC in watch iterations when onchain discovery is disabled", async () => {
+    let rpcCalls = 0;
+    await runWatchIteration(
+      { lastBlock: null, lastGecko: 0 },
+      {
+        settings: {
+          onchainScan: false,
+          geckoScan: true,
+          confirmationBlocks: 2,
+          maxAgeMinutes: 30,
+          geckoPollMs: 10,
+        },
+        now: () => 100,
+        getBlockNumber: async () => { rpcCalls += 1; },
+        getOnchainCursor: () => { rpcCalls += 1; },
+        findFirstBlockAtOrAfter: async () => { rpcCalls += 1; },
+        scanOnchain: async () => { rpcCalls += 1; },
+        setOnchainCursor: () => { rpcCalls += 1; },
+        geckoNewPools: async () => [],
+        handleEvents: async () => ({ accepted: 0, handled: 0, failed: 0 }),
+        log: () => {},
+      }
+    );
+    assert.equal(rpcCalls, 0);
   });
 });

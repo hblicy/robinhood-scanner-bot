@@ -96,6 +96,66 @@ export async function initialOnchainCursor({
   return Math.min(head, Math.max(savedCursor ?? -1, firstRelevantBlock - 1));
 }
 
+export async function runWatchIteration(state, dependencies) {
+  const { settings } = dependencies;
+  const errors = [];
+  if (settings.onchainScan) {
+    try {
+      const latestHead = await dependencies.getBlockNumber();
+      const safeHead = latestHead - (settings.confirmationBlocks ?? 0);
+      if (safeHead >= 0 && state.lastBlock == null) {
+        state.lastBlock = await initialOnchainCursor({
+          head: safeHead,
+          savedCursor: dependencies.getOnchainCursor(),
+          maxAgeMinutes: settings.maxAgeMinutes,
+          now: dependencies.now,
+          findFirstBlockAtOrAfter: dependencies.findFirstBlockAtOrAfter,
+        });
+      }
+      if (safeHead >= 0 && safeHead > state.lastBlock) {
+        const from = state.lastBlock + 1;
+        const result = await processOnchainRange(
+          { from, head: safeHead },
+          {
+            scanOnchain: dependencies.scanOnchain,
+            handleEvents: dependencies.handleEvents,
+            setOnchainCursor: dependencies.setOnchainCursor,
+          }
+        );
+        if (result.events.length) {
+          dependencies.log(
+            `onchain ${from}-${safeHead}: ${result.events.length} pools, ${result.accepted} new`
+          );
+        }
+        if (result.complete) state.lastBlock = safeHead;
+        else dependencies.log(`onchain ${from}-${safeHead}: ${result.failed} failed; cursor not advanced`);
+      }
+    } catch (cause) {
+      const error = new Error(`onchain watch failed: ${safeErrorMessage(cause)}`, { cause });
+      errors.push(error);
+      dependencies.log(error.message);
+    }
+  }
+
+  const currentTime = dependencies.now();
+  if (settings.geckoScan && currentTime - state.lastGecko >= settings.geckoPollMs) {
+    state.lastGecko = currentTime;
+    try {
+      const events = await dependencies.geckoNewPools(1);
+      const result = await dependencies.handleEvents(events);
+      if (result.accepted) {
+        dependencies.log(`gecko: ${events.length} pools, ${result.accepted} new`);
+      }
+      if (result.failed) dependencies.log(`gecko: ${result.failed} candidates failed`);
+    } catch (cause) {
+      const error = new Error(`gecko watch failed: ${safeErrorMessage(cause)}`, { cause });
+      errors.push(error);
+      dependencies.log(error.message);
+    }
+  }
+  return { state, errors };
+}
+
 export async function runReadOnlyCandidates(events, dependencies) {
   const queue = new CandidateQueue({
     maxSize: dependencies.maxQueueSize,
@@ -153,56 +213,25 @@ async function watch() {
     ).catch((error) => console.error("startup telegram:", safeErrorMessage(error)));
   }
 
-  const initialHead = await getBlockNumber();
-  let lastBlock = await initialOnchainCursor({
-    head: initialHead,
-    savedCursor: getOnchainCursor(),
-    maxAgeMinutes: SETTINGS.maxAgeMinutes,
-    now: Date.now,
-    findFirstBlockAtOrAfter,
-  });
-  let lastGecko = 0;
+  const state = { lastBlock: null, lastGecko: 0 };
 
   while (true) {
-    try {
-      const head = await getBlockNumber();
-      if (SETTINGS.onchainScan && head > lastBlock) {
-        const from = lastBlock + 1;
-        const result = await processOnchainRange(
-          { from, head },
-          {
-            scanOnchain,
-            handleEvents: (events) => processEvents(
-              events,
-              candidates,
-              () => drain({ persistSeen: true })
-            ),
-            setOnchainCursor,
-          }
-        );
-        if (result.events.length) {
-          console.log(
-            `onchain ${from}-${head}: ${result.events.length} pools, ${result.accepted} new`
-          );
-        }
-        if (result.complete) lastBlock = head;
-        else console.warn(`onchain ${from}-${head}: ${result.failed} failed; cursor not advanced`);
-      }
-      if (SETTINGS.geckoScan && Date.now() - lastGecko >= SETTINGS.geckoPollMs) {
-        lastGecko = Date.now();
-        const events = await geckoNewPools(1).catch((error) => {
-          console.error("gecko", safeErrorMessage(error));
-          return [];
-        });
-        const result = await processEvents(events, candidates, () => drain({ persistSeen: true }));
-        if (result.accepted) {
-          console.log(`gecko: ${events.length} pools, ${result.accepted} new`);
-        }
-      }
-      await drain({ persistSeen: true });
-    } catch (error) {
-      console.error("watch loop", safeErrorMessage(error));
-    }
+    await runWatchIteration(state, {
+      settings: SETTINGS,
+      now: Date.now,
+      getBlockNumber,
+      getOnchainCursor,
+      findFirstBlockAtOrAfter,
+      scanOnchain,
+      setOnchainCursor,
+      geckoNewPools,
+      handleEvents: (events) => processEvents(
+        events,
+        candidates,
+        () => drain({ persistSeen: true })
+      ),
+      log: console.log,
+    });
     await sleep(SETTINGS.pollMs);
   }
 }
@@ -222,38 +251,71 @@ async function scanOnce(supplied = null) {
   };
   const settings = dependencies.settings;
   banner();
-  const head = await dependencies.getBlockNumber();
-  const from = settings.onchainScan
-    ? await dependencies.findFirstBlockAtOrAfter(
-        (dependencies.now || Date.now)() - settings.maxAgeMinutes * 60_000,
-        head
-      )
-    : head;
-  dependencies.log(`one-shot read-only scan blocks ${from}-${head} + gecko new_pools`);
-  const [onchain, gecko] = await Promise.all([
-    settings.onchainScan
-      ? dependencies.scanOnchain(from, head).catch((error) => {
-          dependencies.log(safeErrorMessage(error));
-          return [];
-        })
-      : [],
-    settings.geckoScan
-      ? dependencies.geckoNewPools(3).catch((error) => {
-          dependencies.log(safeErrorMessage(error));
-          return [];
-        })
-      : [],
-  ]);
-  dependencies.log(`candidates: onchain=${onchain.length} gecko=${gecko.length}`);
-  return runReadOnlyCandidates([...onchain, ...gecko], {
-    maxQueueSize: settings.maxQueueSize,
-    maxAgeMinutes: settings.maxAgeMinutes,
-    minScore: settings.minScore,
-    now: dependencies.now || Date.now,
-    analyze: dependencies.analyze,
-    consoleAlert: dependencies.consoleAlert,
-    log: dependencies.log,
+  const sources = [];
+  if (settings.onchainScan) {
+    sources.push({
+      name: "onchain",
+      run: async () => {
+        const latestHead = await dependencies.getBlockNumber();
+        const head = latestHead - (settings.confirmationBlocks ?? 0);
+        if (head < 0) return [];
+        const from = await dependencies.findFirstBlockAtOrAfter(
+          (dependencies.now || Date.now)() - settings.maxAgeMinutes * 60_000,
+          head
+        );
+        dependencies.log(`one-shot read-only scan blocks ${from}-${head}`);
+        return dependencies.scanOnchain(from, head);
+      },
+    });
+  }
+  if (settings.geckoScan) {
+    sources.push({ name: "gecko", run: () => dependencies.geckoNewPools(3) });
+  }
+
+  const results = await Promise.allSettled(sources.map(({ run }) => run()));
+  const sourceFailures = [];
+  const discovered = { onchain: [], gecko: [] };
+  results.forEach((result, index) => {
+    const source = sources[index].name;
+    if (result.status === "fulfilled") {
+      discovered[source] = result.value;
+    } else {
+      const wrapped = new Error(
+        `${source} discovery failed: ${safeErrorMessage(result.reason)}`,
+        { cause: result.reason }
+      );
+      sourceFailures.push(wrapped);
+      dependencies.log(wrapped.message);
+    }
   });
+  const onchain = discovered.onchain;
+  const gecko = discovered.gecko;
+  dependencies.log(`candidates: onchain=${onchain.length} gecko=${gecko.length}`);
+  let reports = [];
+  let candidateFailure = null;
+  try {
+    reports = await runReadOnlyCandidates([...onchain, ...gecko], {
+      maxQueueSize: settings.maxQueueSize,
+      maxAgeMinutes: settings.maxAgeMinutes,
+      minScore: settings.minScore,
+      now: dependencies.now || Date.now,
+      analyze: dependencies.analyze,
+      consoleAlert: dependencies.consoleAlert,
+      log: dependencies.log,
+    });
+  } catch (error) {
+    candidateFailure = error;
+  }
+  if (sourceFailures.length || candidateFailure) {
+    const errors = [...sourceFailures];
+    if (candidateFailure instanceof AggregateError) errors.push(...candidateFailure.errors);
+    else if (candidateFailure) errors.push(candidateFailure);
+    throw new AggregateError(errors, [
+      ...sourceFailures.map((error) => error.message),
+      candidateFailure?.message,
+    ].filter(Boolean).join("; "));
+  }
+  return reports;
 }
 
 async function checkOne(token) {
