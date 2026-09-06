@@ -8,6 +8,7 @@ import {
   executeLiveBuy,
   exitPosition,
   netTransferAmount,
+  reconcilePendingExit,
   reconcilePendingBuy,
   validateLiveReport,
   verifyRouterBinding,
@@ -196,6 +197,7 @@ describe("live trade safety", () => {
 
   it("sells an absolute share of the initial position and confirms atomically", async () => {
     const writes = [];
+    const commits = [];
     let approved;
     let sold;
     const position = {
@@ -235,15 +237,30 @@ describe("live trade safety", () => {
         sold = { amount, minOut };
         return {
           hash: "0xsell",
+          rawTx: "0xrawsell",
+          nonce: 8,
           broadcast: async () => {
             assert.equal(writes.at(-1).pending.txHash, "0xsell");
-            return { hash: "0xsell", wait: async () => ({ hash: "0xsell", status: 1 }) };
+            assert.equal(writes.at(-1).pending.rawTx, "0xrawsell");
+            assert.equal(writes.at(-1).pending.nonce, 8);
+            return {
+              hash: "0xsell",
+              wait: async () => ({
+                hash: "0xsell",
+                status: 1,
+                logs: [transferLog(WALLET, POOL, 30n)],
+              }),
+            };
           },
         };
       },
       upsertPosition: (p) => { writes.push(structuredClone(p)); return p; },
       removePosition: () => {},
       addTrade: () => {},
+      commitPositionTrade: (nextPosition, trade, options) => {
+        commits.push({ position: nextPosition, trade, options });
+        return { position: nextPosition, trade };
+      },
       notify: async () => {},
     };
     const updated = await exitPosition(position, {
@@ -258,6 +275,8 @@ describe("live trade safety", () => {
     assert.equal(updated.tp2Done, true);
     assert.equal(updated.state, "open");
     assert.ok(writes.some((p) => p.state === "exit_pending"));
+    assert.equal(commits.length, 1);
+    assert.equal(commits[0].trade.amount, "30");
   });
 
   it("persists the TP flag in the confirmed transition", () => {
@@ -390,6 +409,139 @@ describe("live trade safety", () => {
     assert.equal(updated.state, "needs_review");
     assert.match(updated.reviewReason, /nonce was consumed/);
     assert.equal(writes.length, 1);
+  });
+
+  it("recovers a partial pending exit and appends its trade atomically", async () => {
+    const commits = [];
+    const position = {
+      token: TOKEN,
+      symbol: "SAFE",
+      wallet: WALLET,
+      mode: "live",
+      schemaVersion: 2,
+      state: "exit_pending",
+      initialTokenAmount: "100",
+      remainingTokenAmount: "70",
+      tp1Done: true,
+      tp2Done: false,
+      pending: {
+        txHash: "0xsell",
+        rawTx: "0xrawsell",
+        nonce: 8,
+        stage: "tp2",
+        reason: "take profit",
+        price: 2,
+      },
+    };
+    const updated = await reconcilePendingExit(position, {
+      provider: {
+        getTransactionReceipt: async () => ({
+          status: 1,
+          hash: "0xsell",
+          logs: [transferLog(WALLET, POOL, 30n)],
+        }),
+      },
+      upsertPosition: () => { throw new Error("must commit atomically"); },
+      commitPositionTrade: (nextPosition, trade, options) => {
+        commits.push({ position: nextPosition, trade, options });
+      },
+    });
+    assert.equal(updated.remainingTokenAmount, "40");
+    assert.equal(updated.tp2Done, true);
+    assert.equal(commits.length, 1);
+    assert.equal(commits[0].position.remainingTokenAmount, "40");
+    assert.equal(commits[0].trade.side, "sell");
+    assert.equal(commits[0].trade.amount, "30");
+    assert.equal(commits[0].trade.recovered, true);
+  });
+
+  it("recovers a full pending exit by removing the position and recording the sell together", async () => {
+    const commits = [];
+    const position = {
+      token: TOKEN,
+      symbol: "SAFE",
+      wallet: WALLET,
+      mode: "live",
+      schemaVersion: 2,
+      state: "exit_pending",
+      initialTokenAmount: "70",
+      remainingTokenAmount: "70",
+      pending: {
+        txHash: "0xsell",
+        rawTx: "0xrawsell",
+        nonce: 8,
+        stage: "sl",
+        reason: "stop",
+        price: 0.5,
+      },
+    };
+    const updated = await reconcilePendingExit(position, {
+      provider: {
+        getTransactionReceipt: async () => ({
+          status: 1,
+          hash: "0xsell",
+          logs: [transferLog(WALLET, POOL, 70n)],
+        }),
+      },
+      commitPositionTrade: (nextPosition, trade, options) => {
+        commits.push({ position: nextPosition, trade, options });
+      },
+    });
+    assert.equal(updated.state, "closed");
+    assert.equal(commits.length, 1);
+    assert.equal(commits[0].position, null);
+    assert.equal(commits[0].trade.amount, "70");
+    assert.equal(commits[0].trade.recovered, true);
+    assert.deepEqual(commits[0].options, { removeToken: TOKEN });
+  });
+
+  it("moves a pending exit to needs_review when its nonce was consumed", async () => {
+    const writes = [];
+    const position = {
+      token: TOKEN,
+      wallet: WALLET,
+      mode: "live",
+      schemaVersion: 2,
+      state: "exit_pending",
+      remainingTokenAmount: "70",
+      pending: { txHash: "0xsell", rawTx: "0xrawsell", nonce: 8 },
+    };
+    const updated = await reconcilePendingExit(position, {
+      provider: {
+        getTransactionReceipt: async () => null,
+        getTransaction: async () => null,
+        getTransactionCount: async () => 9,
+      },
+      upsertPosition: (next) => { writes.push(next); return next; },
+    });
+    assert.equal(updated.state, "needs_review");
+    assert.match(updated.reviewReason, /nonce was consumed/);
+    assert.equal(writes.length, 1);
+  });
+
+  it("commits a paper exit and its trade in one operation", async () => {
+    const commits = [];
+    const position = {
+      token: TOKEN,
+      mode: "paper",
+      state: "open",
+      remainingPct: 100,
+      tp1Done: false,
+      tp2Done: false,
+    };
+    const updated = await exitPosition(
+      position,
+      { sellPct: 30, stage: "tp1", reason: "take profit", price: 2 },
+      {
+        commitPositionTrade: (nextPosition, trade, options) => {
+          commits.push({ position: nextPosition, trade, options });
+        },
+      }
+    );
+    assert.equal(updated.remainingPct, 70);
+    assert.equal(commits.length, 1);
+    assert.equal(commits[0].position.remainingPct, 70);
+    assert.equal(commits[0].trade.side, "sell");
   });
 
   it("keeps paper exits on percentage accounting without live dependencies", () => {

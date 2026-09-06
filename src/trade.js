@@ -284,9 +284,12 @@ export function confirmPaperExit(position, { sellPct, stage }) {
 function paperExit(position, { sellPct, stage, reason, price }, deps) {
   const updated = confirmPaperExit(position, { sellPct, stage });
   const pct = Number(position.remainingPct) - updated.remainingPct;
-  deps.addTrade({ side: "sell", mode: "paper", token: position.token, pct, reason, price });
-  if (updated.remainingPct === 0) deps.removePosition(position.token);
-  else deps.upsertPosition(updated);
+  const trade = { side: "sell", mode: "paper", token: position.token, pct, reason, price };
+  if (updated.remainingPct === 0) {
+    deps.commitPositionTrade(null, trade, { removeToken: position.token });
+  } else {
+    deps.commitPositionTrade(updated, trade);
+  }
   return updated;
 }
 
@@ -295,7 +298,7 @@ export async function exitPosition(position, action, supplied = null) {
     throw new Error("live trading gate is off");
   }
   const deps = supplied || (position.mode === "paper"
-    ? { upsertPosition, removePosition, addTrade, notify: sendTelegram }
+    ? { commitPositionTrade, notify: sendTelegram }
     : defaultLiveDependencies(position.token));
   if (position.mode === "paper") return paperExit(position, action, deps);
   if (!deps.liveAllowed()) throw new Error("live trading gate is off");
@@ -336,6 +339,9 @@ export async function exitPosition(position, action, supplied = null) {
     deadline,
     { gasLimit: deps.gasLimit }
   );
+  if (!prepared.hash || !prepared.rawTx || !Number.isInteger(prepared.nonce)) {
+    throw new Error("prepared sell is missing durable transaction fields");
+  }
   let pending = {
     ...position,
     state: "exit_pending",
@@ -346,6 +352,9 @@ export async function exitPosition(position, action, supplied = null) {
       reason: action.reason,
       price: action.price,
       txHash: prepared.hash,
+      rawTx: prepared.rawTx,
+      nonce: prepared.nonce,
+      preparedAt: deps.now(),
     },
   };
   deps.upsertPosition(pending);
@@ -353,12 +362,12 @@ export async function exitPosition(position, action, supplied = null) {
   try {
     const tx = await prepared.broadcast();
     const receipt = requireReceipt(await tx.wait(), "sell");
-    const balanceAfter = BigInt(await deps.token.balanceOf(deps.wallet.address));
-    const balanceDelta = balanceBefore - balanceAfter;
-    if (balanceDelta <= 0n) throw new Error("sell confirmed without a positive token balance delta");
-    const soldAmount = balanceDelta > remaining ? remaining : balanceDelta;
+    const net = netTransferAmount(receipt, position.token, deps.wallet.address);
+    const receiptSold = -net;
+    if (receiptSold <= 0n) throw new Error("sell confirmed without a positive receipt transfer");
+    const soldAmount = receiptSold > remaining ? remaining : receiptSold;
     const updated = confirmExit(pending, { stage: action.stage, soldAmount, txHash: receipt.hash || prepared.hash });
-    deps.addTrade({
+    const trade = {
       side: "sell",
       mode: "live",
       token: position.token,
@@ -366,9 +375,12 @@ export async function exitPosition(position, action, supplied = null) {
       reason: action.reason,
       price: action.price,
       tx: updated.lastSellTx,
-    });
-    if (updated.state === "closed") deps.removePosition(position.token);
-    else deps.upsertPosition(updated);
+    };
+    if (updated.state === "closed") {
+      deps.commitPositionTrade(null, trade, { removeToken: position.token });
+    } else {
+      deps.commitPositionTrade(updated, trade);
+    }
     await deps.notify(
       `💸 ${action.reason}\n<b>${position.symbol}</b> 已确认卖出 ${soldAmount.toString()} 个最小单位`
     ).catch(() => {});
@@ -440,36 +452,38 @@ export async function reconcilePendingBuy(position, supplied = null) {
 }
 
 async function reconcilePendingExit(position, supplied = null) {
-  if (!position.pending?.txHash) {
-    const deps = supplied || defaultReconcileDependencies(position);
-    const review = { ...position, state: "needs_review", reviewReason: "pending sell has no transaction hash" };
-    deps.upsertPosition(review);
-    return review;
-  }
   const deps = supplied || defaultReconcileDependencies(position);
-  const receipt = await deps.provider.getTransactionReceipt(position.pending.txHash);
+  const resolution = await resolvePending(position, deps, "sell");
+  if (resolution.review) return resolution.review;
+  const receipt = resolution.receipt;
   if (!receipt) return null;
-  if (receipt.status === 0) {
-    const review = { ...position, state: "needs_review", reviewReason: "pending sell reverted" };
-    deps.upsertPosition(review);
-    return review;
-  }
-  const balanceAfter = BigInt(await deps.token.balanceOf(deps.wallet.address));
-  const balanceBefore = BigInt(position.pending.balanceBefore);
-  const delta = balanceBefore - balanceAfter;
-  if (delta <= 0n) {
-    const review = { ...position, state: "needs_review", reviewReason: "confirmed sell has no balance delta" };
-    deps.upsertPosition(review);
-    return review;
+  const net = netTransferAmount(receipt, position.token, position.wallet);
+  const receiptSold = -net;
+  if (receiptSold <= 0n) {
+    return moveToReview(position, deps, "confirmed sell has no positive receipt transfer");
   }
   const remaining = BigInt(position.remainingTokenAmount);
+  const soldAmount = receiptSold > remaining ? remaining : receiptSold;
   const updated = confirmExit(position, {
     stage: position.pending.stage,
-    soldAmount: delta > remaining ? remaining : delta,
+    soldAmount,
     txHash: receipt.hash || position.pending.txHash,
   });
-  if (updated.state === "closed") deps.removePosition(position.token);
-  else deps.upsertPosition(updated);
+  const trade = {
+    side: "sell",
+    mode: "live",
+    token: position.token,
+    amount: soldAmount.toString(),
+    reason: position.pending.reason,
+    price: position.pending.price,
+    tx: updated.lastSellTx,
+    recovered: true,
+  };
+  if (updated.state === "closed") {
+    deps.commitPositionTrade(null, trade, { removeToken: position.token });
+  } else {
+    deps.commitPositionTrade(updated, trade);
+  }
   return updated;
 }
 
