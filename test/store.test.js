@@ -33,6 +33,42 @@ afterEach(() => {
 });
 
 describe("createStore", () => {
+  it("preserves historical positions and trades as opaque data", () => {
+    const dir = tempDir();
+    const positions = {
+      [TOKEN.toLowerCase()]: { token: TOKEN, mode: "live", customLegacyField: { keep: true } },
+    };
+    const trades = [{ side: "buy", token: TOKEN, customLegacyField: [1, 2, 3] }];
+    write(dir, "state.json", JSON.stringify({ schemaVersion: 3, seen: {}, positions, trades }));
+
+    const store = openStore(dir);
+    store.markSeen("pool", { score: 80 });
+
+    const saved = JSON.parse(fs.readFileSync(path.join(dir, "state.json"), "utf8"));
+    assert.deepEqual(saved.positions, positions);
+    assert.deepEqual(saved.trades, trades);
+  });
+
+  it("persists and reloads a monotonic onchain cursor", () => {
+    const dir = tempDir();
+    const store = openStore(dir);
+
+    store.setOnchainCursor(123);
+
+    assert.equal(store.getOnchainCursor(), 123);
+    assert.equal(openStore(dir).getOnchainCursor(), 123);
+    const saved = JSON.parse(fs.readFileSync(path.join(dir, "state.json"), "utf8"));
+    assert.equal(saved.cursors.onchain, 123);
+  });
+
+  it("rejects invalid or decreasing onchain cursors", () => {
+    const store = openStore(tempDir());
+    store.setOnchainCursor(123);
+    assert.throws(() => store.setOnchainCursor(122), /cannot move backwards/);
+    assert.throws(() => store.setOnchainCursor(1.5), /non-negative integer/);
+    assert.throws(() => store.setOnchainCursor(-1), /non-negative integer/);
+  });
+
   it("fails loudly for corrupt positions", () => {
     const dir = tempDir();
     write(dir, "positions.json", "{");
@@ -42,22 +78,21 @@ describe("createStore", () => {
     );
   });
 
-  it("migrates legacy live positions to needs_review", () => {
+  it("imports legacy positions without rewriting historical records", () => {
     const dir = tempDir();
+    const positions = {
+      [TOKEN.toLowerCase()]: { token: TOKEN, mode: "live", remainingPct: 70 },
+    };
     write(
       dir,
       "positions.json",
-      JSON.stringify({ [TOKEN.toLowerCase()]: { token: TOKEN, mode: "live", remainingPct: 70 } })
+      JSON.stringify(positions)
     );
     const original = fs.readFileSync(path.join(dir, "positions.json"), "utf8");
-    const store = createStore({ dataDir: dir, now: () => 1, maxSeenEntries: 10, seenTtlMs: 1000 });
-    const position = store.listPositions()[0];
-    assert.equal(position.state, "needs_review");
-    assert.equal(position.schemaVersion, 2);
-    assert.match(position.migrationReason, /verified token amount and route/);
+    createStore({ dataDir: dir, now: () => 1, maxSeenEntries: 10, seenTtlMs: 1000 });
     const persisted = JSON.parse(fs.readFileSync(path.join(dir, "state.json"), "utf8"));
     assert.equal(persisted.schemaVersion, 3);
-    assert.equal(persisted.positions[TOKEN.toLowerCase()].state, "needs_review");
+    assert.deepEqual(persisted.positions, positions);
     assert.equal(fs.readFileSync(path.join(dir, "positions.json"), "utf8"), original);
   });
 
@@ -92,39 +127,10 @@ describe("createStore", () => {
     assert.equal(state.schemaVersion, 3);
     assert.equal(state.seen.a.token, "a");
     assert.equal(state.trades.length, 1);
+    assert.deepEqual(state.cursors, {});
     assert.equal(fs.existsSync(path.join(dir, "seen.json")), true);
     assert.equal(fs.existsSync(path.join(dir, "positions.json")), true);
     assert.equal(fs.existsSync(path.join(dir, "trades.json")), true);
-  });
-
-  it("commits a position and its trade in one state snapshot", () => {
-    const dir = tempDir();
-    const store = openStore(dir);
-
-    store.commitPositionTrade(
-      { token: TOKEN, state: "open" },
-      { side: "buy", token: TOKEN }
-    );
-
-    assert.equal(store.listPositions().length, 1);
-    assert.equal(store.listTrades().length, 1);
-    const state = JSON.parse(fs.readFileSync(path.join(dir, "state.json"), "utf8"));
-    assert.equal(state.positions[TOKEN.toLowerCase()].state, "open");
-    assert.equal(state.trades[0].side, "buy");
-  });
-
-  it("removes a closed position and appends its sell in one state snapshot", () => {
-    const store = openStore(tempDir());
-    store.upsertPosition({ token: TOKEN, state: "open" });
-
-    store.commitPositionTrade(
-      null,
-      { side: "sell", token: TOKEN },
-      { removeToken: TOKEN }
-    );
-
-    assert.equal(store.listPositions().length, 0);
-    assert.equal(store.listTrades().length, 1);
   });
 
   it("does not mutate in-memory state when an atomic write fails", () => {
@@ -138,14 +144,9 @@ describe("createStore", () => {
       },
     });
 
-    assert.throws(
-      () => store.commitPositionTrade(
-        { token: TOKEN, state: "open" },
-        { side: "buy", token: TOKEN }
-      ),
-      /disk full/
-    );
-    assert.deepEqual(store.listPositions(), []);
-    assert.deepEqual(store.listTrades(), []);
+    assert.throws(() => store.setOnchainCursor(123), /disk full/);
+    assert.equal(store.getOnchainCursor(), null);
+    const state = JSON.parse(fs.readFileSync(path.join(dir, "state.json"), "utf8"));
+    assert.deepEqual(state.cursors, {});
   });
 });

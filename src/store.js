@@ -22,26 +22,20 @@ function atomicWriteState(dataDir, value) {
   fs.renameSync(tmp, filePath);
 }
 
-function migratePositions(raw) {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-    throw new Error("positions.json must contain an object");
+function validateHistory(positions, trades, source = "state.json") {
+  if (!positions || typeof positions !== "object" || Array.isArray(positions)) {
+    throw new Error(`${source} positions must contain an object`);
   }
-  const migrated = {};
-  for (const [key, value] of Object.entries(raw)) {
-    if (!value || typeof value !== "object" || !value.token) {
-      throw new Error(`positions.json contains invalid position ${key}`);
-    }
-    const position = value.schemaVersion === 2
-      ? value
-      : {
-          ...value,
-          schemaVersion: 2,
-          state: "needs_review",
-          migrationReason: "legacy position lacks verified token amount and route",
-        };
-    migrated[String(position.token).toLowerCase()] = position;
+  if (!Array.isArray(trades)) throw new Error(`${source} trades must contain an array`);
+}
+
+function validateCursors(cursors) {
+  if (!cursors || typeof cursors !== "object" || Array.isArray(cursors)) {
+    throw new Error("state.json cursors must contain an object");
   }
-  return migrated;
+  if (cursors.onchain != null && (!Number.isInteger(cursors.onchain) || cursors.onchain < 0)) {
+    throw new Error("state.json onchain cursor must be a non-negative integer");
+  }
 }
 
 export function createStore({
@@ -61,12 +55,17 @@ export function createStore({
     if (!loaded.seen || typeof loaded.seen !== "object" || Array.isArray(loaded.seen)) {
       throw new Error("state.json seen must contain an object");
     }
-    if (!Array.isArray(loaded.trades)) throw new Error("state.json trades must contain an array");
+    const positions = loaded.positions === undefined ? {} : loaded.positions;
+    const trades = loaded.trades === undefined ? [] : loaded.trades;
+    const cursors = loaded.cursors === undefined ? {} : loaded.cursors;
+    validateHistory(positions, trades);
+    validateCursors(cursors);
     state = {
       schemaVersion: STATE_VERSION,
-      seen: loaded.seen,
-      positions: migratePositions(loaded.positions),
-      trades: loaded.trades,
+      seen: structuredClone(loaded.seen),
+      positions: structuredClone(positions),
+      trades: structuredClone(trades),
+      cursors: structuredClone(cursors),
     };
   } else {
     const seen = readJson(dataDir, "seen.json", {});
@@ -75,12 +74,13 @@ export function createStore({
     if (!seen || typeof seen !== "object" || Array.isArray(seen)) {
       throw new Error("seen.json must contain an object");
     }
-    if (!Array.isArray(trades)) throw new Error("trades.json must contain an array");
+    validateHistory(rawPositions, trades, "legacy state");
     state = {
       schemaVersion: STATE_VERSION,
       seen,
-      positions: migratePositions(rawPositions),
+      positions: rawPositions,
       trades,
+      cursors: {},
     };
     writeState(dataDir, state);
   }
@@ -121,50 +121,28 @@ export function createStore({
 
     getSeen(token) {
       const key = String(token).toLowerCase();
-      return this.hasSeen(key) ? structuredClone(state.seen[key]) : null;
+      const item = state.seen[key];
+      return item && Number.isFinite(item.updatedAt) && item.updatedAt >= now() - seenTtlMs
+        ? structuredClone(item)
+        : null;
     },
 
-    listPositions() {
-      return structuredClone(Object.values(state.positions));
+    getOnchainCursor() {
+      return state.cursors.onchain ?? null;
     },
 
-    listTrades() {
-      return structuredClone(state.trades);
-    },
-
-    upsertPosition(position) {
+    setOnchainCursor(blockNumber) {
+      if (!Number.isInteger(blockNumber) || blockNumber < 0) {
+        throw new Error("onchain cursor must be a non-negative integer");
+      }
+      const current = state.cursors.onchain;
+      if (current != null && blockNumber < current) {
+        throw new Error(`onchain cursor cannot move backwards from ${current} to ${blockNumber}`);
+      }
+      if (current === blockNumber) return blockNumber;
       return commit((draft) => {
-        draft.positions[String(position.token).toLowerCase()] = structuredClone(position);
-        return position;
-      });
-    },
-
-    removePosition(token) {
-      return commit((draft) => {
-        delete draft.positions[String(token).toLowerCase()];
-        return null;
-      });
-    },
-
-    addTrade(trade) {
-      return commit((draft) => {
-        const saved = { ...trade, at: now() };
-        draft.trades.push(saved);
-        return saved;
-      });
-    },
-
-    commitPositionTrade(position, trade, { removeToken = null } = {}) {
-      if (!position && !removeToken) throw new Error("position or removeToken is required");
-      if (!trade || typeof trade !== "object") throw new Error("trade is required");
-      return commit((draft) => {
-        if (removeToken) delete draft.positions[String(removeToken).toLowerCase()];
-        if (position) {
-          draft.positions[String(position.token).toLowerCase()] = structuredClone(position);
-        }
-        const saved = { ...trade, at: now() };
-        draft.trades.push(saved);
-        return { position, trade: saved };
+        draft.cursors.onchain = blockNumber;
+        return blockNumber;
       });
     },
   };
@@ -186,9 +164,5 @@ function getDefaultStore() {
 export const hasSeen = (...args) => getDefaultStore().hasSeen(...args);
 export const markSeen = (...args) => getDefaultStore().markSeen(...args);
 export const getSeen = (...args) => getDefaultStore().getSeen(...args);
-export const listPositions = (...args) => getDefaultStore().listPositions(...args);
-export const listTrades = (...args) => getDefaultStore().listTrades(...args);
-export const upsertPosition = (...args) => getDefaultStore().upsertPosition(...args);
-export const removePosition = (...args) => getDefaultStore().removePosition(...args);
-export const addTrade = (...args) => getDefaultStore().addTrade(...args);
-export const commitPositionTrade = (...args) => getDefaultStore().commitPositionTrade(...args);
+export const getOnchainCursor = (...args) => getDefaultStore().getOnchainCursor(...args);
+export const setOnchainCursor = (...args) => getDefaultStore().setOnchainCursor(...args);
