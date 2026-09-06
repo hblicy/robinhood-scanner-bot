@@ -1,0 +1,153 @@
+import dotenv from "dotenv";
+import { getAddress, ZeroAddress } from "ethers";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+dotenv.config({ path: path.join(root, ".env") });
+
+function env(name, fallback = "") {
+  const v = process.env[name];
+  return v === undefined || v === "" ? fallback : v;
+}
+
+function envNum(name, fallback) {
+  const v = env(name, "");
+  if (v === "") return fallback;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function envBool(name, fallback = false) {
+  const v = env(name, "").toLowerCase();
+  if (v === "") return fallback;
+  return v === "1" || v === "true" || v === "yes" || v === "on";
+}
+
+export const ROOT = root;
+export const DATA_DIR = path.join(root, "data");
+
+export const CHAIN = {
+  id: 4663,
+  name: "Robinhood Chain",
+  rpc: env("RPC_URL", "https://rpc.mainnet.chain.robinhood.com"),
+  wss: env("WSS_URL", ""),
+  explorer: "https://robinhoodchain.blockscout.com",
+  dexScreener: "https://dexscreener.com/robinhood",
+  geckoNetwork: "robinhood",
+  nativeSymbol: "ETH",
+};
+
+export const ADDR = {
+  WETH: getAddress("0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73"),
+  USDG: getAddress("0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168"),
+  NATIVE: getAddress("0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"),
+  ZERO: ZeroAddress,
+  DEAD: getAddress("0x000000000000000000000000000000000000dEaD"),
+  MULTICALL3: getAddress("0xcA11bde05977b3631167028862bE2a173976CA11"),
+  V2_FACTORY: getAddress("0x8bcEaA40B9AcdfAedF85AdF4FF01F5Ad6517937f"),
+  V2_ROUTER: getAddress("0x89e5DB8B5aA49aA85AC63f691524311AEB649eba"),
+  V3_FACTORY: getAddress("0x1f7d7550B1b028f7571E69A784071F0205FD2EfA"),
+  V3_ROUTER: getAddress("0xCaf681a66D020601342297493863E78C959E5cb2"),
+  V3_QUOTER: getAddress("0x33e885ed0ec9bf04ecfb19341582aadcb4c8a9e7"),
+  V3_NPM: getAddress("0x73991a25C818Bf1f1128dEAaB1492D45638DE0D3"),
+  V4_POOL_MANAGER: getAddress("0x8366a39CC670B4001A1121B8F6A443A643e40951"),
+  V4_QUOTER: getAddress("0x8Dc178eFB8111BB0973Dd9d722ebeFF267c98F94"),
+  V4_POSM: getAddress("0x58daec3116aae6D93017bAAea7749052E8a04fA7"),
+  UNIVERSAL_ROUTER: getAddress("0x53BF6B0684Ec7eF91e1387Da3D1a1769bC5A6F77"),
+};
+
+const QUOTE_SET = new Set(
+  env("QUOTE_TOKENS", "WETH,ETH,USDG")
+    .split(",")
+    .map((s) => s.trim().toUpperCase())
+    .filter(Boolean)
+);
+
+export const QUOTE_ADDRESSES = new Set(
+  [
+    QUOTE_SET.has("WETH") ? ADDR.WETH.toLowerCase() : null,
+    QUOTE_SET.has("USDG") ? ADDR.USDG.toLowerCase() : null,
+    QUOTE_SET.has("ETH") ? ADDR.NATIVE.toLowerCase() : null,
+    QUOTE_SET.has("ETH") ? ADDR.ZERO.toLowerCase() : null,
+  ].filter(Boolean)
+);
+
+export const SETTINGS = {
+  mode: env("MODE", "watch").toLowerCase(),
+  telegramToken: env("TELEGRAM_BOT_TOKEN"),
+  telegramChat: env("TELEGRAM_CHAT_ID"),
+  maxAgeMinutes: envNum("MAX_AGE_MINUTES", 30),
+  minLiquidityUsd: envNum("MIN_LIQUIDITY_USD", 1500),
+  maxMcapUsd: envNum("MAX_MCAP_USD", 1_500_000),
+  minScore: envNum("MIN_SCORE", 55),
+  maxTop10Pct: envNum("MAX_TOP10_PCT", 55),
+  maxTaxBps: envNum("MAX_TAX_BPS", 500),
+  maxDeployerTokens: envNum("MAX_DEPLOYER_TOKENS", 8),
+  requireSocial: envBool("REQUIRE_SOCIAL", false),
+  pollMs: envNum("POLL_MS", 2500),
+  lookbackBlocks: envNum("LOOKBACK_BLOCKS", 120),
+  geckoPollMs: envNum("GECKO_POLL_MS", 15000),
+  onchainScan: envBool("ONCHAIN_SCAN", true),
+  geckoScan: envBool("GECKO_SCAN", true),
+  enableLiveTrading: envBool("ENABLE_LIVE_TRADING", false),
+  privateKey: env("PRIVATE_KEY"),
+  buyAmountEth: env("BUY_AMOUNT_ETH", "0.01"),
+  maxBuyEth: env("MAX_BUY_ETH", "0.03"),
+  slippageBps: envNum("SLIPPAGE_BPS", 1200),
+  gasLimit: envNum("GAS_LIMIT", 450000),
+  tp1Mult: envNum("TP1_MULT", 2),
+  tp1SellPct: envNum("TP1_SELL_PCT", 30),
+  tp2Mult: envNum("TP2_MULT", 5),
+  tp2SellPct: envNum("TP2_SELL_PCT", 30),
+  tp3Mult: envNum("TP3_MULT", 10),
+  slPct: envNum("SL_PCT", 50),
+  positionPollMs: envNum("POSITION_POLL_MS", 8000),
+};
+
+export const NARRATIVE_WORDS = [
+  "robinhood",
+  "hood",
+  "gme",
+  "gamestop",
+  "vlad",
+  "cash",
+  "cat",
+  "dog",
+  "pepe",
+  "wojak",
+  "ape",
+  "stock",
+  "wallstreet",
+  "wsb",
+  "moon",
+  "trump",
+  "elon",
+  "hoodrat",
+];
+
+export function isQuote(address) {
+  if (!address) return false;
+  return QUOTE_ADDRESSES.has(String(address).toLowerCase());
+}
+
+export function explorerToken(address) {
+  return `${CHAIN.explorer}/token/${address}`;
+}
+
+export function explorerAddress(address) {
+  return `${CHAIN.explorer}/address/${address}`;
+}
+
+export function dexScreenerToken(address) {
+  return `${CHAIN.dexScreener}/${address}`;
+}
+
+export function liveTradingAllowed() {
+  return (
+    SETTINGS.mode === "live" &&
+    SETTINGS.enableLiveTrading &&
+    Boolean(SETTINGS.privateKey) &&
+    CHAIN.id === 4663
+  );
+}

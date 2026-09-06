@@ -1,0 +1,22 @@
+{
+  "name": "robinhood-scanner-bot",
+  "version": "1.0.0",
+  "description": "Robinhood Chain memecoin scanner + Telegram alert bot (jiamigou checklist)",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js watch",
+    "watch": "node src/index.js watch",
+    "scan": "node src/index.js scan",
+    "check": "node src/index.js check",
+    "paper": "node src/index.js paper",
+    "test": "node --test test/*.test.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "ethers": "^6.13.5"
+  }
+}
