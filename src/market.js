@@ -1,17 +1,18 @@
 import { getAddress } from "ethers";
 import { ADDR, CHAIN, SETTINGS, isQuote } from "./config.js";
+import { safeErrorMessage } from "./safety.js";
 
 const UA = {
   accept: "application/json",
   "user-agent": "robinhood-scanner-bot/1.0",
 };
 
-async function getJson(url, timeoutMs = 12000) {
+async function getJson(url, { fetchImpl = fetch, timeoutMs = 12000 } = {}) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const res = await fetch(url, { headers: UA, signal: ctrl.signal });
-    if (!res.ok) throw new Error(`${res.status} ${url}`);
+    const res = await fetchImpl(url, { headers: UA, signal: ctrl.signal });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return await res.json();
   } finally {
     clearTimeout(t);
@@ -29,29 +30,55 @@ function isEthAddress(value) {
   return /^0x[0-9a-fA-F]{40}$/.test(String(value || ""));
 }
 
-export async function geckoNewPools(pages = 1) {
+export async function geckoNewPools(
+  pages = 1,
+  {
+    fetchImpl = fetch,
+    now = Date.now,
+    maxAgeMinutes = SETTINGS.maxAgeMinutes,
+    timeoutMs = 12000,
+  } = {}
+) {
   const events = [];
   for (let page = 1; page <= pages; page++) {
     const url = `https://api.geckoterminal.com/api/v2/networks/${CHAIN.geckoNetwork}/new_pools?page=${page}`;
-    const json = await getJson(url).catch(() => null);
-    if (!json?.data) break;
-    for (const row of json.data) {
+    let json;
+    try {
+      json = await getJson(url, { fetchImpl, timeoutMs });
+    } catch (cause) {
+      throw new Error(`Gecko page ${page} failed: ${safeErrorMessage(cause)}`, { cause });
+    }
+    if (!Array.isArray(json?.data)) throw new Error(`Gecko page ${page} data must be an array`);
+    for (const [rowIndex, row] of json.data.entries()) {
       const a = row.attributes || {};
       const rel = row.relationships || {};
       const tokenRaw = relAddr(rel.base_token?.data?.id);
       const quoteRaw = relAddr(rel.quote_token?.data?.id);
-      if (!tokenRaw) continue;
+      if (!tokenRaw) throw new Error(`Gecko base_token invalid on page ${page} row ${rowIndex}`);
+      if (!quoteRaw) throw new Error(`Gecko quote_token invalid on page ${page} row ${rowIndex}`);
       const picked = resolvePair(tokenRaw, quoteRaw);
       if (!picked) continue;
       const { token, quote } = picked;
-      const createdAt = a.pool_created_at ? Date.parse(a.pool_created_at) : Date.now();
-      const ageMin = (Date.now() - createdAt) / 60000;
-      if (ageMin > SETTINGS.maxAgeMinutes * 3) continue;
+      const venue = rel.dex?.data?.id || "unknown";
+      const poolAddress = isEthAddress(a.address) ? getAddress(a.address) : null;
+      const poolId = /v4/i.test(venue) && /^0x[0-9a-fA-F]{64}$/.test(String(a.address || ""))
+        ? String(a.address).toLowerCase()
+        : null;
+      if (!poolAddress && !poolId) {
+        throw new Error(`Gecko pool address invalid on page ${page} row ${rowIndex}`);
+      }
+      const createdAt = Date.parse(a.pool_created_at);
+      if (!Number.isFinite(createdAt)) {
+        throw new Error(`Gecko pool_created_at invalid on page ${page} row ${rowIndex}`);
+      }
+      const ageMin = (now() - createdAt) / 60000;
+      if (ageMin > maxAgeMinutes) continue;
       const tx = a.transactions?.m5 || a.transactions?.h1 || {};
       events.push({
         source: "gecko",
-        venue: rel.dex?.data?.id || "unknown",
-        pool: isEthAddress(a.address) ? getAddress(a.address) : null,
+        venue,
+        pool: poolAddress,
+        poolId,
         token: getAddress(token),
         quote,
         createdAt,
@@ -76,14 +103,33 @@ export async function geckoNewPools(pages = 1) {
   return events;
 }
 
-export async function dexScreener(token) {
+function sameAddress(a, b) {
+  return Boolean(a && b) && String(a).toLowerCase() === String(b).toLowerCase();
+}
+
+export function selectDexPair(pairs, { token, pool = null, quote = null } = {}) {
+  const matchingToken = (Array.isArray(pairs) ? pairs : []).filter(
+    (p) =>
+      String(p.chainId).toLowerCase() === "robinhood" &&
+      sameAddress(p.baseToken?.address, token)
+  );
+  if (pool || quote) {
+    if (!pool || !quote) return null;
+    return (
+      matchingToken.find(
+        (p) => sameAddress(p.pairAddress, pool) && sameAddress(p.quoteToken?.address, quote)
+      ) || null
+    );
+  }
+  return matchingToken.sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0))[0] || null;
+}
+
+export async function dexScreener(token, binding = {}) {
   const url = `https://api.dexscreener.com/tokens/v1/${CHAIN.geckoNetwork}/${token}`;
-  const json = await getJson(url).catch(() => null);
+  const json = await getJson(url);
   const pairs = Array.isArray(json) ? json : json?.pairs || [];
-  const rh = pairs.filter((p) => String(p.chainId).toLowerCase() === "robinhood");
-  if (!rh.length) return null;
-  rh.sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0));
-  const p = rh[0];
+  const p = selectDexPair(pairs, { token, ...binding });
+  if (!p) return null;
   const socials = p.info?.socials || [];
   const websites = p.info?.websites || [];
   return {
@@ -93,6 +139,9 @@ export async function dexScreener(token) {
     symbol: p.baseToken?.symbol,
     name: p.baseToken?.name,
     quoteSymbol: p.quoteToken?.symbol,
+    baseAddress: p.baseToken?.address || null,
+    quoteAddress: p.quoteToken?.address || null,
+    marketBound: Boolean(binding.pool && binding.quote),
     priceUsd: num(p.priceUsd),
     mcapUsd: num(p.marketCap) || num(p.fdv),
     fdvUsd: num(p.fdv),
@@ -114,8 +163,10 @@ export async function dexScreener(token) {
 
 export async function blockscoutHolders(token, limit = 20) {
   const url = `${CHAIN.explorer}/api?module=token&action=getTokenHolders&contractaddress=${token}&page=1&offset=${limit}`;
-  const json = await getJson(url).catch(() => null);
-  if (json?.status !== "1" && json?.message !== "OK") return [];
+  const json = await getJson(url);
+  if (json?.status !== "1" && json?.message !== "OK") {
+    throw new Error(`Blockscout holders unavailable for ${token}`);
+  }
   return (json.result || []).map((h) => ({
     address: getAddress(h.address),
     value: BigInt(h.value),
@@ -124,9 +175,9 @@ export async function blockscoutHolders(token, limit = 20) {
 
 export async function blockscoutToken(token) {
   const url = `${CHAIN.explorer}/api?module=token&action=getToken&contractaddress=${token}`;
-  const json = await getJson(url).catch(() => null);
+  const json = await getJson(url);
   const r = json?.result;
-  if (!r) return null;
+  if (!r) throw new Error(`Blockscout token unavailable for ${token}`);
   return {
     name: r.name,
     symbol: r.symbol,
@@ -138,7 +189,7 @@ export async function blockscoutToken(token) {
 
 export async function blockscoutCreator(token) {
   const url = `${CHAIN.explorer}/api?module=contract&action=getcontractcreation&contractaddresses=${token}`;
-  const json = await getJson(url).catch(() => null);
+  const json = await getJson(url);
   const row = Array.isArray(json?.result) ? json.result[0] : json?.result;
   if (!row?.contractCreator) return null;
   return {
@@ -148,15 +199,20 @@ export async function blockscoutCreator(token) {
 }
 
 export async function deployerHistory(creator, cap = 50) {
-  if (!creator) return { created: 0, recent: [] };
+  if (!creator) return { created: null, recent: [], known: false };
   const url = `${CHAIN.explorer}/api?module=account&action=txlist&address=${creator}&page=1&offset=200&sort=desc`;
-  const json = await getJson(url).catch(() => null);
+  const json = await getJson(url);
   const txs = json?.result;
-  if (!Array.isArray(txs)) return { created: 0, recent: [] };
+  if (!Array.isArray(txs)) throw new Error(`Blockscout deployer history unavailable for ${creator}`);
+  return summarizeDeployerHistory(txs, cap, 200);
+}
+
+export function summarizeDeployerHistory(txs, cap = 50, pageSize = 200) {
   const created = txs.filter((t) => t.contractAddress && t.contractAddress !== "0x" && t.contractAddress !== "");
   return {
     created: created.length,
     recent: created.slice(0, cap).map((t) => t.contractAddress),
+    known: txs.length < pageSize,
   };
 }
 

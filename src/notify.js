@@ -1,4 +1,5 @@
-import { SETTINGS, liveTradingAllowed } from "./config.js";
+import { SETTINGS } from "./config.js";
+import { safeErrorMessage } from "./safety.js";
 
 const VERDICT = {
   green: "🟢 可小仓试",
@@ -15,7 +16,9 @@ export function formatAlert(report) {
   lines.push("");
   lines.push(`<b>CA</b> <code>${token}</code>`);
   lines.push(`<b>池</b> ${esc(venue)} / ${esc(report.dex?.quoteSymbol || "WETH")}`);
-  lines.push(`<b>年龄</b> ${facts.ageMinutes.toFixed(1)} 分钟`);
+  lines.push(
+    `<b>年龄</b> ${Number.isFinite(facts.ageMinutes) ? `${facts.ageMinutes.toFixed(1)} 分钟` : "未知"}`
+  );
   lines.push(
     `<b>市值</b> $${fmt(facts.mcapUsd)}  ·  <b>流动性</b> $${fmt(facts.liquidityUsd)}` +
       (facts.mcapUsd ? `  (liq/mc ${((facts.liquidityUsd / facts.mcapUsd) * 100).toFixed(0)}%)` : "")
@@ -31,11 +34,22 @@ export function formatAlert(report) {
     `<b>持仓</b> 前10 ${facts.top10Pct == null ? "?" : facts.top10Pct.toFixed(1) + "%"}  ·  ${facts.holderCount ?? "?"} 人`
   );
   lines.push(
-    `<b>创建者</b> ${creator ? `<code>${short(creator)}</code>` : "?"} 持仓 ${facts.creatorPct?.toFixed(1) ?? "?"}%  · 历史发币 ${facts.deployerTokens}`
+    `<b>创建者</b> ${creator ? `<code>${short(creator)}</code>` : "?"} 持仓 ${facts.creatorPct?.toFixed(1) ?? "?"}%  · 历史发币 ${facts.deployerTokens ?? "未知"}`
   );
+  const buyTax = Number.isFinite(facts.buyTaxBps) ? facts.buyTaxBps : "未知";
+  const sellTax = Number.isFinite(facts.sellTaxBps) ? facts.sellTaxBps : "未知";
+  const lpStatus = facts.lpUnknown
+    ? "未验证"
+    : Number.isFinite(facts.lpBurnedPct)
+      ? `已烧 ${facts.lpBurnedPct.toFixed(0)}%`
+      : "未验证";
   lines.push(
-    `<b>安全</b> 蜜罐 ${facts.honeypot === false ? "通过" : facts.honeypot === true ? "失败" : "未完成"}  税 ${facts.buyTaxBps ?? 0}/${facts.sellTaxBps ?? 0}bps  LP ${facts.lpLocked || facts.lpBurnedPct >= 90 ? "已锁/已烧" : "可撤"}`
+    `<b>安全</b> 蜜罐 ${facts.honeypot === false ? "通过" : facts.honeypot === true ? "失败" : "未完成"}  税 ${buyTax}/${sellTax}bps  LP ${lpStatus}`
   );
+  if (report.errorSources?.length) {
+    const sources = [...new Set(report.errorSources.map(({ source }) => String(source)))];
+    lines.push(`<b>数据异常</b> ${sources.map(esc).join(", ")}`);
+  }
   if (red.length) {
     lines.push("");
     lines.push("<b>红旗</b>");
@@ -48,34 +62,57 @@ export function formatAlert(report) {
   }
   lines.push("");
   lines.push(`<a href="${links.dex}">DexScreener</a> · <a href="${links.explorer}">Blockscout</a> · <a href="${links.gmgn}">GMGN</a>`);
-  if (!liveTradingAllowed()) {
-    lines.push("");
-    lines.push("<i>默认只报警，不自动买入。先小仓 1–2% 测试。</i>");
-  }
+  lines.push("");
+  lines.push("<i>本程序只扫描报警，不包含模拟或实盘交易功能。</i>");
   return lines.join("\n");
 }
 
-export async function sendTelegram(text) {
-  if (!SETTINGS.telegramToken || !SETTINGS.telegramChat) {
-    console.log("\n--- telegram (not configured) ---\n" + text.replace(/<[^>]+>/g, "") + "\n");
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export async function sendTelegramWith(text, {
+  settings = SETTINGS,
+  fetchImpl = fetch,
+  sleep = delay,
+  log = console.log,
+  timeoutMs = 10000,
+} = {}) {
+  if (!settings.telegramToken || !settings.telegramChat) {
+    log("\n--- telegram (not configured) ---\n" + text.replace(/<[^>]+>/g, "") + "\n");
     return false;
   }
-  const url = `https://api.telegram.org/bot${SETTINGS.telegramToken}/sendMessage`;
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      chat_id: SETTINGS.telegramChat,
-      text,
-      parse_mode: "HTML",
-      disable_web_page_preview: true,
-    }),
-  });
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`telegram ${res.status}: ${body}`);
+  const url = `https://api.telegram.org/bot${settings.telegramToken}/sendMessage`;
+  let lastError;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      const res = await fetchImpl(url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        signal: ctrl.signal,
+        body: JSON.stringify({
+          chat_id: settings.telegramChat,
+          text,
+          parse_mode: "HTML",
+          disable_web_page_preview: true,
+        }),
+      });
+      if (!res.ok) throw new Error(`telegram ${res.status}`);
+      return true;
+    } catch (error) {
+      lastError = error;
+      if (attempt < 2) await sleep(200 * (2 ** attempt));
+    } finally {
+      clearTimeout(timer);
+    }
   }
-  return true;
+  throw new Error(`telegram send failed after 3 attempts: ${safeErrorMessage(lastError)}`, { cause: lastError });
+}
+
+export async function sendTelegram(text) {
+  return sendTelegramWith(text);
 }
 
 export async function alertReport(report) {
@@ -83,11 +120,7 @@ export async function alertReport(report) {
   console.log(
     `[${report.verdict}] ${report.meta.symbol} ${report.score}/100 ${report.token} red=${report.red.length}`
   );
-  try {
-    await sendTelegram(text);
-  } catch (err) {
-    console.error("telegram failed:", err.message);
-  }
+  return sendTelegram(text);
 }
 
 function esc(s) {

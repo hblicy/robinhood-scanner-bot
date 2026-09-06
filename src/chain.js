@@ -1,9 +1,8 @@
-import { Contract, Interface, JsonRpcProvider, WebSocketProvider, id, getAddress, ZeroAddress } from "ethers";
-import { ADDR, CHAIN, SETTINGS, isQuote } from "./config.js";
+import { Contract, Interface, JsonRpcProvider, id, getAddress, ZeroAddress } from "ethers";
+import { ADDR, CHAIN, isQuote } from "./config.js";
 import { ERC20_ABI, PAIR_V2_ABI, V2_FACTORY_ABI, V3_FACTORY_ABI, V4_PM_ABI } from "./abis.js";
 
 let httpProvider;
-let wsProvider;
 
 export function getProvider() {
   if (!httpProvider) {
@@ -12,22 +11,14 @@ export function getProvider() {
   return httpProvider;
 }
 
-export async function getWsProvider() {
-  if (!CHAIN.wss) return null;
-  if (!wsProvider) {
-    wsProvider = new WebSocketProvider(CHAIN.wss, CHAIN.id);
-  }
-  return wsProvider;
-}
-
-export async function withRetry(fn, tries = 3) {
+export async function withRetry(fn, tries = 3, sleepImpl = sleep) {
   let last;
   for (let i = 0; i < tries; i++) {
     try {
       return await fn();
     } catch (err) {
       last = err;
-      await sleep(400 * (i + 1));
+      if (i < tries - 1) await sleepImpl(400 * (i + 1));
     }
   }
   throw last;
@@ -41,8 +32,85 @@ export function toHex(n) {
   return "0x" + BigInt(n).toString(16);
 }
 
+function errorDetails(error) {
+  const values = [];
+  const pending = [error];
+  const visited = new Set();
+  while (pending.length) {
+    const current = pending.shift();
+    if (!current || visited.has(current)) continue;
+    if (typeof current === "object") visited.add(current);
+    values.push(current);
+    if (typeof current === "object") {
+      pending.push(current.cause, current.error, current.info?.error);
+    }
+  }
+  return values;
+}
+
+export function isContractCallRevert(error) {
+  const details = errorDetails(error);
+  if (details.some((value) => {
+    const status = Number(typeof value === "object" ? value.status || value.statusCode : NaN);
+    const code = typeof value === "object" ? String(value.code || "").toUpperCase() : "";
+    return [401, 403, 408, 429, 500, 502, 503, 504].includes(status) ||
+      ["NETWORK_ERROR", "SERVER_ERROR", "TIMEOUT"].includes(code);
+  })) return false;
+  return details.some((value) => {
+    const code = typeof value === "object" ? String(value.code || "").toUpperCase() : "";
+    const message = typeof value === "string"
+      ? value
+      : `${value.shortMessage || ""} ${value.message || ""}`;
+    return code === "CALL_EXCEPTION" || /execution reverted|call exception|revert(?:ed)?\b/i.test(message);
+  });
+}
+
+export function isLogRangeLimitError(error) {
+  const details = errorDetails(error);
+  if (details.some((value) => {
+    const status = Number(typeof value === "object" ? value.status || value.statusCode : NaN);
+    const code = typeof value === "object" ? String(value.code || "").toUpperCase() : "";
+    return [401, 403, 429].includes(status) || ["NETWORK_ERROR", "SERVER_ERROR", "TIMEOUT"].includes(code);
+  })) return false;
+  return details.some((value) => {
+    const message = typeof value === "string"
+      ? value
+      : `${value.shortMessage || ""} ${value.message || ""}`;
+    return /range too large|block range|too many (?:logs|results)|query returned more than|response size|result set too large|exceed(?:s|ed)? (?:the )?(?:maximum|max).*range/i.test(message);
+  });
+}
+
 export async function getBlockNumber() {
   return withRetry(() => getProvider().getBlockNumber());
+}
+
+export async function findFirstBlockAtOrAfter(
+  targetMs,
+  head,
+  provider = getProvider(),
+  retry = (fn) => withRetry(fn)
+) {
+  if (!Number.isFinite(targetMs)) throw new Error("target timestamp must be finite");
+  if (!Number.isInteger(head) || head < 0) throw new Error("head must be a non-negative integer");
+
+  let low = 0;
+  let high = head;
+  let first = head;
+  while (low <= high) {
+    const blockNumber = Math.floor((low + high) / 2);
+    const block = await retry(() => provider.getBlock(blockNumber));
+    const timestamp = Number(block?.timestamp);
+    if (!Number.isFinite(timestamp)) {
+      throw new Error(`cannot read timestamp for block ${blockNumber}`);
+    }
+    if (timestamp * 1000 >= targetMs) {
+      first = blockNumber;
+      high = blockNumber - 1;
+    } else {
+      low = blockNumber + 1;
+    }
+  }
+  return first;
 }
 
 const v2Iface = new Interface(V2_FACTORY_ABI);
@@ -63,28 +131,53 @@ function pickToken(token0, token1) {
   return null;
 }
 
-function baseEvent({ source, venue, pool, token, quote, fee, blockNumber, txHash, createdAt }) {
+function baseEvent({ source, venue, pool, poolId, token, quote, fee, blockNumber, txHash, createdAt }) {
   return {
     source,
     venue,
     pool: pool ? getAddress(pool) : null,
+    poolId: poolId ? String(poolId).toLowerCase() : null,
     token: getAddress(token),
     quote: quote ? getAddress(quote) : ADDR.WETH,
     fee: fee ?? null,
     blockNumber: blockNumber ?? null,
     txHash: txHash ?? null,
-    createdAt: createdAt ?? Date.now(),
+    createdAt: createdAt ?? null,
   };
 }
 
-export async function getLogsChunked({ address, topics, fromBlock, toBlock, chunk = 400 }) {
-  const provider = getProvider();
+export function parseV4PoolLog(log) {
+  const parsed = v4Iface.parseLog(log);
+  const picked = pickToken(parsed.args.currency0, parsed.args.currency1);
+  if (!picked) return null;
+  return baseEvent({
+    source: "onchain",
+    venue: "uniswap-v4",
+    pool: null,
+    poolId: parsed.args.id,
+    token: picked.token,
+    quote: picked.quote === ADDR.ZERO ? ADDR.NATIVE : picked.quote,
+    fee: Number(parsed.args.fee),
+    blockNumber: Number(log.blockNumber),
+    txHash: log.transactionHash,
+  });
+}
+
+export async function getLogsChunked({
+  address,
+  topics,
+  fromBlock,
+  toBlock,
+  chunk = 2000,
+  provider = getProvider(),
+  retry = (fn) => withRetry(fn),
+}) {
   const out = [];
   let start = fromBlock;
   while (start <= toBlock) {
     const end = Math.min(start + chunk - 1, toBlock);
     try {
-      const logs = await withRetry(() =>
+      const logs = await retry(() =>
         provider.getLogs({
           address,
           topics,
@@ -94,10 +187,11 @@ export async function getLogsChunked({ address, topics, fromBlock, toBlock, chun
       );
       out.push(...logs);
     } catch (err) {
-      if (chunk > 40) {
+      if (end - start + 1 > 40 && isLogRangeLimitError(err)) {
         const mid = Math.floor((start + end) / 2);
-        const left = await getLogsChunked({ address, topics, fromBlock: start, toBlock: mid, chunk: Math.floor(chunk / 2) });
-        const right = await getLogsChunked({ address, topics, fromBlock: mid + 1, toBlock: end, chunk: Math.floor(chunk / 2) });
+        const nextChunk = Math.max(40, Math.floor((end - start + 1) / 2));
+        const left = await getLogsChunked({ address, topics, fromBlock: start, toBlock: mid, chunk: nextChunk, provider, retry });
+        const right = await getLogsChunked({ address, topics, fromBlock: mid + 1, toBlock: end, chunk: nextChunk, provider, retry });
         out.push(...left, ...right);
       } else {
         throw err;
@@ -108,23 +202,38 @@ export async function getLogsChunked({ address, topics, fromBlock, toBlock, chun
   return out;
 }
 
-export async function scanOnchain(fromBlock, toBlock) {
+function parseFactoryLog(log, venue, parser) {
+  try {
+    return parser(log);
+  } catch (cause) {
+    throw new Error(
+      `${venue} log parse failed at block ${log.blockNumber ?? "unknown"} tx ${log.transactionHash || "unknown"}`,
+      { cause }
+    );
+  }
+}
+
+export async function scanOnchain(
+  fromBlock,
+  toBlock,
+  { getLogs = getLogsChunked, attachTimes = attachBlockTimes } = {}
+) {
   const events = [];
 
   const [v2logs, v3logs, v4logs] = await Promise.all([
-    getLogsChunked({
+    getLogs({
       address: ADDR.V2_FACTORY,
       topics: [TOPICS.pairCreated],
       fromBlock,
       toBlock,
     }),
-    getLogsChunked({
+    getLogs({
       address: ADDR.V3_FACTORY,
       topics: [TOPICS.poolCreated],
       fromBlock,
       toBlock,
     }),
-    getLogsChunked({
+    getLogs({
       address: ADDR.V4_POOL_MANAGER,
       topics: [TOPICS.initialize],
       fromBlock,
@@ -133,106 +242,108 @@ export async function scanOnchain(fromBlock, toBlock) {
   ]);
 
   for (const log of v2logs) {
-    try {
+    const event = parseFactoryLog(log, "uniswap-v2", () => {
       const parsed = v2Iface.parseLog(log);
       const picked = pickToken(parsed.args.token0, parsed.args.token1);
-      if (!picked) continue;
-      events.push(
-        baseEvent({
-          source: "onchain",
-          venue: "uniswap-v2",
-          pool: parsed.args.pair,
-          token: picked.token,
-          quote: picked.quote,
-          blockNumber: Number(log.blockNumber),
-          txHash: log.transactionHash,
-        })
-      );
-    } catch {
-      /* ignore undecodable */
-    }
+      if (!picked) return null;
+      return baseEvent({
+        source: "onchain",
+        venue: "uniswap-v2",
+        pool: parsed.args.pair,
+        token: picked.token,
+        quote: picked.quote,
+        blockNumber: Number(log.blockNumber),
+        txHash: log.transactionHash,
+      });
+    });
+    if (event) events.push(event);
   }
 
   for (const log of v3logs) {
-    try {
+    const event = parseFactoryLog(log, "uniswap-v3", () => {
       const parsed = v3Iface.parseLog(log);
       const picked = pickToken(parsed.args.token0, parsed.args.token1);
-      if (!picked) continue;
-      events.push(
-        baseEvent({
-          source: "onchain",
-          venue: "uniswap-v3",
-          pool: parsed.args.pool,
-          token: picked.token,
-          quote: picked.quote,
-          fee: Number(parsed.args.fee),
-          blockNumber: Number(log.blockNumber),
-          txHash: log.transactionHash,
-        })
-      );
-    } catch {
-      /* ignore */
-    }
+      if (!picked) return null;
+      return baseEvent({
+        source: "onchain",
+        venue: "uniswap-v3",
+        pool: parsed.args.pool,
+        token: picked.token,
+        quote: picked.quote,
+        fee: Number(parsed.args.fee),
+        blockNumber: Number(log.blockNumber),
+        txHash: log.transactionHash,
+      });
+    });
+    if (event) events.push(event);
   }
 
   for (const log of v4logs) {
-    try {
-      const parsed = v4Iface.parseLog(log);
-      const picked = pickToken(parsed.args.currency0, parsed.args.currency1);
-      if (!picked) continue;
-      events.push(
-        baseEvent({
-          source: "onchain",
-          venue: "uniswap-v4",
-          pool: null,
-          token: picked.token,
-          quote: picked.quote === ADDR.ZERO ? ADDR.NATIVE : picked.quote,
-          fee: Number(parsed.args.fee),
-          blockNumber: Number(log.blockNumber),
-          txHash: log.transactionHash,
-        })
-      );
-    } catch {
-      /* ignore */
-    }
+    const event = parseFactoryLog(log, "uniswap-v4", () => parseV4PoolLog(log));
+    if (event) events.push(event);
   }
 
-  return events;
+  return attachTimes(events);
+}
+
+export async function attachBlockTimes(
+  events,
+  provider = getProvider(),
+  retry = (fn) => withRetry(fn)
+) {
+  const blockNumbers = [...new Set(events.map((event) => event.blockNumber).filter(Number.isInteger))];
+  const blocks = new Map();
+  await Promise.all(
+    blockNumbers.map(async (blockNumber) => {
+      const block = await retry(() => provider.getBlock(blockNumber));
+      const timestamp = Number(block?.timestamp);
+      if (!Number.isFinite(timestamp)) throw new Error(`cannot read timestamp for block ${blockNumber}`);
+      blocks.set(blockNumber, timestamp * 1000);
+    })
+  );
+  return events.map((event) => ({
+    ...event,
+    createdAt: Number.isInteger(event.blockNumber) ? blocks.get(event.blockNumber) ?? null : event.createdAt ?? null,
+  }));
 }
 
 export async function readTokenMeta(token) {
   const c = new Contract(token, ERC20_ABI, getProvider());
   const [name, symbol, decimals, totalSupply] = await Promise.all([
-    c.name().catch(() => ""),
-    c.symbol().catch(() => ""),
-    c.decimals().catch(() => 18),
-    c.totalSupply().catch(() => 0n),
+    c.name(),
+    c.symbol(),
+    c.decimals(),
+    c.totalSupply(),
   ]);
   return { name, symbol, decimals: Number(decimals), totalSupply };
 }
 
-export async function readOwner(token) {
-  const c = new Contract(token, ERC20_ABI, getProvider());
+export async function readOwnerFromContract(c) {
   try {
     return getAddress(await c.owner());
-  } catch {
+  } catch (error) {
+    if (!isContractCallRevert(error)) throw error;
     try {
       return getAddress(await c.getOwner());
-    } catch {
+    } catch (fallbackError) {
+      if (!isContractCallRevert(fallbackError)) throw fallbackError;
       return null;
     }
   }
 }
 
-export async function readV2Pool(pool) {
-  const c = new Contract(pool, PAIR_V2_ABI, getProvider());
+export async function readOwner(token) {
+  return readOwnerFromContract(new Contract(token, ERC20_ABI, getProvider()));
+}
+
+export async function readV2PoolFromContract(c) {
   const [token0, token1, reserves, lpSupply, deadLp, zeroLp] = await Promise.all([
     c.token0(),
     c.token1(),
     c.getReserves(),
     c.totalSupply(),
-    c.balanceOf(ADDR.DEAD).catch(() => 0n),
-    c.balanceOf(ZeroAddress).catch(() => 0n),
+    c.balanceOf(ADDR.DEAD),
+    c.balanceOf(ZeroAddress),
   ]);
   const burned = deadLp + zeroLp;
   const burnedPct = lpSupply === 0n ? 0 : Number((burned * 10000n) / lpSupply) / 100;
@@ -245,6 +356,10 @@ export async function readV2Pool(pool) {
     burnedLp: burned,
     burnedPct,
   };
+}
+
+export async function readV2Pool(pool) {
+  return readV2PoolFromContract(new Contract(pool, PAIR_V2_ABI, getProvider()));
 }
 
 export async function bytecodeFlags(token) {

@@ -1,13 +1,42 @@
-import dotenv from "dotenv";
 import { getAddress, ZeroAddress } from "ethers";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { readEnvFile } from "./env.js";
+import {
+  validateNonNegativeInteger,
+  validatePositiveInteger,
+  validatePositiveNumber,
+  validateRange,
+} from "./safety.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-dotenv.config({ path: path.join(root, ".env") });
+const fileEnv = readEnvFile(path.join(root, ".env"));
+const ALLOWED_ENV = new Set([
+  "RPC_URL",
+  "TELEGRAM_BOT_TOKEN",
+  "TELEGRAM_CHAT_ID",
+  "QUOTE_TOKENS",
+  "MAX_AGE_MINUTES",
+  "MIN_LIQUIDITY_USD",
+  "MAX_MCAP_USD",
+  "MIN_SCORE",
+  "MAX_TOP10_PCT",
+  "MAX_TAX_BPS",
+  "MAX_DEPLOYER_TOKENS",
+  "REQUIRE_SOCIAL",
+  "POLL_MS",
+  "GECKO_POLL_MS",
+  "ONCHAIN_SCAN",
+  "GECKO_SCAN",
+  "CONFIRMATION_BLOCKS",
+  "MAX_QUEUE_SIZE",
+  "MAX_SEEN_ENTRIES",
+  "SEEN_TTL_MS",
+]);
 
 function env(name, fallback = "") {
-  const v = process.env[name];
+  if (!ALLOWED_ENV.has(name)) throw new Error(`unsupported scanner setting ${name}`);
+  const v = process.env[name] ?? fileEnv[name];
   return v === undefined || v === "" ? fallback : v;
 }
 
@@ -15,13 +44,16 @@ function envNum(name, fallback) {
   const v = env(name, "");
   if (v === "") return fallback;
   const n = Number(v);
-  return Number.isFinite(n) ? n : fallback;
+  if (!Number.isFinite(n)) throw new Error(`${name} must be numeric`);
+  return n;
 }
 
 function envBool(name, fallback = false) {
   const v = env(name, "").toLowerCase();
   if (v === "") return fallback;
-  return v === "1" || v === "true" || v === "yes" || v === "on";
+  if (["1", "true", "yes", "on"].includes(v)) return true;
+  if (["0", "false", "no", "off"].includes(v)) return false;
+  throw new Error(`${name} must be true or false`);
 }
 
 export const ROOT = root;
@@ -31,7 +63,6 @@ export const CHAIN = {
   id: 4663,
   name: "Robinhood Chain",
   rpc: env("RPC_URL", "https://rpc.mainnet.chain.robinhood.com"),
-  wss: env("WSS_URL", ""),
   explorer: "https://robinhoodchain.blockscout.com",
   dexScreener: "https://dexscreener.com/robinhood",
   geckoNetwork: "robinhood",
@@ -63,6 +94,10 @@ const QUOTE_SET = new Set(
     .map((s) => s.trim().toUpperCase())
     .filter(Boolean)
 );
+const UNKNOWN_QUOTES = [...QUOTE_SET].filter((name) => !["WETH", "ETH", "USDG"].includes(name));
+if (QUOTE_SET.size === 0 || UNKNOWN_QUOTES.length > 0) {
+  throw new Error("QUOTE_TOKENS must contain only WETH, ETH or USDG");
+}
 
 export const QUOTE_ADDRESSES = new Set(
   [
@@ -73,36 +108,31 @@ export const QUOTE_ADDRESSES = new Set(
   ].filter(Boolean)
 );
 
+const onchainScan = envBool("ONCHAIN_SCAN", true);
+const geckoScan = envBool("GECKO_SCAN", true);
+if (!onchainScan && !geckoScan) {
+  throw new Error("at least one of ONCHAIN_SCAN or GECKO_SCAN must be true");
+}
+
 export const SETTINGS = {
-  mode: env("MODE", "watch").toLowerCase(),
   telegramToken: env("TELEGRAM_BOT_TOKEN"),
   telegramChat: env("TELEGRAM_CHAT_ID"),
-  maxAgeMinutes: envNum("MAX_AGE_MINUTES", 30),
-  minLiquidityUsd: envNum("MIN_LIQUIDITY_USD", 1500),
-  maxMcapUsd: envNum("MAX_MCAP_USD", 1_500_000),
-  minScore: envNum("MIN_SCORE", 55),
-  maxTop10Pct: envNum("MAX_TOP10_PCT", 55),
-  maxTaxBps: envNum("MAX_TAX_BPS", 500),
-  maxDeployerTokens: envNum("MAX_DEPLOYER_TOKENS", 8),
+  maxAgeMinutes: validatePositiveNumber("MAX_AGE_MINUTES", envNum("MAX_AGE_MINUTES", 30)),
+  minLiquidityUsd: validateRange("MIN_LIQUIDITY_USD", envNum("MIN_LIQUIDITY_USD", 1500), 0, Number.MAX_VALUE),
+  maxMcapUsd: validatePositiveNumber("MAX_MCAP_USD", envNum("MAX_MCAP_USD", 1_500_000)),
+  minScore: validateRange("MIN_SCORE", envNum("MIN_SCORE", 55), 0, 100),
+  maxTop10Pct: validateRange("MAX_TOP10_PCT", envNum("MAX_TOP10_PCT", 55), 0, 100),
+  maxTaxBps: validateRange("MAX_TAX_BPS", envNum("MAX_TAX_BPS", 500), 0, 10_000),
+  maxDeployerTokens: validateNonNegativeInteger("MAX_DEPLOYER_TOKENS", envNum("MAX_DEPLOYER_TOKENS", 8)),
   requireSocial: envBool("REQUIRE_SOCIAL", false),
-  pollMs: envNum("POLL_MS", 2500),
-  lookbackBlocks: envNum("LOOKBACK_BLOCKS", 120),
-  geckoPollMs: envNum("GECKO_POLL_MS", 15000),
-  onchainScan: envBool("ONCHAIN_SCAN", true),
-  geckoScan: envBool("GECKO_SCAN", true),
-  enableLiveTrading: envBool("ENABLE_LIVE_TRADING", false),
-  privateKey: env("PRIVATE_KEY"),
-  buyAmountEth: env("BUY_AMOUNT_ETH", "0.01"),
-  maxBuyEth: env("MAX_BUY_ETH", "0.03"),
-  slippageBps: envNum("SLIPPAGE_BPS", 1200),
-  gasLimit: envNum("GAS_LIMIT", 450000),
-  tp1Mult: envNum("TP1_MULT", 2),
-  tp1SellPct: envNum("TP1_SELL_PCT", 30),
-  tp2Mult: envNum("TP2_MULT", 5),
-  tp2SellPct: envNum("TP2_SELL_PCT", 30),
-  tp3Mult: envNum("TP3_MULT", 10),
-  slPct: envNum("SL_PCT", 50),
-  positionPollMs: envNum("POSITION_POLL_MS", 8000),
+  pollMs: validatePositiveInteger("POLL_MS", envNum("POLL_MS", 2500)),
+  geckoPollMs: validatePositiveInteger("GECKO_POLL_MS", envNum("GECKO_POLL_MS", 15000)),
+  onchainScan,
+  geckoScan,
+  confirmationBlocks: validateNonNegativeInteger("CONFIRMATION_BLOCKS", envNum("CONFIRMATION_BLOCKS", 2)),
+  maxQueueSize: validatePositiveInteger("MAX_QUEUE_SIZE", envNum("MAX_QUEUE_SIZE", 500)),
+  maxSeenEntries: validatePositiveInteger("MAX_SEEN_ENTRIES", envNum("MAX_SEEN_ENTRIES", 10_000)),
+  seenTtlMs: validatePositiveInteger("SEEN_TTL_MS", envNum("SEEN_TTL_MS", 86_400_000)),
 };
 
 export const NARRATIVE_WORDS = [
@@ -141,13 +171,4 @@ export function explorerAddress(address) {
 
 export function dexScreenerToken(address) {
   return `${CHAIN.dexScreener}/${address}`;
-}
-
-export function liveTradingAllowed() {
-  return (
-    SETTINGS.mode === "live" &&
-    SETTINGS.enableLiveTrading &&
-    Boolean(SETTINGS.privateKey) &&
-    CHAIN.id === 4663
-  );
 }
