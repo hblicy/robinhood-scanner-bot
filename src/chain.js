@@ -1,5 +1,5 @@
 import { Contract, Interface, JsonRpcProvider, id, getAddress, ZeroAddress } from "ethers";
-import { ADDR, CHAIN, SETTINGS, isQuote } from "./config.js";
+import { ADDR, CHAIN, isQuote } from "./config.js";
 import { ERC20_ABI, PAIR_V2_ABI, V2_FACTORY_ABI, V3_FACTORY_ABI, V4_PM_ABI } from "./abis.js";
 
 let httpProvider;
@@ -54,11 +54,12 @@ function pickToken(token0, token1) {
   return null;
 }
 
-function baseEvent({ source, venue, pool, token, quote, fee, blockNumber, txHash, createdAt }) {
+function baseEvent({ source, venue, pool, poolId, token, quote, fee, blockNumber, txHash, createdAt }) {
   return {
     source,
     venue,
     pool: pool ? getAddress(pool) : null,
+    poolId: poolId ? String(poolId).toLowerCase() : null,
     token: getAddress(token),
     quote: quote ? getAddress(quote) : ADDR.WETH,
     fee: fee ?? null,
@@ -68,15 +69,31 @@ function baseEvent({ source, venue, pool, token, quote, fee, blockNumber, txHash
   };
 }
 
+export function parseV4PoolLog(log) {
+  const parsed = v4Iface.parseLog(log);
+  const picked = pickToken(parsed.args.currency0, parsed.args.currency1);
+  if (!picked) return null;
+  return baseEvent({
+    source: "onchain",
+    venue: "uniswap-v4",
+    pool: null,
+    poolId: parsed.args.id,
+    token: picked.token,
+    quote: picked.quote === ADDR.ZERO ? ADDR.NATIVE : picked.quote,
+    fee: Number(parsed.args.fee),
+    blockNumber: Number(log.blockNumber),
+    txHash: log.transactionHash,
+  });
+}
+
 export async function getLogsChunked({
   address,
   topics,
   fromBlock,
   toBlock,
   chunk = 400,
-  limit = SETTINGS.maxQueueSize,
+  provider = getProvider(),
 }) {
-  const provider = getProvider();
   const out = [];
   let start = fromBlock;
   while (start <= toBlock) {
@@ -90,20 +107,17 @@ export async function getLogsChunked({
           toBlock: end,
         })
       );
-      out.push(...logs.slice(0, Math.max(0, limit - out.length)));
+      out.push(...logs);
     } catch (err) {
       if (chunk > 40) {
         const mid = Math.floor((start + end) / 2);
-        const left = await getLogsChunked({ address, topics, fromBlock: start, toBlock: mid, chunk: Math.floor(chunk / 2), limit });
-        const right = left.length >= limit
-          ? []
-          : await getLogsChunked({ address, topics, fromBlock: mid + 1, toBlock: end, chunk: Math.floor(chunk / 2), limit: limit - left.length });
+        const left = await getLogsChunked({ address, topics, fromBlock: start, toBlock: mid, chunk: Math.floor(chunk / 2), provider });
+        const right = await getLogsChunked({ address, topics, fromBlock: mid + 1, toBlock: end, chunk: Math.floor(chunk / 2), provider });
         out.push(...left, ...right);
       } else {
         throw err;
       }
     }
-    if (out.length >= limit) break;
     start = end + 1;
   }
   return out;
@@ -178,27 +192,14 @@ export async function scanOnchain(fromBlock, toBlock) {
 
   for (const log of v4logs) {
     try {
-      const parsed = v4Iface.parseLog(log);
-      const picked = pickToken(parsed.args.currency0, parsed.args.currency1);
-      if (!picked) continue;
-      events.push(
-        baseEvent({
-          source: "onchain",
-          venue: "uniswap-v4",
-          pool: null,
-          token: picked.token,
-          quote: picked.quote === ADDR.ZERO ? ADDR.NATIVE : picked.quote,
-          fee: Number(parsed.args.fee),
-          blockNumber: Number(log.blockNumber),
-          txHash: log.transactionHash,
-        })
-      );
+      const event = parseV4PoolLog(log);
+      if (event) events.push(event);
     } catch {
       /* ignore */
     }
   }
 
-  return attachBlockTimes(events.slice(0, SETTINGS.maxQueueSize));
+  return attachBlockTimes(events);
 }
 
 export async function attachBlockTimes(events, provider = getProvider()) {

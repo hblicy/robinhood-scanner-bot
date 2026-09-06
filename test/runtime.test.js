@@ -10,6 +10,13 @@ describe("scanner runtime", () => {
     );
   });
 
+  it("keys V4 candidates by pool id", () => {
+    assert.notEqual(
+      candidateKey({ venue: "uniswap-v4", pool: null, poolId: "0xaaa", token: "0x1" }),
+      candidateKey({ venue: "uniswap-v4", pool: null, poolId: "0xbbb", token: "0x1" })
+    );
+  });
+
   it("keeps one-shot scan processing read-only", async () => {
     let trades = 0;
     let seen = 0;

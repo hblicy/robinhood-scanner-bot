@@ -1,6 +1,52 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { attachBlockTimes } from "../src/chain.js";
+import { Interface } from "ethers";
+import { V4_PM_ABI } from "../src/abis.js";
+import { attachBlockTimes, getLogsChunked, parseV4PoolLog } from "../src/chain.js";
+
+describe("getLogsChunked", () => {
+  it("does not truncate logs at queue capacity", async () => {
+    const provider = {
+      getLogs: async ({ fromBlock }) => [
+        { blockNumber: fromBlock, transactionHash: `0x${String(fromBlock).padStart(64, "0")}` },
+      ],
+    };
+    const logs = await getLogsChunked({
+      address: "0x1111111111111111111111111111111111111111",
+      topics: [],
+      fromBlock: 1,
+      toBlock: 4,
+      chunk: 1,
+      limit: 2,
+      provider,
+    });
+    assert.equal(logs.length, 4);
+  });
+});
+
+describe("V4 pool discovery", () => {
+  it("keeps the pool id separate from the address-valued pool field", () => {
+    const iface = new Interface(V4_PM_ABI);
+    const poolId = `0x${"ab".repeat(32)}`;
+    const encoded = iface.encodeEventLog(iface.getEvent("Initialize"), [
+      poolId,
+      "0x0000000000000000000000000000000000000000",
+      "0x1111111111111111111111111111111111111111",
+      3000,
+      60,
+      "0x0000000000000000000000000000000000000000",
+      1n,
+      0,
+    ]);
+    const parsed = parseV4PoolLog({
+      ...encoded,
+      blockNumber: 10,
+      transactionHash: `0x${"01".repeat(32)}`,
+    });
+    assert.equal(parsed.pool, null);
+    assert.equal(parsed.poolId, poolId);
+  });
+});
 
 describe("attachBlockTimes", () => {
   it("uses event block timestamps and caches duplicate block lookups", async () => {

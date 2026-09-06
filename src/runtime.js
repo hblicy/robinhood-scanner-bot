@@ -1,5 +1,5 @@
 export function candidateKey(event) {
-  return [event?.venue || "unknown", event?.pool || "no-pool", event?.token || "no-token"]
+  return [event?.venue || "unknown", event?.poolId || event?.pool || "no-pool", event?.token || "no-token"]
     .map((value) => String(value).toLowerCase())
     .join("|");
 }
