@@ -1,12 +1,11 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { SETTINGS, CHAIN, liveTradingAllowed } from "./config.js";
-import { hasSeen, listPositions, markSeen } from "./store.js";
+import { SETTINGS, CHAIN } from "./config.js";
+import { hasSeen, markSeen } from "./store.js";
 import { getBlockNumber, scanOnchain, sleep } from "./chain.js";
 import { geckoNewPools } from "./market.js";
 import { analyze } from "./analyze.js";
 import { alertReport, formatAlert, sendTelegram } from "./notify.js";
-import { createSingleFlightTick, maybeTrade, tickPositions } from "./trade.js";
 import { CandidateQueue } from "./queue.js";
 import { candidateKey, handleCandidate } from "./runtime.js";
 import { safeErrorMessage, sanitizeRpcUrl } from "./safety.js";
@@ -26,7 +25,7 @@ function enqueue(event) {
   return accepted;
 }
 
-async function drain({ allowTrading, persistSeen = true }) {
+async function drain({ persistSeen = true }) {
   if (draining) return;
   draining = true;
   try {
@@ -35,7 +34,7 @@ async function drain({ allowTrading, persistSeen = true }) {
       try {
         await handleCandidate(
           event,
-          { allowTrading, persistSeen, tradeMode: SETTINGS.mode },
+          { persistSeen },
           {
             now: Date.now,
             maxAgeMinutes: SETTINGS.maxAgeMinutes,
@@ -43,7 +42,6 @@ async function drain({ allowTrading, persistSeen = true }) {
             analyze,
             markSeen,
             alertReport,
-            maybeTrade,
             log: console.log,
           }
         );
@@ -56,18 +54,6 @@ async function drain({ allowTrading, persistSeen = true }) {
   } finally {
     draining = false;
   }
-}
-
-async function reportReviewPositions() {
-  const review = listPositions().filter((position) =>
-    ["needs_review", "buy_pending", "exit_pending"].includes(position.state)
-  );
-  if (!review.length) return;
-  const tokens = review.map((position) => position.token).join(", ");
-  console.warn(`${review.length} position(s) require manual review: ${tokens}`);
-  await sendTelegram(
-    `⚠️ ${review.length} 个旧仓位缺少可验证数量/路径，已禁止自动处理：\n${tokens}`
-  ).catch((error) => console.error("position review telegram", safeErrorMessage(error)));
 }
 
 export async function processEvents(events, queue, runDrain) {
@@ -93,7 +79,7 @@ export async function runReadOnlyCandidates(events, dependencies) {
       try {
         const report = await handleCandidate(
           event,
-          { allowTrading: false, persistSeen: false, tradeMode: "watch" },
+          { persistSeen: false },
           {
             now: dependencies.now,
             maxAgeMinutes: dependencies.maxAgeMinutes,
@@ -101,7 +87,6 @@ export async function runReadOnlyCandidates(events, dependencies) {
             analyze: dependencies.analyze,
             markSeen: () => {},
             alertReport: dependencies.consoleAlert,
-            maybeTrade: async () => null,
             log: dependencies.log,
           }
         );
@@ -117,24 +102,16 @@ export async function runReadOnlyCandidates(events, dependencies) {
   return reports;
 }
 
-async function watch({ allowTrading }) {
-  banner({ allowTrading });
-  await reportReviewPositions();
+async function watch() {
+  banner();
   if (SETTINGS.telegramToken) {
     await sendTelegram(
-      `🤖 Robinhood 扫链机器人已启动\n模式 <b>${SETTINGS.mode}</b>\n自动买入: ${liveTradingAllowed() && allowTrading ? "ON（高风险）" : "OFF"}\n年龄 &lt; ${SETTINGS.maxAgeMinutes} 分钟 · 最低分 ${SETTINGS.minScore}`
+      `🤖 Robinhood 扫链机器人已启动\n仅扫描和报警，不包含交易功能\n年龄 &lt; ${SETTINGS.maxAgeMinutes} 分钟 · 最低分 ${SETTINGS.minScore}`
     ).catch((error) => console.error("startup telegram:", safeErrorMessage(error)));
   }
 
   let lastBlock = Math.max(0, (await getBlockNumber()) - SETTINGS.lookbackBlocks);
   let lastGecko = 0;
-
-  if (SETTINGS.mode === "paper" || SETTINGS.mode === "live") {
-    const runPositionTick = createSingleFlightTick(tickPositions);
-    setInterval(() => {
-      runPositionTick().catch((error) => console.error("positions", safeErrorMessage(error)));
-    }, SETTINGS.positionPollMs);
-  }
 
   while (true) {
     try {
@@ -142,7 +119,7 @@ async function watch({ allowTrading }) {
       if (SETTINGS.onchainScan && head > lastBlock) {
         const from = lastBlock + 1;
         const events = await scanOnchain(from, head);
-        const accepted = await processEvents(events, candidates, () => drain({ allowTrading, persistSeen: true }));
+        const accepted = await processEvents(events, candidates, () => drain({ persistSeen: true }));
         if (events.length) console.log(`onchain ${from}-${head}: ${events.length} pools, ${accepted} new`);
         lastBlock = head;
       }
@@ -152,10 +129,10 @@ async function watch({ allowTrading }) {
           console.error("gecko", safeErrorMessage(error));
           return [];
         });
-        const accepted = await processEvents(events, candidates, () => drain({ allowTrading, persistSeen: true }));
+        const accepted = await processEvents(events, candidates, () => drain({ persistSeen: true }));
         if (accepted) console.log(`gecko: ${events.length} pools, ${accepted} new`);
       }
-      await drain({ allowTrading, persistSeen: true });
+      await drain({ persistSeen: true });
     } catch (error) {
       console.error("watch loop", safeErrorMessage(error));
     }
@@ -176,7 +153,7 @@ async function scanOnce(supplied = null) {
     log: console.log,
   };
   const settings = dependencies.settings;
-  banner({ allowTrading: false });
+  banner();
   const head = await dependencies.getBlockNumber();
   const from = Math.max(0, head - Math.max(settings.lookbackBlocks, 800));
   dependencies.log(`one-shot read-only scan blocks ${from}-${head} + gecko new_pools`);
@@ -227,38 +204,34 @@ async function checkOne(token) {
   );
 }
 
-function banner({ allowTrading }) {
+function banner() {
   console.log("====================================================");
   console.log(" Robinhood Chain scanner");
   console.log(` ${CHAIN.name}  chainId=${CHAIN.id}`);
   console.log(` RPC ${sanitizeRpcUrl(CHAIN.rpc)}`);
-  console.log(` mode=${SETTINGS.mode}  liveTrading=${allowTrading && liveTradingAllowed()}`);
+  console.log(" mode=push-only");
   console.log(` maxAge=${SETTINGS.maxAgeMinutes}m  minScore=${SETTINGS.minScore}`);
-  console.log(" Real swaps require the explicit live command and complete security checks.");
+  console.log(" Scanner and alerts only. Transaction functionality is not included.");
   console.log(" This is not financial advice. Most memecoins go to zero.");
   console.log("====================================================");
 }
 
+export function assertSupportedCommand(command) {
+  if (!["watch", "scan", "check"].includes(command)) {
+    throw new Error("commands: watch | scan | check <token>");
+  }
+  return command;
+}
+
 async function main() {
-  const command = process.argv[2] || "watch";
+  const command = assertSupportedCommand(process.argv[2] || "watch");
   const argument = process.argv[3];
   if (command === "watch") {
-    SETTINGS.mode = "watch";
-    await watch({ allowTrading: false });
-  } else if (command === "paper") {
-    SETTINGS.mode = "paper";
-    await watch({ allowTrading: true });
-  } else if (command === "live") {
-    SETTINGS.mode = "live";
-    await watch({ allowTrading: true });
+    await watch();
   } else if (command === "scan") {
-    SETTINGS.mode = "watch";
     await scanOnce();
   } else if (command === "check") {
-    SETTINGS.mode = "watch";
     await checkOne(argument);
-  } else {
-    throw new Error("commands: watch | scan | check <token> | paper | live");
   }
 }
 

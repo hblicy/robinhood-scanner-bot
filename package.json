@@ -9,7 +9,6 @@
     "watch": "node src/index.js watch",
     "scan": "node src/index.js scan",
     "check": "node src/index.js check",
-    "paper": "node src/index.js paper",
     "test": "node --test test/*.test.js"
   },
   "engines": {

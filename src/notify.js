@@ -1,4 +1,4 @@
-import { SETTINGS, liveTradingAllowed } from "./config.js";
+import { SETTINGS } from "./config.js";
 import { safeErrorMessage } from "./safety.js";
 
 const VERDICT = {
@@ -58,10 +58,8 @@ export function formatAlert(report) {
   }
   lines.push("");
   lines.push(`<a href="${links.dex}">DexScreener</a> · <a href="${links.explorer}">Blockscout</a> · <a href="${links.gmgn}">GMGN</a>`);
-  if (!liveTradingAllowed()) {
-    lines.push("");
-    lines.push("<i>默认只报警，不自动买入。任何操作请使用独立小额钱包。</i>");
-  }
+  lines.push("");
+  lines.push("<i>本程序只扫描报警，不包含模拟或实盘交易功能。</i>");
   return lines.join("\n");
 }
 

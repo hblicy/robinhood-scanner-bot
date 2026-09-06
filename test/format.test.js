@@ -42,7 +42,7 @@ describe("formatAlert", () => {
     assert.match(text, /CAT/);
     assert.match(text, /82\/100/);
     assert.match(text, /DexScreener/);
-    assert.match(text, /不自动买入/);
+    assert.match(text, /不包含模拟或实盘交易功能/);
   });
 
   it("renders unknown safety facts without claiming they passed", () => {

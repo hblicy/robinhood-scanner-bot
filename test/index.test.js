@@ -54,8 +54,8 @@ describe("scanner orchestration", () => {
     assert.deepEqual(alerted, ["0x1", "0x2"]);
   });
 
-  it("keeps scanOnce free of store, Telegram and trading calls", async () => {
-    const calls = { seen: 0, telegram: 0, trade: 0, console: 0 };
+  it("keeps scanOnce free of persistent and Telegram calls", async () => {
+    const calls = { seen: 0, telegram: 0, console: 0 };
     const reports = await scanOnce({
       settings: {
         lookbackBlocks: 1,
@@ -81,12 +81,11 @@ describe("scanner orchestration", () => {
       consoleAlert: async () => { calls.console += 1; },
       markSeen: () => { calls.seen += 1; },
       alertReport: async () => { calls.telegram += 1; },
-      maybeTrade: async () => { calls.trade += 1; },
       log: () => {},
       now: () => 1,
     });
 
     assert.equal(reports.length, 1);
-    assert.deepEqual(calls, { seen: 0, telegram: 0, trade: 0, console: 1 });
+    assert.deepEqual(calls, { seen: 0, telegram: 0, console: 1 });
   });
 });

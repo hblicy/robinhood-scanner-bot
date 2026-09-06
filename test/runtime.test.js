@@ -18,7 +18,6 @@ describe("scanner runtime", () => {
   });
 
   it("keeps one-shot scan processing read-only", async () => {
-    let trades = 0;
     let seen = 0;
     const report = {
       verdict: "green",
@@ -30,7 +29,7 @@ describe("scanner runtime", () => {
     };
     await handleCandidate(
       { venue: "uniswap-v2", pool: "0xA", token: "0x1", createdAt: null, source: "test" },
-      { allowTrading: false, persistSeen: false },
+      { persistSeen: false },
       {
         now: () => 1,
         maxAgeMinutes: 30,
@@ -38,40 +37,10 @@ describe("scanner runtime", () => {
         analyze: async () => report,
         markSeen: () => { seen += 1; },
         alertReport: async () => {},
-        maybeTrade: async () => { trades += 1; },
         log: () => {},
       }
     );
     assert.equal(seen, 0);
-    assert.equal(trades, 0);
-  });
-
-  it("allows paper-ready reports to reach paper simulation without marking them green", async () => {
-    let trades = 0;
-    await handleCandidate(
-      { venue: "uniswap-v2", pool: "0xA", token: "0x1", createdAt: null, source: "test" },
-      { allowTrading: true, persistSeen: true, tradeMode: "paper" },
-      {
-        now: () => 1,
-        maxAgeMinutes: 30,
-        minScore: 55,
-        analyze: async () => ({
-          verdict: "review",
-          paperReady: true,
-          score: 80,
-          venue: "uniswap-v2",
-          token: "0x1",
-          pool: "0xA",
-          meta: { symbol: "PAPER" },
-          honeypot: { honeypot: null },
-        }),
-        markSeen: () => {},
-        alertReport: async () => {},
-        maybeTrade: async () => { trades += 1; },
-        log: () => {},
-      }
-    );
-    assert.equal(trades, 1);
   });
 
   it("does not mark a candidate seen when its alert ultimately fails", async () => {
@@ -79,7 +48,7 @@ describe("scanner runtime", () => {
     await assert.rejects(
       () => handleCandidate(
         { venue: "uniswap-v2", pool: "0xA", token: "0x1", createdAt: null, source: "test" },
-        { allowTrading: false, persistSeen: true },
+        { persistSeen: true },
         {
           now: () => 1,
           maxAgeMinutes: 30,
@@ -95,7 +64,6 @@ describe("scanner runtime", () => {
           }),
           markSeen: () => { seen += 1; },
           alertReport: async () => { throw new Error("telegram unavailable"); },
-          maybeTrade: async () => {},
           log: () => {},
         }
       ),
@@ -108,7 +76,7 @@ describe("scanner runtime", () => {
     const order = [];
     await handleCandidate(
       { venue: "uniswap-v2", pool: "0xA", token: "0x1", createdAt: null, source: "test" },
-      { allowTrading: false, persistSeen: true },
+      { persistSeen: true },
       {
         now: () => 1,
         maxAgeMinutes: 30,
@@ -124,7 +92,6 @@ describe("scanner runtime", () => {
         }),
         markSeen: () => { order.push("seen"); },
         alertReport: async () => { order.push("alert"); },
-        maybeTrade: async () => {},
         log: () => {},
       }
     );

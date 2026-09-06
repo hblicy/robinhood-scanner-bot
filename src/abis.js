@@ -6,8 +6,6 @@ export const ERC20_ABI = [
   "function balanceOf(address) view returns (uint256)",
   "function owner() view returns (address)",
   "function getOwner() view returns (address)",
-  "function allowance(address,address) view returns (uint256)",
-  "function approve(address,uint256) returns (bool)",
   "function transfer(address,uint256) returns (bool)",
 ];
 
@@ -33,17 +31,5 @@ export const V4_PM_ABI = [
 ];
 
 export const V2_ROUTER_ABI = [
-  "function WETH() view returns (address)",
-  "function factory() view returns (address)",
   "function getAmountsOut(uint256 amountIn, address[] path) view returns (uint256[] amounts)",
-  "function swapExactETHForTokensSupportingFeeOnTransferTokens(uint256 amountOutMin, address[] path, address to, uint256 deadline) payable",
-  "function swapExactTokensForETHSupportingFeeOnTransferTokens(uint256 amountIn, uint256 amountOutMin, address[] path, address to, uint256 deadline)",
-];
-
-export const V3_QUOTER_ABI = [
-  "function quoteExactInputSingle((address tokenIn, address tokenOut, uint256 amountIn, uint24 fee, uint160 sqrtPriceLimitX96) params) returns (uint256 amountOut, uint160 sqrtPriceX96After, uint32 initializedTicksCrossed, uint256 gasEstimate)",
-];
-
-export const V3_ROUTER_ABI = [
-  "function exactInputSingle((address tokenIn, address tokenOut, uint24 fee, address recipient, uint256 amountIn, uint256 amountOutMinimum, uint160 sqrtPriceLimitX96) params) payable returns (uint256 amountOut)",
 ];

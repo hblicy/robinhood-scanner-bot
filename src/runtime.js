@@ -36,11 +36,5 @@ export async function handleCandidate(event, options, dependencies) {
       venue: report.venue,
     });
   }
-  const shouldTrade =
-    report.verdict === "green" ||
-    (options.tradeMode === "paper" && report.paperReady === true);
-  if (options.allowTrading === true && shouldTrade) {
-    await dependencies.maybeTrade(report);
-  }
   return report;
 }

@@ -63,7 +63,6 @@ describe("scoreFromFacts", () => {
   it("does not mark green when honeypot sim is unfinished", () => {
     const r = scoreFromFacts(base({ honeypot: null, securityComplete: false }));
     assert.notEqual(r.verdict, "green");
-    assert.equal(r.paperReady, true);
   });
 
   it("does not reward unknown creator, privilege or history facts", () => {

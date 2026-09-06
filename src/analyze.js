@@ -228,8 +228,7 @@ export function scoreFromFacts(f) {
   else if (score >= SETTINGS.minScore) verdict = "review";
   else verdict = "skip";
 
-  const paperReady = score >= 75 && red.length === 0 && f.honeypot !== true && f.marketBound === true;
-  return { score, checks, red, verdict, paperReady };
+  return { score, checks, red, verdict };
 }
 
 export async function analyze(event) {
