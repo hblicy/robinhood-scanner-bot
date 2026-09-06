@@ -47,6 +47,19 @@ function dependencies(overrides = {}) {
 }
 
 describe("analyze data completeness", () => {
+  it("preserves the original cause for a core dependency failure", async () => {
+    const rootCause = new Error("original rpc failure");
+    await assert.rejects(
+      () => analyze(event, dependencies({
+        readTokenMeta: async () => { throw rootCause; },
+      })),
+      (error) => {
+        assert.equal(error.cause, rootCause);
+        return true;
+      }
+    );
+  });
+
   for (const [source, override] of [
     ["token metadata", { readTokenMeta: async () => { throw new Error("rpc down"); } }],
     ["bytecode", { bytecodeFlags: async () => { throw new Error("rpc down"); } }],

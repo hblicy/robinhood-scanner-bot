@@ -34,9 +34,9 @@ function hasNarrative(symbol, name) {
 
 async function settled(promise) {
   try {
-    return { ok: true, value: await promise, error: null };
+    return { ok: true, value: await promise, error: null, cause: null };
   } catch (error) {
-    return { ok: false, value: null, error: safeErrorMessage(error) };
+    return { ok: false, value: null, error: safeErrorMessage(error), cause: error };
   }
 }
 
@@ -52,7 +52,7 @@ export class RetryableAnalysisError extends Error {
 }
 
 function requireCore(source, result, token) {
-  if (!result.ok) throw new RetryableAnalysisError(source, token, new Error(result.error));
+  if (!result.ok) throw new RetryableAnalysisError(source, token, result.cause || new Error(result.error));
   if (result.value == null) throw new RetryableAnalysisError(source, token);
   return result.value;
 }
