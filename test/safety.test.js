@@ -29,6 +29,13 @@ describe("safety helpers", () => {
     assert.match(message, /https:\/\/\[redacted\]/);
   });
 
+  it("fully redacts bracketed IPv6 RPC URLs", () => {
+    const message = safeErrorMessage(
+      new Error("SERVER_ERROR requestUrl=https://user:pass@[2001:db8::1]:8545/v2/SECRET?q=TOKEN")
+    );
+    assert.equal(message, "SERVER_ERROR requestUrl=https://[redacted]:8545");
+  });
+
   it("does not echo an invalid RPC URL", () => {
     assert.equal(sanitizeRpcUrl("not-a-url/SECRET"), "invalid RPC URL");
   });

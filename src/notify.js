@@ -65,27 +65,46 @@ export function formatAlert(report) {
   return lines.join("\n");
 }
 
-export async function sendTelegram(text) {
-  if (!SETTINGS.telegramToken || !SETTINGS.telegramChat) {
-    console.log("\n--- telegram (not configured) ---\n" + text.replace(/<[^>]+>/g, "") + "\n");
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export async function sendTelegramWith(text, {
+  settings = SETTINGS,
+  fetchImpl = fetch,
+  sleep = delay,
+  log = console.log,
+} = {}) {
+  if (!settings.telegramToken || !settings.telegramChat) {
+    log("\n--- telegram (not configured) ---\n" + text.replace(/<[^>]+>/g, "") + "\n");
     return false;
   }
-  const url = `https://api.telegram.org/bot${SETTINGS.telegramToken}/sendMessage`;
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      chat_id: SETTINGS.telegramChat,
-      text,
-      parse_mode: "HTML",
-      disable_web_page_preview: true,
-    }),
-  });
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`telegram ${res.status}: ${body}`);
+  const url = `https://api.telegram.org/bot${settings.telegramToken}/sendMessage`;
+  let lastError;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const res = await fetchImpl(url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          chat_id: settings.telegramChat,
+          text,
+          parse_mode: "HTML",
+          disable_web_page_preview: true,
+        }),
+      });
+      if (!res.ok) throw new Error(`telegram ${res.status}`);
+      return true;
+    } catch (error) {
+      lastError = error;
+      if (attempt < 2) await sleep(200 * (2 ** attempt));
+    }
   }
-  return true;
+  throw new Error(`telegram send failed after 3 attempts: ${safeErrorMessage(lastError)}`, { cause: lastError });
+}
+
+export async function sendTelegram(text) {
+  return sendTelegramWith(text);
 }
 
 export async function alertReport(report) {
@@ -93,11 +112,7 @@ export async function alertReport(report) {
   console.log(
     `[${report.verdict}] ${report.meta.symbol} ${report.score}/100 ${report.token} red=${report.red.length}`
   );
-  try {
-    await sendTelegram(text);
-  } catch (err) {
-    console.error("telegram failed:", safeErrorMessage(err));
-  }
+  return sendTelegram(text);
 }
 
 function esc(s) {

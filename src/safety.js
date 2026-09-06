@@ -12,7 +12,7 @@ export function sanitizeRpcUrl(value) {
 
 export function safeErrorMessage(error) {
   const message = error?.shortMessage || error?.message || String(error);
-  return String(message).replace(/https?:\/\/[^\s"'<>)}\]]+/gi, (url) => sanitizeRpcUrl(url));
+  return String(message).replace(/https?:\/\/[^\s"'<>)}]+/gi, (url) => sanitizeRpcUrl(url));
 }
 
 export function validateBps(name, value) {
