@@ -1,7 +1,7 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { SETTINGS, CHAIN } from "./config.js";
-import { hasSeen, markSeen } from "./store.js";
+import { hasSeen, markSeen, setOnchainCursor } from "./store.js";
 import { getBlockNumber, scanOnchain, sleep } from "./chain.js";
 import { geckoNewPools } from "./market.js";
 import { analyze } from "./analyze.js";
@@ -26,8 +26,10 @@ function enqueue(event) {
 }
 
 async function drain({ persistSeen = true }) {
-  if (draining) return;
+  if (draining) return { handled: 0, failed: 0 };
   draining = true;
+  let handled = 0;
+  let failed = 0;
   try {
     while (candidates.size > 0) {
       const event = candidates.take();
@@ -45,7 +47,9 @@ async function drain({ persistSeen = true }) {
             log: console.log,
           }
         );
+        handled += 1;
       } catch (error) {
+        failed += 1;
         console.error("handle failed", event.token, safeErrorMessage(error));
       } finally {
         candidates.finish(event);
@@ -54,16 +58,32 @@ async function drain({ persistSeen = true }) {
   } finally {
     draining = false;
   }
+  return { handled, failed };
 }
 
 export async function processEvents(events, queue, runDrain) {
   let accepted = 0;
+  let handled = 0;
+  let failed = 0;
+  const collectDrain = async () => {
+    const result = await runDrain();
+    handled += result?.handled || 0;
+    failed += result?.failed || 0;
+  };
   for (const event of events) {
-    if (queue.isFull) await runDrain();
+    if (queue.isFull) await collectDrain();
     if (queue.enqueue(event)) accepted += 1;
   }
-  await runDrain();
-  return accepted;
+  await collectDrain();
+  return { accepted, handled, failed };
+}
+
+export async function processOnchainRange({ from, head }, dependencies) {
+  const events = await dependencies.scanOnchain(from, head);
+  const result = await dependencies.handleEvents(events);
+  const complete = result.failed === 0;
+  if (complete) dependencies.setOnchainCursor(head);
+  return { events, ...result, complete };
 }
 
 export async function runReadOnlyCandidates(events, dependencies) {
@@ -74,6 +94,8 @@ export async function runReadOnlyCandidates(events, dependencies) {
   });
   const reports = [];
   const runDrain = async () => {
+    let handled = 0;
+    let failed = 0;
     while (queue.size > 0) {
       const event = queue.take();
       try {
@@ -91,12 +113,15 @@ export async function runReadOnlyCandidates(events, dependencies) {
           }
         );
         if (report) reports.push(report);
+        handled += 1;
       } catch (error) {
+        failed += 1;
         dependencies.log(`handle failed ${event.token} ${safeErrorMessage(error)}`);
       } finally {
         queue.finish(event);
       }
     }
+    return { handled, failed };
   };
   await processEvents(events, queue, runDrain);
   return reports;
@@ -118,10 +143,25 @@ async function watch() {
       const head = await getBlockNumber();
       if (SETTINGS.onchainScan && head > lastBlock) {
         const from = lastBlock + 1;
-        const events = await scanOnchain(from, head);
-        const accepted = await processEvents(events, candidates, () => drain({ persistSeen: true }));
-        if (events.length) console.log(`onchain ${from}-${head}: ${events.length} pools, ${accepted} new`);
-        lastBlock = head;
+        const result = await processOnchainRange(
+          { from, head },
+          {
+            scanOnchain,
+            handleEvents: (events) => processEvents(
+              events,
+              candidates,
+              () => drain({ persistSeen: true })
+            ),
+            setOnchainCursor,
+          }
+        );
+        if (result.events.length) {
+          console.log(
+            `onchain ${from}-${head}: ${result.events.length} pools, ${result.accepted} new`
+          );
+        }
+        if (result.complete) lastBlock = head;
+        else console.warn(`onchain ${from}-${head}: ${result.failed} failed; cursor not advanced`);
       }
       if (SETTINGS.geckoScan && Date.now() - lastGecko >= SETTINGS.geckoPollMs) {
         lastGecko = Date.now();
@@ -129,8 +169,10 @@ async function watch() {
           console.error("gecko", safeErrorMessage(error));
           return [];
         });
-        const accepted = await processEvents(events, candidates, () => drain({ persistSeen: true }));
-        if (accepted) console.log(`gecko: ${events.length} pools, ${accepted} new`);
+        const result = await processEvents(events, candidates, () => drain({ persistSeen: true }));
+        if (result.accepted) {
+          console.log(`gecko: ${events.length} pools, ${result.accepted} new`);
+        }
       }
       await drain({ persistSeen: true });
     } catch (error) {

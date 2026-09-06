@@ -1,6 +1,11 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { processEvents, runReadOnlyCandidates, scanOnce } from "../src/index.js";
+import {
+  processEvents,
+  processOnchainRange,
+  runReadOnlyCandidates,
+  scanOnce,
+} from "../src/index.js";
 import { CandidateQueue } from "../src/queue.js";
 
 describe("scanner orchestration", () => {
@@ -15,14 +20,54 @@ describe("scanner orchestration", () => {
       }
     };
 
-    const accepted = await processEvents(
+    const result = await processEvents(
       [{ token: "a" }, { token: "b" }, { token: "c" }],
       queue,
       drain
     );
 
-    assert.equal(accepted, 3);
+    assert.deepEqual(result, { accepted: 3, handled: 0, failed: 0 });
     assert.deepEqual(handled, ["a", "b", "c"]);
+  });
+
+  it("aggregates handler failures across every queue drain", async () => {
+    const queue = new CandidateQueue({ maxSize: 1, hasSeen: () => false });
+    let drains = 0;
+    const result = await processEvents(
+      [{ token: "a" }, { token: "b" }],
+      queue,
+      async () => {
+        drains += 1;
+        while (queue.size) queue.finish(queue.take());
+        return drains === 1 ? { handled: 0, failed: 1 } : { handled: 1, failed: 0 };
+      }
+    );
+
+    assert.deepEqual(result, { accepted: 2, handled: 1, failed: 1 });
+  });
+
+  it("advances the persisted onchain cursor only after a fully successful range", async () => {
+    const cursorWrites = [];
+    const success = await processOnchainRange(
+      { from: 10, head: 20 },
+      {
+        scanOnchain: async () => [{ token: "0x1" }],
+        handleEvents: async () => ({ accepted: 1, handled: 1, failed: 0 }),
+        setOnchainCursor: (block) => cursorWrites.push(block),
+      }
+    );
+    const failed = await processOnchainRange(
+      { from: 21, head: 30 },
+      {
+        scanOnchain: async () => [{ token: "0x2" }],
+        handleEvents: async () => ({ accepted: 1, handled: 0, failed: 1 }),
+        setOnchainCursor: (block) => cursorWrites.push(block),
+      }
+    );
+
+    assert.equal(success.complete, true);
+    assert.equal(failed.complete, false);
+    assert.deepEqual(cursorWrites, [20]);
   });
 
   it("processes one-shot candidates without persistent or Telegram dependencies", async () => {
