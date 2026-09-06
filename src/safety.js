@@ -20,6 +20,20 @@ export function validatePositiveInteger(name, value) {
   return value;
 }
 
+export function validateNonNegativeInteger(name, value) {
+  if (!Number.isInteger(value) || value < 0) {
+    throw new Error(`${name} must be a non-negative integer`);
+  }
+  return value;
+}
+
+export function validateRange(name, value, min, max) {
+  if (!Number.isFinite(value) || value < min || value > max) {
+    throw new Error(`${name} must be between ${min} and ${max}`);
+  }
+  return value;
+}
+
 export function validatePositiveNumber(name, value) {
   if (!Number.isFinite(value) || value <= 0) {
     throw new Error(`${name} must be a positive number`);

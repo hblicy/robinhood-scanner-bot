@@ -1,6 +1,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
+  validateNonNegativeInteger,
+  validateRange,
   sanitizeRpcUrl,
   validatePositiveInteger,
   validatePositiveNumber,
@@ -55,6 +57,14 @@ describe("safety helpers", () => {
   it("rejects invalid positive numeric limits", () => {
     assert.throws(() => validatePositiveNumber("MAX_AGE_MINUTES", 0), /MAX_AGE_MINUTES/);
     assert.equal(validatePositiveNumber("MAX_AGE_MINUTES", 0.5), 0.5);
+  });
+
+  it("validates non-negative integers and bounded numbers", () => {
+    assert.equal(validateNonNegativeInteger("COUNT", 0), 0);
+    assert.equal(validateRange("PERCENT", 100, 0, 100), 100);
+    assert.throws(() => validateNonNegativeInteger("COUNT", -1), /COUNT/);
+    assert.throws(() => validateNonNegativeInteger("COUNT", 1.5), /COUNT/);
+    assert.throws(() => validateRange("PERCENT", 101, 0, 100), /PERCENT/);
   });
 
 });

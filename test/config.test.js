@@ -17,6 +17,9 @@ function loadConfig(overrides = {}) {
         POLL_MS: "2500",
         GECKO_POLL_MS: "15000",
         MAX_AGE_MINUTES: "30",
+        ONCHAIN_SCAN: "true",
+        GECKO_SCAN: "true",
+        QUOTE_TOKENS: "WETH,ETH,USDG",
         ...overrides,
       },
       encoding: "utf8",
@@ -41,5 +44,27 @@ describe("configuration validation", () => {
   it("accepts valid positive intervals and age windows", () => {
     const result = loadConfig();
     assert.equal(result.status, 0, result.stderr);
+  });
+
+  for (const [name, value] of [
+    ["ONCHAIN_SCAN", "tru"],
+    ["MIN_SCORE", "101"],
+    ["MAX_TOP10_PCT", "-1"],
+    ["MAX_TAX_BPS", "-1"],
+    ["MAX_DEPLOYER_TOKENS", "1.5"],
+    ["QUOTE_TOKENS", "UNKNOWN"],
+    ["CONFIRMATION_BLOCKS", "-1"],
+  ]) {
+    it(`rejects out-of-range ${name}`, () => {
+      const result = loadConfig({ [name]: value });
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, new RegExp(name));
+    });
+  }
+
+  it("rejects a configuration with every discovery source disabled", () => {
+    const result = loadConfig({ ONCHAIN_SCAN: "false", GECKO_SCAN: "false" });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /ONCHAIN_SCAN|GECKO_SCAN/);
   });
 });
