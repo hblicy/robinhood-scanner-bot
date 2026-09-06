@@ -77,10 +77,15 @@ describe("formatAlert", () => {
       checks: [],
       links: { dex: "https://example.test", explorer: "https://example.test", gmgn: "https://example.test" },
       dex: null,
+      errorSources: [
+        { source: "Blockscout holders", error: "https://user:SECRET@example.test/private" },
+      ],
     });
     assert.match(text, /年龄<\/b> 未知/);
     assert.match(text, /税 未知\/未知bps/);
     assert.match(text, /LP 未验证/);
     assert.doesNotMatch(text, /已锁/);
+    assert.match(text, /数据异常.*Blockscout holders/);
+    assert.doesNotMatch(text, /SECRET|private/);
   });
 });

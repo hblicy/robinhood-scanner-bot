@@ -46,6 +46,10 @@ export function formatAlert(report) {
   lines.push(
     `<b>安全</b> 蜜罐 ${facts.honeypot === false ? "通过" : facts.honeypot === true ? "失败" : "未完成"}  税 ${buyTax}/${sellTax}bps  LP ${lpStatus}`
   );
+  if (report.errorSources?.length) {
+    const sources = [...new Set(report.errorSources.map(({ source }) => String(source)))];
+    lines.push(`<b>数据异常</b> ${sources.map(esc).join(", ")}`);
+  }
   if (red.length) {
     lines.push("");
     lines.push("<b>红旗</b>");

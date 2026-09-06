@@ -40,6 +40,39 @@ async function settled(promise) {
   }
 }
 
+export class RetryableAnalysisError extends Error {
+  constructor(source, token, cause = null) {
+    const detail = cause ? `: ${safeErrorMessage(cause)}` : ": not indexed yet";
+    super(`${source} unavailable for ${token}${detail}`, cause ? { cause } : undefined);
+    this.name = "RetryableAnalysisError";
+    this.code = "RETRYABLE_ANALYSIS";
+    this.source = source;
+    this.token = token;
+  }
+}
+
+function requireCore(source, result, token) {
+  if (!result.ok) throw new RetryableAnalysisError(source, token, new Error(result.error));
+  if (result.value == null) throw new RetryableAnalysisError(source, token);
+  return result.value;
+}
+
+const DEFAULT_ANALYZE_DEPENDENCIES = {
+  now: Date.now,
+  readTokenMeta,
+  readOwner,
+  bytecodeFlags,
+  dexScreener,
+  blockscoutToken,
+  blockscoutHolders,
+  blockscoutCreator,
+  readV2Pool,
+  readCreatorBalance: (token, creator) =>
+    new Contract(token, ERC20_ABI, getProvider()).balanceOf(creator),
+  deployerHistory,
+  honeypotCheck,
+};
+
 export function scoreFromFacts(f) {
   const checks = [];
   const red = [];
@@ -231,33 +264,35 @@ export function scoreFromFacts(f) {
   return { score, checks, red, verdict };
 }
 
-export async function analyze(event) {
+export async function analyze(event, overrides = {}) {
+  const dependencies = { ...DEFAULT_ANALYZE_DEPENDENCIES, ...overrides };
   const token = getAddress(event.token);
   const [metaResult, ownerResult, flagsResult, dexResult, bsTokenResult, holdersResult, creatorResult] = await Promise.all([
-    settled(readTokenMeta(token)),
-    settled(readOwner(token)),
-    settled(bytecodeFlags(token)),
-    settled(dexScreener(token, event.pool ? { pool: event.pool, quote: event.quote } : {})),
-    settled(blockscoutToken(token)),
-    settled(blockscoutHolders(token, 25)),
-    settled(blockscoutCreator(token)),
+    settled(dependencies.readTokenMeta(token)),
+    settled(dependencies.readOwner(token)),
+    settled(dependencies.bytecodeFlags(token)),
+    settled(dependencies.dexScreener(token, event.pool ? { pool: event.pool, quote: event.quote } : {})),
+    settled(dependencies.blockscoutToken(token)),
+    settled(dependencies.blockscoutHolders(token, 25)),
+    settled(dependencies.blockscoutCreator(token)),
   ]);
 
-  const meta = metaResult.value || { name: "", symbol: "???", decimals: 18, totalSupply: 0n };
+  const meta = requireCore("token metadata", metaResult, token);
   const owner = ownerResult.value;
-  const flags = flagsResult.value || {};
-  const dex = dexResult.value;
+  const flags = requireCore("bytecode", flagsResult, token);
+  const dex = requireCore("DexScreener pool", dexResult, token);
   const bsToken = bsTokenResult.value;
   const holders = holdersResult.value || [];
   const creatorInfo = creatorResult.value;
 
   const createdAt = event.createdAt || dex?.pairCreatedAt || null;
-  const ageMinutes = createdAt ? Math.max(0, (Date.now() - createdAt) / 60000) : null;
+  const ageMinutes = createdAt ? Math.max(0, (dependencies.now() - createdAt) / 60000) : null;
 
   let lpBurnedPct = null;
   let poolInfo = null;
+  let poolResult = { ok: true, value: null, error: null };
   if (event.venue === "uniswap-v2" && event.pool) {
-    const poolResult = await settled(readV2Pool(event.pool));
+    poolResult = await settled(dependencies.readV2Pool(event.pool));
     poolInfo = poolResult.value;
     lpBurnedPct = poolInfo?.burnedPct ?? null;
   }
@@ -280,22 +315,29 @@ export async function analyze(event) {
 
   const creator = creatorInfo?.creator || null;
   const creatorBalanceResult = creator
-    ? await settled(new Contract(token, ERC20_ABI, getProvider()).balanceOf(creator))
-    : { ok: false, value: null, error: "creator unavailable" };
+    ? await settled(dependencies.readCreatorBalance(token, creator))
+    : { ok: true, value: null, error: null };
   const creatorKnown = creatorResult.ok && Boolean(creator) && creatorBalanceResult.ok && supply > 0n;
   const creatorPct = creatorKnown ? pct(creatorBalanceResult.value, supply) : null;
   const historyResult = creator
-    ? await settled(deployerHistory(creator))
-    : { ok: false, value: null, error: "creator unavailable" };
+    ? await settled(dependencies.deployerHistory(creator))
+    : { ok: true, value: null, error: null };
   const history = historyResult.value;
 
-  const hp = await honeypotCheck({
+  const hpResult = await settled(dependencies.honeypotCheck({
     token,
     quote: event.quote,
     venue: event.venue,
     pool: event.pool,
     holders,
-  }).catch((err) => ({ honeypot: null, complete: false, reason: safeErrorMessage(err), buyTaxBps: null, sellTaxBps: null }));
+  }));
+  const hp = hpResult.value || {
+    honeypot: null,
+    complete: false,
+    reason: hpResult.error,
+    buyTaxBps: null,
+    sellTaxBps: null,
+  };
 
   const mkt = event.market || {};
   const holdersKnown = holdersResult.ok && supply > 0n && holders.length > 0;
@@ -374,6 +416,8 @@ export async function analyze(event) {
       ["Blockscout creator", creatorResult],
       ["creator balance", creatorBalanceResult],
       ["deployer history", historyResult],
+      ["V2 pool", poolResult],
+      ["honeypot", hpResult],
     ].filter(([, result]) => !result.ok).map(([source, result]) => ({ source, error: result.error })),
     ...scored,
     links: {

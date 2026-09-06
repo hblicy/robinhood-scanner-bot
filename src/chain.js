@@ -244,10 +244,10 @@ export async function attachBlockTimes(events, provider = getProvider()) {
 export async function readTokenMeta(token) {
   const c = new Contract(token, ERC20_ABI, getProvider());
   const [name, symbol, decimals, totalSupply] = await Promise.all([
-    c.name().catch(() => ""),
-    c.symbol().catch(() => ""),
-    c.decimals().catch(() => 18),
-    c.totalSupply().catch(() => 0n),
+    c.name(),
+    c.symbol(),
+    c.decimals(),
+    c.totalSupply(),
   ]);
   return { name, symbol, decimals: Number(decimals), totalSupply };
 }
