@@ -112,4 +112,90 @@ describe("analyze data completeness", () => {
     assert.equal(report.marketBound, false);
     assert.notEqual(report.verdict, "green");
   });
+
+  it("passes chain and pool provenance to the sellability inspection path", async () => {
+    const pairCreatedAt = NOW - 8 * 60_000;
+    let honeypotInput;
+    await analyze(
+      { ...event, blockNumber: 123, createdAt: NOW - 1 * 60_000 },
+      dependencies({
+        dexScreener: async () => ({ marketBound: true, pairCreatedAt }),
+        honeypotCheck: async (value) => {
+          honeypotInput = value;
+          return { honeypot: null, complete: false, reason: "incomplete" };
+        },
+      })
+    );
+    assert.deepEqual(honeypotInput, {
+      token: TOKEN,
+      quote: QUOTE,
+      venue: "uniswap-v2",
+      pool: POOL,
+      holders: [],
+      blockNumber: 123,
+      pairCreatedAt,
+      decimals: 18,
+    });
+  });
+
+  it("reports sellability facts and safely falls back for old honeypot mocks", async () => {
+    const report = await analyze(event, dependencies({
+      honeypotCheck: async () => ({ honeypot: null, complete: false, reason: "legacy inspector unavailable" }),
+    }));
+    assert.deepEqual(report.sellability, {
+      status: "unknown",
+      reason: "legacy inspector unavailable",
+      buyerSamples: 0,
+      ladderSamples: 0,
+      meaningfulSellers: 0,
+      details: [],
+    });
+    assert.equal(report.facts.sellabilityStatus, "unknown");
+    assert.equal(report.facts.sellabilityReason, "legacy inspector unavailable");
+    assert.equal(report.facts.sellabilityBuyerSamples, 0);
+    assert.equal(report.facts.sellabilityLadderSamples, 0);
+    assert.equal(report.facts.sellabilityMeaningfulSellers, 0);
+  });
+
+  it("skips a token when sellability is blocked", async () => {
+    const report = await analyze(event, dependencies({
+      honeypotCheck: async () => ({
+        honeypot: true,
+        complete: true,
+        sellOk: false,
+        reason: "sell-transfer-blocked",
+        sellability: {
+          status: "blocked",
+          reason: "sell-transfer-blocked",
+          buyerSamples: 1,
+          ladderSamples: 1,
+          meaningfulSellers: 0,
+          details: [],
+        },
+      }),
+    }));
+    assert.equal(report.verdict, "skip");
+    assert.ok(report.red.includes("蜜罐 / 无法卖出"));
+  });
+
+  it("allows confirmed sellability to preserve the honeypot safety score", async () => {
+    const report = await analyze(event, dependencies({
+      honeypotCheck: async () => ({
+        honeypot: false,
+        complete: true,
+        sellOk: true,
+        reason: "confirmed real sells",
+        sellability: {
+          status: "confirmed",
+          reason: null,
+          buyerSamples: 3,
+          ladderSamples: 2,
+          meaningfulSellers: 3,
+          details: [],
+        },
+      }),
+    }));
+    assert.equal(report.facts.honeypot, false);
+    assert.equal(report.checks.find((check) => check.key === "honeypot").pts, 10);
+  });
 });
