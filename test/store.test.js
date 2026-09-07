@@ -308,6 +308,33 @@ describe("createStore", () => {
     assert.equal(store.listDueChecks(1600).length, 1);
   });
 
+  it("marks a queued notification suppressed without deleting its audit record", () => {
+    const store = openStore(tempDir());
+    store.commitPonsRange({
+      toBlock: 10,
+      transitions: [{
+        eventId: EVENT_ID,
+        blockNumber: 10,
+        token: TOKEN,
+        nextToken: tokenState(),
+        notifications: [{
+          id: `${EVENT_ID}:new_launch`,
+          transitionType: "new_launch",
+          text: "noise",
+        }],
+        checks: [],
+      }],
+    });
+
+    store.markOutboxSuppressed(`${EVENT_ID}:new_launch`, 1_200);
+
+    const entry = store.snapshot().outbox[`${EVENT_ID}:new_launch`];
+    assert.equal(entry.status, "suppressed");
+    assert.equal(entry.suppressedAt, 1_200);
+    assert.equal(entry.deliveredAt, null);
+    assert.equal(store.listDueOutbox(2_000).length, 0);
+  });
+
   it("keeps applied events for seven days and while referenced by outbox", () => {
     const dir = tempDir();
     let clock = 1_000;

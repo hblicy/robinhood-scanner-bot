@@ -22,28 +22,6 @@ const candidates = new CandidateQueue({
 });
 let draining = false;
 
-function lifecycleNotification(event, state) {
-  const transitionType = {
-    token_launched: "new_launch",
-    launch_swept: "swept",
-    pool_graduated: "graduated",
-  }[event.kind];
-  if (!transitionType) return null;
-  const id = `${event.eventId}:${transitionType}`;
-  const notification = {
-    id,
-    eventId: event.eventId,
-    transitionType,
-    token: state.token,
-    reason: event.kind === "token_launched"
-      ? "Factory TokenLaunched 已确认"
-      : event.kind === "launch_swept"
-        ? "Factory LaunchSwept 已确认，等待 Hook 注册"
-        : "Factory PoolGraduated 已确认",
-  };
-  return { ...notification, text: formatLifecycleNotification(notification) };
-}
-
 function lifecycleChecks(event, state, now) {
   const types = event.kind === "token_launched"
     ? ["curve_flow", "holders", "deployer_24h", "line_a"]
@@ -64,6 +42,7 @@ async function buildPonsTransitions(events, {
   readLaunch,
   now,
   initialTokens = {},
+  scheduleChecks = true,
 }) {
   const working = structuredClone(initialTokens);
   const transitions = [];
@@ -75,14 +54,13 @@ async function buildPonsTransitions(events, {
       ? reducePonsEvent(previous, event, record, now())
       : createPonsTokenState(event, record, now());
     working[key] = nextToken;
-    const notification = lifecycleNotification(event, nextToken);
     transitions.push({
       eventId: event.eventId,
       blockNumber: event.blockNumber,
       token: event.token,
       nextToken,
-      notifications: notification ? [notification] : [],
-      checks: lifecycleChecks(event, nextToken, now()),
+      notifications: [],
+      checks: scheduleChecks ? lifecycleChecks(event, nextToken, now()) : [],
     });
   }
   return transitions;
@@ -96,6 +74,7 @@ export async function previewPonsRange({
   scanRange = scanPonsRange,
   readLaunch = readPonsLaunch,
   initialTokens = {},
+  scheduleChecks = true,
 }) {
   const events = await scanRange(provider, fromBlock, toBlock);
   const transitions = await buildPonsTransitions(events, {
@@ -103,6 +82,7 @@ export async function previewPonsRange({
     readLaunch,
     now,
     initialTokens,
+    scheduleChecks,
   });
   return { events, transitions };
 }
@@ -265,20 +245,7 @@ export async function refreshMarketHeat({
     highHeatCap: settings.watchlistCapHighHeat,
   });
   heat.errors = errors;
-  const previous = store.getHeat();
-  let notification = null;
-  if (previous?.decision !== heat.decision) {
-    const hour = Math.floor(at / 3_600_000);
-    notification = {
-      id: `heat:${hour}:${heat.decision === "打" ? "go" : "no"}`,
-      eventId: null,
-      transitionType: "heat_change",
-      token: "market",
-      reason: `决策=${heat.decision}，24h 发射=${heat.launches24h ?? "unknown"}，新准入上限=${heat.admissionCap}`,
-    };
-    notification.text = formatLifecycleNotification(notification);
-  }
-  store.commitHeat({ heat, notification });
+  store.commitHeat({ heat });
   return heat;
 }
 
@@ -304,15 +271,17 @@ export async function reconcilePonsWatchlist({
       args: {},
     };
     const nextToken = reducePonsEvent(previous, event, record, now());
-    const transitionType = phase === "rescued" ? "rescued" : phase === "pool_created" ? "graduated" : "phase_changed";
-    const notification = {
-      id: `${event.eventId}:${transitionType}`,
-      eventId: event.eventId,
-      transitionType,
-      token: address,
-      reason: `Factory getter 阶段为 ${phase}`,
-    };
-    notification.text = formatLifecycleNotification(notification);
+    let notification = null;
+    if (phase === "rescued") {
+      notification = {
+        id: `${event.eventId}:rescued`,
+        eventId: event.eventId,
+        transitionType: "rescued",
+        token: address,
+        reason: `Factory getter 阶段为 ${phase}`,
+      };
+      notification.text = formatLifecycleNotification(notification);
+    }
     store.commitTokenUpdate({ token: address, nextToken, notification });
     updated += 1;
   }
@@ -509,8 +478,10 @@ export async function runWatchIteration(state, dependencies) {
 export async function runPonsWatchIteration(state, dependencies) {
   const safeHead = (await dependencies.getBlockNumber()) - (dependencies.settings.ponsConfirmations ?? 0);
   if (safeHead < 0) return { complete: true, events: [], transitions: [] };
+  let recovering = false;
   if (state.lastBlock == null) {
     const savedCursor = dependencies.store.getPonsCursor();
+    recovering = savedCursor == null;
     const boundary = await dependencies.findFirstBlockAtOrAfter(
       dependencies.now() - dependencies.settings.lineAMaxAgeMinutes * 60_000,
       safeHead
@@ -527,6 +498,7 @@ export async function runPonsWatchIteration(state, dependencies) {
     now: dependencies.now,
     scanRange: dependencies.scanRange,
     readLaunch: dependencies.readLaunch,
+    scheduleChecks: !recovering,
   });
   state.lastBlock = safeHead;
   return { ...result, complete: true };

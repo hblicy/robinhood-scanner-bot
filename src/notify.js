@@ -1,5 +1,6 @@
 import { SETTINGS } from "./config.js";
 import { safeErrorMessage } from "./safety.js";
+import { normalizeSellabilityEvidence } from "./sellability.js";
 
 const VERDICT = {
   green: "🟢 可小仓试",
@@ -10,6 +11,8 @@ const VERDICT = {
 
 export function formatAlert(report) {
   const { meta, facts, score, verdict, red, checks, links, token, venue, creator } = report;
+  const sellability = normalizeSellabilityEvidence(report.sellability, report.honeypot?.honeypot);
+  const sellabilityReason = formatSellabilityReason(sellability.status, sellability.reason);
   const lines = [];
   lines.push(`${VERDICT[verdict] || verdict}  <b>${esc(meta.symbol)}</b>  ${score}/100`);
   lines.push(`${esc(meta.name || "")}`);
@@ -36,6 +39,9 @@ export function formatAlert(report) {
   lines.push(
     `<b>创建者</b> ${creator ? `<code>${short(creator)}</code>` : "?"} 持仓 ${facts.creatorPct?.toFixed(1) ?? "?"}%  · 历史发币 ${facts.deployerTokens ?? "未知"}`
   );
+  lines.push(
+    `<b>卖出安全</b> ${sellabilityLabel(sellability.status)}  原因 ${sellabilityReason}  买家样本 ${sellability.buyerSamples}  额度样本 ${sellability.ladderSamples}  真实卖家 ${sellability.meaningfulSellers}`
+  );
   const buyTax = Number.isFinite(facts.buyTaxBps) ? facts.buyTaxBps : "未知";
   const sellTax = Number.isFinite(facts.sellTaxBps) ? facts.sellTaxBps : "未知";
   const lpStatus = facts.lpUnknown
@@ -44,7 +50,7 @@ export function formatAlert(report) {
       ? `已烧 ${facts.lpBurnedPct.toFixed(0)}%`
       : "未验证";
   lines.push(
-    `<b>安全</b> 蜜罐 ${facts.honeypot === false ? "通过" : facts.honeypot === true ? "失败" : "未完成"}  税 ${buyTax}/${sellTax}bps  LP ${lpStatus}`
+    `<b>安全</b> ${honeypotRiskLabel(sellability.status)}  税 ${buyTax}/${sellTax}bps  LP ${lpStatus}`
   );
   if (report.errorSources?.length) {
     const sources = [...new Set(report.errorSources.map(({ source }) => String(source)))];
@@ -61,7 +67,11 @@ export function formatAlert(report) {
     lines.push(`${c.ok ? "✓" : "·"} ${esc(c.key)} ${esc(c.detail)} ${c.pts ? `(+${c.pts})` : ""}`);
   }
   lines.push("");
-  lines.push(`<a href="${links.dex}">DexScreener</a> · <a href="${links.explorer}">Blockscout</a> · <a href="${links.gmgn}">GMGN</a>`);
+  lines.push([
+    safeHttpLink("DexScreener", links.dex),
+    safeHttpLink("Blockscout", links.explorer),
+    safeHttpLink("GMGN", links.gmgn),
+  ].join(" · "));
   lines.push("");
   lines.push("<i>本程序只扫描报警，不包含模拟或实盘交易功能。</i>");
   return lines.join("\n");
@@ -152,6 +162,42 @@ function esc(s) {
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
+}
+
+function safeHttpLink(label, value) {
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(String(value));
+  } catch {
+    return esc(label);
+  }
+  if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") return esc(label);
+  return `<a href="${escAttribute(parsedUrl.href)}">${esc(label)}</a>`;
+}
+
+function escAttribute(value) {
+  return esc(value)
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function sellabilityLabel(status) {
+  if (status === "confirmed") return "已确认";
+  if (status === "blocked") return "已阻断";
+  return "未确认";
+}
+
+function formatSellabilityReason(status, reason) {
+  if (reason == null || reason === "") {
+    return status === "confirmed" ? "无" : "evidence-unavailable";
+  }
+  return esc(reason);
+}
+
+function honeypotRiskLabel(sellabilityStatus) {
+  if (sellabilityStatus === "blocked") return "风险 已阻断";
+  if (sellabilityStatus === "confirmed") return "风险 未发现阻断";
+  return "风险 未确认";
 }
 
 function short(addr) {

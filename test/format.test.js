@@ -2,53 +2,132 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { formatAlert } from "../src/notify.js";
 
+function makeReport(overrides = {}) {
+  const {
+    facts: factsOverride,
+    sellability: sellabilityOverride,
+    links: linksOverride,
+    dex: dexOverride,
+    ...rest
+  } = overrides;
+
+  const report = {
+    token: "0x1111111111111111111111111111111111111111",
+    venue: "uniswap-v2",
+    creator: "0x2222222222222222222222222222222222222222",
+    meta: { symbol: "CAT", name: "Cash Cat" },
+    facts: {
+      ageMinutes: 4.2,
+      mcapUsd: 42000,
+      liquidityUsd: 12000,
+      volume5m: 3000,
+      buys5m: 12,
+      sells5m: 3,
+      hasTwitter: true,
+      hasTelegram: false,
+      narrativeHits: ["cat"],
+      top10Pct: 28,
+      holderCount: 40,
+      creatorPct: 2,
+      deployerTokens: 1,
+      honeypot: false,
+      buyTaxBps: 0,
+      sellTaxBps: 0,
+      lpBurnedPct: 100,
+      lpUnknown: false,
+      ...factsOverride,
+    },
+    score: 82,
+    verdict: "green",
+    red: [],
+    checks: [{ key: "age", ok: true, pts: 15, detail: "4.2 分钟" }],
+    links: {
+      dex: "https://dexscreener.com/robinhood/0x1",
+      explorer: "https://robinhoodchain.blockscout.com/token/0x1",
+      gmgn: "https://gmgn.ai/robinhood/token/0x1",
+      ...linksOverride,
+    },
+    dex: { quoteSymbol: "WETH", ...dexOverride },
+    ...rest,
+  };
+
+  if (!Object.hasOwn(report, "honeypot")) {
+    report.honeypot = { honeypot: report.facts.honeypot };
+  }
+
+  if (sellabilityOverride === null) {
+    delete report.sellability;
+  } else {
+    report.sellability = {
+      status: "confirmed",
+      reason: "confirmed real sells",
+      buyerSamples: 12,
+      ladderSamples: 4,
+      meaningfulSellers: 3,
+      ...(sellabilityOverride || {}),
+    };
+  }
+
+  return report;
+}
+
 describe("formatAlert", () => {
   it("renders the checklist without throwing", () => {
-    const text = formatAlert({
-      token: "0x1111111111111111111111111111111111111111",
-      venue: "uniswap-v2",
-      creator: "0x2222222222222222222222222222222222222222",
-      meta: { symbol: "CAT", name: "Cash Cat" },
-      facts: {
-        ageMinutes: 4.2,
-        mcapUsd: 42000,
-        liquidityUsd: 12000,
-        volume5m: 3000,
-        buys5m: 12,
-        sells5m: 3,
-        hasTwitter: true,
-        hasTelegram: false,
-        narrativeHits: ["cat"],
-        top10Pct: 28,
-        holderCount: 40,
-        creatorPct: 2,
-        deployerTokens: 1,
-        honeypot: false,
-        buyTaxBps: 0,
-        sellTaxBps: 0,
-        lpBurnedPct: 100,
-      },
-      score: 82,
-      verdict: "green",
-      red: [],
-      checks: [{ key: "age", ok: true, pts: 15, detail: "4.2 分钟" }],
-      links: {
-        dex: "https://dexscreener.com/robinhood/0x1",
-        explorer: "https://robinhoodchain.blockscout.com/token/0x1",
-        gmgn: "https://gmgn.ai/robinhood/token/0x1",
-      },
-      dex: { quoteSymbol: "WETH" },
-    });
+    const text = formatAlert(makeReport());
     assert.match(text, /CAT/);
     assert.match(text, /82\/100/);
-    assert.match(text, /DexScreener/);
+    assert.match(text, /卖出安全<\/b> 已确认/);
+    assert.match(text, /原因 confirmed real sells/);
+    assert.match(text, /买家样本 12  额度样本 4  真实卖家 3/);
+    assert.match(text, /风险 未发现阻断/);
+    assert.match(text, /<a href="https:\/\/dexscreener\.com\/robinhood\/0x1">DexScreener<\/a>/);
+    assert.match(text, /<a href="https:\/\/robinhoodchain\.blockscout\.com\/token\/0x1">Blockscout<\/a>/);
+    assert.match(text, /<a href="https:\/\/gmgn\.ai\/robinhood\/token\/0x1">GMGN<\/a>/);
     assert.match(text, /不包含模拟或实盘交易功能/);
   });
 
+  it("renders unsafe or malformed link protocols as plain labels", () => {
+    const text = formatAlert(makeReport({
+      links: {
+        dex: "JaVaScRiPt:alert(1)",
+        explorer: "data:text/html,<script>alert(1)</script>",
+        gmgn: "https://",
+      },
+    }));
+    assert.match(text, /DexScreener · Blockscout · GMGN/);
+    assert.doesNotMatch(text, /<a\b|href=|javascript:|data:text/i);
+  });
+
+  it("escapes every HTML attribute delimiter in an allowed URL", () => {
+    const text = formatAlert(makeReport({
+      links: {
+        dex: `https://example.test/?double="&single='&lt=<&gt=>`,
+        explorer: "javascript:blocked",
+        gmgn: "data:text/plain,blocked",
+      },
+    }));
+    assert.match(
+      text,
+      /<a href="https:\/\/example\.test\/\?double=%22&amp;single=%27&amp;lt=%3C&amp;gt=%3E">DexScreener<\/a>/
+    );
+    assert.match(text, /<\/a> · Blockscout · GMGN/);
+    assert.doesNotMatch(text, /double="|single='|lt=<|gt=>/);
+  });
+
+  it("renders the parsed canonical HTTP URL instead of the untrusted source spelling", () => {
+    const text = formatAlert(makeReport({
+      links: {
+        dex: String.raw`http:example.test\path?x=1&y=2`,
+        explorer: "javascript:blocked",
+        gmgn: "data:text/plain,blocked",
+      },
+    }));
+    assert.match(text, /<a href="http:\/\/example\.test\/path\?x=1&amp;y=2">DexScreener<\/a>/);
+    assert.doesNotMatch(text, /http:example\.test\\path/);
+  });
+
   it("renders unknown safety facts without claiming they passed", () => {
-    const text = formatAlert({
-      token: "0x1111111111111111111111111111111111111111",
-      venue: "uniswap-v2",
+    const text = formatAlert(makeReport({
       creator: null,
       meta: { symbol: "UNK", name: "Unknown" },
       facts: {
@@ -71,6 +150,7 @@ describe("formatAlert", () => {
         lpUnknown: true,
         lpBurnedPct: null,
       },
+      sellability: null,
       score: 0,
       verdict: "review",
       red: [],
@@ -80,12 +160,338 @@ describe("formatAlert", () => {
       errorSources: [
         { source: "Blockscout holders", error: "https://user:SECRET@example.test/private" },
       ],
-    });
+    }));
     assert.match(text, /年龄<\/b> 未知/);
     assert.match(text, /税 未知\/未知bps/);
     assert.match(text, /LP 未验证/);
+    assert.match(text, /卖出安全<\/b> 未确认/);
+    assert.match(text, /原因 evidence-unavailable/);
+    assert.match(text, /买家样本 0  额度样本 0  真实卖家 0/);
+    assert.match(text, /风险 未确认/);
     assert.doesNotMatch(text, /已锁/);
     assert.match(text, /数据异常.*Blockscout holders/);
     assert.doesNotMatch(text, /SECRET|private/);
+  });
+
+  it("renders blocked sellability evidence with the blocked risk wording", () => {
+    const text = formatAlert(makeReport({
+      verdict: "skip",
+      score: 12,
+      facts: {
+        honeypot: true,
+        buyTaxBps: 0,
+        sellTaxBps: 0,
+        lpUnknown: false,
+        lpBurnedPct: 100,
+      },
+      sellability: {
+        status: "blocked",
+        reason: "hidden-balance-mutation",
+        buyerSamples: 1,
+        ladderSamples: 0,
+        meaningfulSellers: 0,
+      },
+    }));
+    assert.match(text, /卖出安全<\/b> 已阻断/);
+    assert.match(text, /hidden-balance-mutation/);
+    assert.match(text, /买家样本 1  额度样本 0  真实卖家 0/);
+    assert.match(text, /风险 已阻断/);
+  });
+
+  it("does not claim pass or blocked risk when sellability is unknown", () => {
+    const text = formatAlert(makeReport({
+      verdict: "review",
+      score: 0,
+      meta: { symbol: "UNK", name: "Unknown" },
+      creator: null,
+      facts: {
+        honeypot: null,
+        buyTaxBps: null,
+        sellTaxBps: null,
+        lpUnknown: true,
+        lpBurnedPct: null,
+      },
+      sellability: {
+        status: "unknown",
+        reason: "insufficient-meaningful-sells",
+        buyerSamples: 5,
+        ladderSamples: 2,
+        meaningfulSellers: 2,
+      },
+    }));
+    assert.match(text, /卖出安全<\/b> 未确认/);
+    assert.match(text, /insufficient-meaningful-sells/);
+    assert.match(text, /买家样本 5  额度样本 2  真实卖家 2/);
+    assert.match(text, /风险 未确认/);
+    assert.doesNotMatch(text, /卖出安全.*通过/);
+    assert.doesNotMatch(text, /风险 未发现阻断/);
+    assert.doesNotMatch(text, /可小仓试/);
+  });
+
+  it("keeps unknown sellability from inheriting a false honeypot pass", () => {
+    const text = formatAlert(makeReport({
+      verdict: "review",
+      facts: {
+        honeypot: false,
+        buyTaxBps: 0,
+        sellTaxBps: 0,
+        lpUnknown: false,
+        lpBurnedPct: 100,
+      },
+      sellability: {
+        status: "unknown",
+        reason: "insufficient-meaningful-sells",
+        buyerSamples: 4,
+        ladderSamples: 1,
+        meaningfulSellers: 2,
+      },
+    }));
+    assert.match(text, /卖出安全<\/b> 未确认/);
+    assert.match(text, /风险 未确认/);
+    assert.doesNotMatch(text, /风险 未发现阻断/);
+  });
+
+  it("keeps confirmed sellability from inheriting an unknown honeypot state", () => {
+    const text = formatAlert(makeReport({
+      verdict: "review",
+      facts: {
+        honeypot: null,
+        buyTaxBps: 0,
+        sellTaxBps: 0,
+        lpUnknown: false,
+        lpBurnedPct: 100,
+      },
+      sellability: {
+        status: "confirmed",
+        reason: "confirmed real sells",
+        buyerSamples: 12,
+        ladderSamples: 4,
+        meaningfulSellers: 3,
+      },
+    }));
+    assert.match(text, /卖出安全<\/b> 未确认/);
+    assert.match(text, /风险 未确认/);
+    assert.doesNotMatch(text, /风险 未发现阻断|风险 已阻断/);
+  });
+
+  const sellabilityCases = [
+    {
+      name: "confirmed缺计数",
+      sellability: {
+        status: "confirmed",
+        reason: "confirmed real sells",
+        buyerSamples: undefined,
+        ladderSamples: 4,
+        meaningfulSellers: 3,
+      },
+      facts: { honeypot: false, buyTaxBps: 0, sellTaxBps: 0, lpUnknown: false, lpBurnedPct: 100 },
+      sellabilityText: "卖出安全</b> 未确认",
+      riskText: "风险 未确认",
+    },
+    {
+      name: "buyer0",
+      sellability: {
+        status: "confirmed",
+        reason: "confirmed real sells",
+        buyerSamples: 0,
+        ladderSamples: 4,
+        meaningfulSellers: 3,
+      },
+      facts: { honeypot: false, buyTaxBps: 0, sellTaxBps: 0, lpUnknown: false, lpBurnedPct: 100 },
+      sellabilityText: "卖出安全</b> 未确认",
+      riskText: "风险 未确认",
+    },
+    {
+      name: "confirmed负计数",
+      sellability: {
+        status: "confirmed",
+        reason: "confirmed real sells",
+        buyerSamples: 12,
+        ladderSamples: 4,
+        meaningfulSellers: -1,
+      },
+      facts: { honeypot: false, buyTaxBps: 0, sellTaxBps: 0, lpUnknown: false, lpBurnedPct: 100 },
+      sellabilityText: "卖出安全</b> 未确认",
+      riskText: "风险 未确认",
+    },
+    {
+      name: "confirmed非整数计数",
+      sellability: {
+        status: "confirmed",
+        reason: "confirmed real sells",
+        buyerSamples: 1.5,
+        ladderSamples: 4,
+        meaningfulSellers: 3,
+      },
+      facts: { honeypot: false, buyTaxBps: 0, sellTaxBps: 0, lpUnknown: false, lpBurnedPct: 100 },
+      sellabilityText: "卖出安全</b> 未确认",
+      riskText: "风险 未确认",
+    },
+    {
+      name: "ladder0",
+      sellability: {
+        status: "confirmed",
+        reason: "confirmed real sells",
+        buyerSamples: 12,
+        ladderSamples: 0,
+        meaningfulSellers: 3,
+      },
+      facts: { honeypot: false, buyTaxBps: 0, sellTaxBps: 0, lpUnknown: false, lpBurnedPct: 100 },
+      sellabilityText: "卖出安全</b> 未确认",
+      riskText: "风险 未确认",
+    },
+    {
+      name: "sellers2",
+      sellability: {
+        status: "confirmed",
+        reason: "confirmed real sells",
+        buyerSamples: 12,
+        ladderSamples: 4,
+        meaningfulSellers: 2,
+      },
+      facts: { honeypot: false, buyTaxBps: 0, sellTaxBps: 0, lpUnknown: false, lpBurnedPct: 100 },
+      sellabilityText: "卖出安全</b> 未确认",
+      riskText: "风险 未确认",
+    },
+    {
+      name: "confirmed+honeypot true",
+      sellability: {
+        status: "confirmed",
+        reason: "confirmed real sells",
+        buyerSamples: 12,
+        ladderSamples: 4,
+        meaningfulSellers: 3,
+      },
+      facts: { honeypot: true, buyTaxBps: 0, sellTaxBps: 0, lpUnknown: false, lpBurnedPct: 100 },
+      sellabilityText: "卖出安全</b> 未确认",
+      riskText: "风险 未确认",
+    },
+    {
+      name: "confirmed+honeypot null",
+      sellability: {
+        status: "confirmed",
+        reason: "confirmed real sells",
+        buyerSamples: 12,
+        ladderSamples: 4,
+        meaningfulSellers: 3,
+      },
+      facts: { honeypot: null, buyTaxBps: 0, sellTaxBps: 0, lpUnknown: false, lpBurnedPct: 100 },
+      sellabilityText: "卖出安全</b> 未确认",
+      riskText: "风险 未确认",
+    },
+    {
+      name: "unknown+true",
+      sellability: {
+        status: "unknown",
+        reason: "insufficient-meaningful-sells",
+        buyerSamples: 12,
+        ladderSamples: 4,
+        meaningfulSellers: 3,
+      },
+      facts: { honeypot: true, buyTaxBps: 0, sellTaxBps: 0, lpUnknown: false, lpBurnedPct: 100 },
+      sellabilityText: "卖出安全</b> 未确认",
+      riskText: "风险 未确认",
+    },
+    {
+      name: "unknown+false",
+      sellability: {
+        status: "unknown",
+        reason: "insufficient-meaningful-sells",
+        buyerSamples: 12,
+        ladderSamples: 4,
+        meaningfulSellers: 3,
+      },
+      facts: { honeypot: false, buyTaxBps: 0, sellTaxBps: 0, lpUnknown: false, lpBurnedPct: 100 },
+      sellabilityText: "卖出安全</b> 未确认",
+      riskText: "风险 未确认",
+    },
+    {
+      name: "blocked+false",
+      sellability: {
+        status: "blocked",
+        reason: "hidden-balance-mutation",
+        buyerSamples: 12,
+        ladderSamples: 4,
+        meaningfulSellers: 3,
+      },
+      facts: { honeypot: false, buyTaxBps: 0, sellTaxBps: 0, lpUnknown: false, lpBurnedPct: 100 },
+      sellabilityText: "卖出安全</b> 已阻断",
+      riskText: "风险 已阻断",
+    },
+  ];
+
+  for (const testCase of sellabilityCases) {
+    it(`normalizes sellability before rendering the risk lines: ${testCase.name}`, () => {
+      const text = formatAlert(makeReport({
+        verdict: "review",
+        facts: testCase.facts,
+        sellability: testCase.sellability,
+      }));
+      assert.match(text, new RegExp(testCase.sellabilityText));
+      assert.match(text, new RegExp(testCase.riskText));
+      if (testCase.sellabilityText.includes("未确认")) {
+        assert.doesNotMatch(text, /卖出安全<\/b> 已确认|卖出安全<\/b> 已阻断/);
+      }
+      if (testCase.riskText.includes("未确认")) {
+        assert.doesNotMatch(text, /风险 已确认|风险 已阻断/);
+      }
+      if (testCase.riskText.includes("已阻断")) {
+        assert.doesNotMatch(text, /风险 未发现阻断|风险 未确认/);
+      }
+      if (testCase.riskText.includes("未发现阻断")) {
+        assert.doesNotMatch(text, /风险 已阻断|风险 未确认/);
+      }
+    });
+  }
+
+  it("shows a null confirmed reason as 无 instead of inventing evidence-unavailable", () => {
+    const text = formatAlert(makeReport({
+      verdict: "review",
+      facts: {
+        honeypot: false,
+        buyTaxBps: 0,
+        sellTaxBps: 0,
+        lpUnknown: false,
+        lpBurnedPct: 100,
+      },
+      sellability: {
+        status: "confirmed",
+        reason: null,
+        buyerSamples: 3,
+        ladderSamples: 2,
+        meaningfulSellers: 3,
+      },
+    }));
+    assert.match(text, /卖出安全<\/b> 已确认/);
+    assert.match(text, /原因 无/);
+    assert.doesNotMatch(text, /evidence-unavailable/);
+    assert.match(text, /风险 未发现阻断/);
+  });
+
+  it("treats illegal sellability data as unconfirmed and escapes the reason", () => {
+    const text = formatAlert(makeReport({
+      verdict: "review",
+      score: 0,
+      creator: null,
+      facts: {
+        honeypot: null,
+        buyTaxBps: null,
+        sellTaxBps: null,
+        lpUnknown: true,
+        lpBurnedPct: null,
+      },
+      sellability: {
+        status: "future",
+        reason: "<tag>&",
+        buyerSamples: -1,
+        ladderSamples: "nope",
+        meaningfulSellers: -3,
+      },
+    }));
+    assert.match(text, /卖出安全<\/b> 未确认/);
+    assert.match(text, /&lt;tag&gt;&amp;/);
+    assert.doesNotMatch(text, /<tag>&/);
+    assert.match(text, /买家样本 0  额度样本 0  真实卖家 0/);
+    assert.match(text, /风险 未确认/);
   });
 });

@@ -1,7 +1,15 @@
+import { normalizeSellabilityEvidence } from "./sellability.js";
+
 export function candidateKey(event) {
   return [event?.venue || "unknown", event?.poolId || event?.pool || "no-pool", event?.token || "no-token"]
     .map((value) => String(value).toLowerCase())
     .join("|");
+}
+
+function normalizeSellabilityReason(reason) {
+  if (reason == null || reason === "") return "none";
+  if (typeof reason !== "string") return "evidence-unavailable";
+  return reason.length <= 64 && /^[a-z0-9-]+$/.test(reason) ? reason : "evidence-unavailable";
 }
 
 export async function handleCandidate(event, options, dependencies) {
@@ -19,16 +27,26 @@ export async function handleCandidate(event, options, dependencies) {
 
   dependencies.log(`analyzing ${event.token} via ${event.source}/${event.venue}`);
   const report = await dependencies.analyze(event);
+  const sellability = normalizeSellabilityEvidence(report.sellability, report.honeypot?.honeypot);
+  const normalizedReport = { ...report, sellability };
+  const sellabilityStatus = sellability.status;
+  const sellabilityReason = normalizeSellabilityReason(
+    sellability.reason || (sellabilityStatus === "confirmed" ? null : "evidence-unavailable")
+  );
   const shouldAlert =
-    report.verdict === "green" ||
-    report.verdict === "review" ||
-    report.honeypot?.honeypot === true ||
-    report.score >= dependencies.minScore;
-  if (shouldAlert) await dependencies.alertReport(report);
+    sellabilityStatus === "blocked" ||
+    (sellabilityStatus === "confirmed" && (
+      report.verdict === "green" ||
+      report.verdict === "review" ||
+      report.score >= dependencies.minScore
+    ));
+  if (shouldAlert) await dependencies.alertReport(normalizedReport);
   else {
     const errorSources = [...new Set((report.errorSources || []).map(({ source }) => source))];
     const suffix = errorSources.length ? ` data-errors=${errorSources.join(",")}` : "";
-    dependencies.log(`quiet skip ${report.meta.symbol} ${report.score}/100 ${report.verdict}${suffix}`);
+    dependencies.log(
+      `quiet skip ${report.meta.symbol} ${report.score}/100 ${report.verdict}${suffix} sellability=${sellabilityStatus}:${sellabilityReason}`
+    );
   }
   if (options.persistSeen !== false) {
     dependencies.markSeen(key, {
@@ -41,5 +59,5 @@ export async function handleCandidate(event, options, dependencies) {
       venue: report.venue,
     });
   }
-  return report;
+  return normalizedReport;
 }

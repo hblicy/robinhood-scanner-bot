@@ -1,24 +1,88 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import * as scanner from "../src/index.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const SOURCE_EXTENSIONS = new Set([".cjs", ".js", ".mjs"]);
+const DANGEROUS_CALL_PATTERNS = [
+  /\bsignTransaction\b/,
+  /\bsignMessageSync\b/,
+  /\bsignMessage\b/,
+  /\bsignTypedData\b/,
+  /\bsendTransaction\b/,
+  /\bsendRawTransaction\b/,
+  /\bsendUncheckedTransaction\b/,
+  /\bsendSignedTransaction\b/,
+  /\bbroadcastTransaction\b/,
+  /\bbroadcast\b/,
+  /eth_send[A-Za-z0-9_]*/,
+];
 
-function sourceText() {
-  return fs.readdirSync(path.join(root, "src"), { withFileTypes: true })
-    .filter((entry) => entry.isFile() && entry.name.endsWith(".js"))
-    .map((entry) => fs.readFileSync(path.join(root, "src", entry.name), "utf8"))
-    .join("\n");
+function collectSourceFiles(directory) {
+  return fs.readdirSync(directory, { withFileTypes: true })
+    .flatMap((entry) => {
+      const fullPath = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        if (entry.name === "node_modules") return [];
+        return collectSourceFiles(fullPath);
+      }
+      if (entry.isFile() && SOURCE_EXTENSIONS.has(path.extname(entry.name).toLowerCase())) {
+        return [fullPath];
+      }
+      return [];
+    })
+    .sort((a, b) => a.localeCompare(b));
+}
+
+function sourceText(directory = path.join(root, "src")) {
+  return collectSourceFiles(directory).map((file) => fs.readFileSync(file, "utf8")).join("\n");
 }
 
 describe("push-only command surface", () => {
   it("exposes only scanner scripts", () => {
     const pkg = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
     assert.deepEqual(Object.keys(pkg.scripts).sort(), ["check", "scan", "start", "test", "watch"]);
+  });
+
+  it("collects nested source files deterministically", () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "push-only-"));
+    try {
+      const nested = path.join(tempRoot, "nested", "inner");
+      const ignored = path.join(tempRoot, "node_modules", "ignored");
+      fs.mkdirSync(nested, { recursive: true });
+      fs.mkdirSync(ignored, { recursive: true });
+      const files = {
+        [path.join(tempRoot, "root.js")]: "root-js",
+        [path.join(tempRoot, "nested", "feature.mjs")]: "nested-mjs",
+        [path.join(tempRoot, "nested", "inner", "more.cjs")]: "inner-cjs",
+        [path.join(tempRoot, "nested", "skip.txt")]: "ignored-txt",
+        [path.join(tempRoot, "node_modules", "ignored", "skip.js")]: "ignored-node-modules",
+      };
+      for (const [file, contents] of Object.entries(files)) {
+        fs.writeFileSync(file, contents);
+      }
+
+      const collected = collectSourceFiles(tempRoot);
+      assert.deepEqual(collected, [
+        path.join(tempRoot, "nested", "feature.mjs"),
+        path.join(tempRoot, "nested", "inner", "more.cjs"),
+        path.join(tempRoot, "root.js"),
+      ].sort((a, b) => a.localeCompare(b)));
+
+      const text = sourceText(tempRoot);
+      assert.match(text, /root-js/);
+      assert.match(text, /nested-mjs/);
+      assert.match(text, /inner-cjs/);
+      assert.doesNotMatch(text, /ignored-txt/);
+      assert.doesNotMatch(text, /ignored-node-modules/);
+    } finally {
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
   });
 
   it("contains no transaction-capable source or secret configuration", () => {
@@ -28,8 +92,7 @@ describe("push-only command surface", () => {
       /\bWallet\b/,
       /PRIVATE_KEY/,
       /ENABLE_LIVE_TRADING/,
-      /signTransaction/,
-      /broadcastTransaction/,
+      ...DANGEROUS_CALL_PATTERNS,
       /swapExactETHForTokens/,
       /swapExactTokensForETH/,
       /exactInputSingle/,
@@ -44,6 +107,24 @@ describe("push-only command surface", () => {
       assert.doesNotMatch(`${source}\n${example}`, pattern);
     }
     assert.equal(fs.existsSync(path.join(root, "src", "trade.js")), false);
+  });
+
+  it("keeps src/sellability.js read-only", () => {
+    const file = path.join(root, "src", "sellability.js");
+    assert.equal(fs.existsSync(file), true);
+    const source = fs.readFileSync(file, "utf8");
+    const forbidden = [
+      /\bWallet\b/,
+      /PRIVATE_KEY/,
+      /approve/,
+      /swapExact/,
+      /exactInput/,
+      ...DANGEROUS_CALL_PATTERNS,
+    ];
+    for (const pattern of forbidden) {
+      assert.doesNotMatch(source, pattern);
+    }
+    assert.match(source, /provider\.call\s*\(/);
   });
 
   it("rejects paper and live as unsupported commands", () => {

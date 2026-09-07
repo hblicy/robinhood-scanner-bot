@@ -1,10 +1,11 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { Interface } from "ethers";
-import { V4_PM_ABI } from "../src/abis.js";
+import { PAIR_V2_ABI, V4_PM_ABI } from "../src/abis.js";
 import { ADDR } from "../src/config.js";
 import {
   attachBlockTimes,
+  bytecodeFlags,
   findFirstBlockAtOrAfter,
   getLogsChunked,
   readOwnerFromContract,
@@ -13,6 +14,24 @@ import {
   scanOnchain,
   withRetry,
 } from "../src/chain.js";
+
+describe("bytecodeFlags", () => {
+  it("reads token code at the supplied fixed block", async () => {
+    const calls = [];
+    const provider = {
+      async getCode(...args) {
+        calls.push(args);
+        return "0x1234";
+      },
+    };
+    const result = await bytecodeFlags("0x1111111111111111111111111111111111111111", {
+      provider,
+      blockTag: 77,
+    });
+    assert.equal(result.hasCode, true);
+    assert.deepEqual(calls, [["0x1111111111111111111111111111111111111111", 77]]);
+  });
+});
 
 describe("findFirstBlockAtOrAfter", () => {
   it("finds the first block inside the age window with logarithmic lookups", async () => {
@@ -104,6 +123,43 @@ describe("getLogsChunked", () => {
     assert.equal(new Set(logs.map(({ blockNumber }) => blockNumber)).size, 2000);
   });
 
+  it("enforces one maxLogs budget across ordinary chunks", async () => {
+    await assert.rejects(
+      () => getLogsChunked({
+        address: ADDR.V2_FACTORY,
+        topics: [],
+        fromBlock: 1,
+        toBlock: 3,
+        chunk: 1,
+        maxLogs: 2,
+        provider: {
+          getLogs: async ({ fromBlock }) => [{ blockNumber: fromBlock }],
+        },
+      }),
+      /log budget exceeded: max 2/
+    );
+  });
+
+  it("passes only the remaining maxLogs budget into a split range", async () => {
+    await assert.rejects(
+      () => getLogsChunked({
+        address: ADDR.V2_FACTORY,
+        topics: [],
+        fromBlock: 1,
+        toBlock: 80,
+        maxLogs: 3,
+        provider: {
+          getLogs: async ({ fromBlock, toBlock }) => {
+            if (toBlock - fromBlock + 1 > 40) throw new Error("range too large");
+            return [{ blockNumber: fromBlock }, { blockNumber: toBlock }];
+          },
+        },
+        retry: async (fn) => fn(),
+      }),
+      /log budget exceeded: max 1/
+    );
+  });
+
   it("does not split a permanent authorization failure", async () => {
     let calls = 0;
     const denied = Object.assign(new Error("HTTP 403 forbidden"), { status: 403 });
@@ -121,6 +177,13 @@ describe("getLogsChunked", () => {
       (error) => error === denied
     );
     assert.equal(calls, 3);
+  });
+});
+
+describe("V2 pair ABI", () => {
+  it("exposes the standard Swap event", () => {
+    const event = new Interface(PAIR_V2_ABI).getEvent("Swap");
+    assert.equal(event.format("sighash"), "Swap(address,uint256,uint256,uint256,uint256,address)");
   });
 });
 

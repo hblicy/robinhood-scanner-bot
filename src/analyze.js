@@ -1,4 +1,4 @@
-import { Contract, Interface, ZeroAddress, formatEther, getAddress, parseEther } from "ethers";
+import { Contract, ZeroAddress, formatEther, getAddress, parseEther } from "ethers";
 import { ADDR, NARRATIVE_WORDS, SETTINGS, isQuote } from "./config.js";
 import { ERC20_ABI, V2_ROUTER_ABI } from "./abis.js";
 import {
@@ -18,9 +18,14 @@ import {
   dexScreener,
 } from "./market.js";
 import { safeErrorMessage } from "./safety.js";
+import {
+  inspectSellability,
+  normalizeSellabilityEvidence,
+  sellabilityResult,
+  SELLABILITY,
+  validateV2PoolBinding,
+} from "./sellability.js";
 
-const erc20Iface = new Interface(ERC20_ABI);
-const SIM_FROM = "0x1000000000000000000000000000000000000001";
 const BUY_ETH = parseEther("0.001");
 
 function pct(part, whole) {
@@ -39,6 +44,27 @@ async function settled(promise) {
   } catch (error) {
     return { ok: false, value: null, error: safeErrorMessage(error), cause: error };
   }
+}
+
+function normalizeHoneypotSellability(result, sellability, legacyHoneypot = result?.honeypot) {
+  let normalizedSellability = normalizeSellabilityEvidence(sellability, legacyHoneypot);
+  if (
+    normalizedSellability.status !== SELLABILITY.CONFIRMED &&
+    (normalizedSellability.reason == null || normalizedSellability.reason === "")
+  ) {
+    normalizedSellability = { ...normalizedSellability, reason: "evidence-unavailable" };
+  }
+  const reason = normalizedSellability.status === SELLABILITY.CONFIRMED
+    ? (result?.reason || normalizedSellability.reason)
+    : normalizedSellability.reason;
+  const normalized = { ...result, reason, sellability: normalizedSellability };
+  if (normalizedSellability.status === SELLABILITY.CONFIRMED) {
+    return { ...normalized, honeypot: false, complete: true, sellOk: true };
+  }
+  if (normalizedSellability.status === SELLABILITY.BLOCKED) {
+    return { ...normalized, honeypot: true, complete: true, sellOk: false };
+  }
+  return { ...normalized, honeypot: null, complete: false, sellOk: null };
 }
 
 export class RetryableAnalysisError extends Error {
@@ -185,11 +211,14 @@ export function scoreFromFacts(f) {
     red.push("蜜罐 / 无法卖出");
   } else if (f.honeypot === false) {
     score += 10;
+    const taxesKnown = Number.isFinite(f.buyTaxBps) && Number.isFinite(f.sellTaxBps);
     checks.push({
       key: "honeypot",
       ok: true,
       pts: 10,
-      detail: `买税 ${f.buyTaxBps ?? 0}bps / 卖税 ${f.sellTaxBps ?? 0}bps`,
+      detail: taxesKnown
+        ? `买税 ${f.buyTaxBps}bps / 卖税 ${f.sellTaxBps}bps`
+        : "已确认卖出证据，税率未知",
     });
   } else {
     checks.push({ key: "honeypot", ok: false, pts: 0, detail: "模拟未完成，勿当通过" });
@@ -331,14 +360,23 @@ export async function analyze(event, overrides = {}) {
     venue: event.venue,
     pool: event.pool,
     holders,
+    blockNumber: event.blockNumber ?? null,
+    pairCreatedAt: dex?.pairCreatedAt ?? event.createdAt ?? null,
+    decimals: meta.decimals,
   }));
-  const hp = hpResult.value || {
+  const hpRaw = hpResult.value || {
     honeypot: null,
     complete: false,
     reason: hpResult.error,
     buyTaxBps: null,
     sellTaxBps: null,
   };
+  const rawSellability = hpRaw.sellability || sellabilityResult(
+    SELLABILITY.UNKNOWN,
+    hpRaw.reason || "evidence-unavailable"
+  );
+  const hp = normalizeHoneypotSellability(hpRaw, rawSellability);
+  const sellability = hp.sellability;
 
   const mkt = event.market || {};
   const holdersKnown = holdersResult.ok && supply > 0n && holders.length > 0;
@@ -376,6 +414,11 @@ export async function analyze(event, overrides = {}) {
     honeypotReason: hp.reason,
     buyTaxBps: hp.buyTaxBps,
     sellTaxBps: hp.sellTaxBps,
+    sellabilityStatus: sellability.status,
+    sellabilityReason: sellability.reason,
+    sellabilityBuyerSamples: sellability.buyerSamples,
+    sellabilityLadderSamples: sellability.ladderSamples,
+    sellabilityMeaningfulSellers: sellability.meaningfulSellers,
     lpBurnedPct,
     lpUnknown: event.venue !== "uniswap-v2" || lpBurnedPct === null,
     mintable: Boolean(flags.mintable),
@@ -405,6 +448,7 @@ export async function analyze(event, overrides = {}) {
     facts,
     lp: poolInfo,
     honeypot: hp,
+    sellability,
     marketBound,
     securityComplete,
     errorSources: [
@@ -430,14 +474,76 @@ export async function analyze(event, overrides = {}) {
 }
 
 export async function honeypotCheck(
-  { token, quote, venue, pool, holders = [] },
+  { token, quote, venue, pool, holders = [], blockNumber = null, pairCreatedAt = null, decimals },
   dependencies = {}
 ) {
+  let poolAddress;
+  try {
+    poolAddress = getAddress(pool);
+  } catch {
+    poolAddress = null;
+  }
+  if (venue !== "uniswap-v2" || !poolAddress || poolAddress === ZeroAddress) {
+    const sellability = sellabilityResult(SELLABILITY.UNKNOWN, "unsupported-venue");
+    return normalizeHoneypotSellability({
+      honeypot: null,
+      complete: false,
+      reason: "unsupported-venue",
+      buyOk: null,
+      sellOk: null,
+      buyTaxBps: null,
+      sellTaxBps: null,
+      flags: null,
+      sellability,
+    }, sellability);
+  }
+
+  const provider = dependencies.provider || getProvider();
+  const readBlockNumber = dependencies.getBlockNumber || (() => provider.getBlockNumber());
   const inspectBytecode = dependencies.bytecodeFlags || bytecodeFlags;
   const quoteRoundTrip = dependencies.quoteRoundTrip || simulateV2Quotes;
-  const transferFromPool = dependencies.simulateTransferFromPool || simulateTransferFromPool;
-  const transfer = dependencies.simulateTransfer || simulateTransfer;
-  const flags = await inspectBytecode(token);
+  const inspect = dependencies.inspectSellability || inspectSellability;
+  const validateBinding = dependencies.validateV2PoolBinding || validateV2PoolBinding;
+  const analysisBlock = await readBlockNumber();
+  if (!Number.isInteger(analysisBlock) || analysisBlock < 0) throw new Error("analysis block unavailable");
+  const quoteValue = String(quote || "").toLowerCase();
+  const quoteAddr = isQuote(quote) && quoteValue !== ADDR.NATIVE.toLowerCase() && quoteValue !== ADDR.ZERO.toLowerCase()
+    ? quote
+    : ADDR.WETH;
+  const inspectionContext = {
+    token,
+    quote: quoteAddr,
+    venue,
+    pool: poolAddress,
+    blockNumber,
+    pairCreatedAt,
+    decimals,
+    analysisBlock,
+  };
+  const bindingEvidence = await validateBinding(inspectionContext, {
+    provider,
+    retry: dependencies.retry,
+  });
+  if (!bindingEvidence?.ok || !bindingEvidence.binding) {
+    const sellability = sellabilityResult(
+      SELLABILITY.UNKNOWN,
+      bindingEvidence?.reason || "evidence-unavailable",
+      { details: bindingEvidence?.details }
+    );
+    return normalizeHoneypotSellability({
+      honeypot: null,
+      complete: false,
+      reason: sellability.reason,
+      buyOk: null,
+      sellOk: null,
+      buyTaxBps: null,
+      sellTaxBps: null,
+      flags: null,
+      sellability,
+    }, sellability);
+  }
+
+  let sellability = sellabilityResult(SELLABILITY.UNKNOWN, "evidence-unavailable");
   const result = {
     honeypot: null,
     complete: false,
@@ -446,76 +552,54 @@ export async function honeypotCheck(
     sellOk: null,
     buyTaxBps: null,
     sellTaxBps: null,
-    flags,
+    flags: null,
+    sellability,
+  };
+
+  const readOptions = { provider, blockTag: analysisBlock };
+  const flags = await inspectBytecode(token, readOptions);
+  result.flags = flags;
+
+  const blocked = (reason, detail) => {
+    result.reason = reason;
+    return normalizeHoneypotSellability(result, sellabilityResult(SELLABILITY.BLOCKED, reason, {
+      details: detail ? [detail] : [],
+    }));
   };
 
   if (!flags.hasCode) {
-    result.honeypot = true;
-    result.reason = "无合约代码";
-    return result;
+    return blocked("no-contract-code", "无合约代码：无法验证卖出能力");
   }
 
-  const quoteAddr = isQuote(quote) && quote !== ADDR.NATIVE && quote !== ADDR.ZERO ? quote : ADDR.WETH;
-
-  if (venue === "uniswap-v2") {
-    const sim = await quoteRoundTrip(token, quoteAddr);
-    result.buyOk = sim.buyOk ?? null;
-    result.sellOk = sim.sellOk ?? null;
-    result.reason = sim.reason || "";
-    if (sim.buyOk === false) {
-      result.honeypot = true;
-      result.reason = sim.reason || "无法报价买入";
-      return result;
-    }
-    if (sim.sellOk === false) {
-      result.honeypot = true;
-      result.reason = sim.reason || "无法报价卖出（蜜罐）";
-      return result;
-    }
+  const sim = await quoteRoundTrip(token, quoteAddr, readOptions);
+  result.buyOk = sim.buyOk ?? null;
+  result.sellOk = sim.sellOk ?? null;
+  result.reason = sim.reason || "";
+  if (sim.buyOk === false) {
+    return blocked("buy-quote-unavailable", sim.reason || "无法报价买入");
+  }
+  if (sim.sellOk === false) {
+    return blocked("sell-quote-zero", sim.reason || "无法报价卖出（蜜罐）");
   }
 
-  if (pool) {
-    const fromPool = await transferFromPool(token, pool);
-    if (fromPool === false) {
-      result.honeypot = true;
-      result.reason = "从池子转出失败";
-      return result;
-    }
-    result.buyOk = result.buyOk ?? fromPool;
+  const inspectedSellability = await inspect(inspectionContext, {
+    provider,
+    retry: dependencies.retry,
+    poolBinding: bindingEvidence.binding,
+  });
+  sellability = normalizeSellabilityEvidence(inspectedSellability, false);
+  result.sellability = sellability;
+  result.reason = sellability.reason || result.reason;
+  if (sellability.status !== SELLABILITY.CONFIRMED) {
+    return normalizeHoneypotSellability(result, sellability);
   }
 
-  const seller = holders.find(
-    (h) =>
-      h.value > 0n &&
-      h.address.toLowerCase() !== String(pool || "").toLowerCase() &&
-      h.address.toLowerCase() !== ADDR.DEAD.toLowerCase() &&
-      h.address.toLowerCase() !== ADDR.ZERO.toLowerCase() &&
-      h.address.toLowerCase() !== ADDR.V2_ROUTER.toLowerCase()
-  );
-  if (seller && pool) {
-    const amt = seller.value / 100n || 1n;
-    const sellXfer = await transfer(token, seller.address, pool, amt);
-    if (sellXfer.ok === false) {
-      result.honeypot = true;
-      result.sellOk = false;
-      result.reason = `持仓钱包转回池子失败: ${sellXfer.error}`;
-      return result;
-    }
-    result.sellOk = true;
-  }
-
-  if (flags.blacklist || flags.pausable) {
-    result.reason = "合约含黑名单/暂停函数，需人工看";
-  } else if (result.buyOk && result.sellOk) {
-    result.reason = "报价/直接转账通过，但缺少完整 Router 买入-授权-卖出模拟";
-  } else if (!result.reason) {
-    result.reason = "未完成完整 Router 买入-授权-卖出模拟";
-  }
-  return result;
+  result.honeypot = false;
+  result.reason = result.reason || sellability.reason || "已确认真实卖出证据";
+  return normalizeHoneypotSellability(result, sellability);
 }
 
-async function simulateV2Quotes(token, quote) {
-  const provider = getProvider();
+async function simulateV2Quotes(token, quote, { provider = getProvider(), blockTag } = {}) {
   const router = new Contract(ADDR.V2_ROUTER, V2_ROUTER_ABI, provider);
   const pathBuy = [quote, token];
   const pathSell = [token, quote];
@@ -527,7 +611,7 @@ async function simulateV2Quotes(token, quote) {
 
   let expectedBuy = 0n;
   try {
-    const amounts = await router.getAmountsOut(BUY_ETH, pathBuy);
+    const amounts = await router.getAmountsOut(BUY_ETH, pathBuy, { blockTag });
     expectedBuy = amounts[1];
     if (expectedBuy === 0n) {
       out.buyOk = false;
@@ -543,7 +627,7 @@ async function simulateV2Quotes(token, quote) {
   }
 
   try {
-    const back = await router.getAmountsOut(expectedBuy, pathSell);
+    const back = await router.getAmountsOut(expectedBuy, pathSell, { blockTag });
     const ethBack = back[1];
     if (ethBack === 0n) {
       out.sellOk = false;
@@ -558,22 +642,6 @@ async function simulateV2Quotes(token, quote) {
   }
 
   return out;
-}
-
-async function simulateTransfer(token, from, to, amount) {
-  const data = erc20Iface.encodeFunctionData("transfer", [to, amount]);
-  return rawCall({ from, to: token, data });
-}
-
-async function simulateTransferFromPool(token, pool) {
-  const provider = getProvider();
-  const erc = new Contract(token, ERC20_ABI, provider);
-  const bal = await erc.balanceOf(pool);
-  if (bal === 0n) return null;
-  const amt = bal / 1000n || 1n;
-  const data = erc20Iface.encodeFunctionData("transfer", [SIM_FROM, amt]);
-  const call = await rawCall({ from: pool, to: token, data });
-  return call.ok;
 }
 
 export async function rawCall(

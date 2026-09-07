@@ -17,6 +17,7 @@ import {
 } from "../src/scanner.js";
 import { ADDR } from "../src/config.js";
 import { drainOutbox } from "../src/outbox.js";
+import { createPonsTokenState } from "../src/lifecycle.js";
 
 const dirs = [];
 const TOKEN = getAddress("0x1111111111111111111111111111111111111111");
@@ -81,7 +82,7 @@ function dependencies(store, overrides = {}) {
   };
 }
 
-test("atomically commits Pons state, outbox, checks and cursor", async () => {
+test("atomically commits realtime Pons state and checks without raw lifecycle notification", async () => {
   const store = tempStore();
   const result = await watchPonsRange(dependencies(store));
   const state = store.snapshot();
@@ -89,7 +90,7 @@ test("atomically commits Pons state, outbox, checks and cursor", async () => {
   assert.equal(state.cursors.ponsV2, 120);
   assert.equal(state.tokens[TOKEN.toLowerCase()].protocolPhase, "not_graduated");
   assert.ok(state.appliedEvents[EVENT_ID]);
-  assert.ok(state.outbox[`${EVENT_ID}:new_launch`]);
+  assert.equal(Object.keys(state.outbox).length, 0);
   assert.ok(state.pendingChecks[`${EVENT_ID}:curve_flow`]);
 });
 
@@ -99,13 +100,30 @@ test("replaying the same Pons range does not duplicate state or notifications", 
   await watchPonsRange(dependencies(store));
   const state = store.snapshot();
   assert.equal(Object.keys(state.appliedEvents).length, 1);
-  assert.equal(Object.keys(state.outbox).length, 1);
+  assert.equal(Object.keys(state.outbox).length, 0);
+  assert.equal(Object.keys(state.pendingChecks).length, 4);
   assert.equal(state.watchlist.length, 0);
 });
 
-test("Telegram failure leaves the already-committed cursor and a retryable outbox entry", async () => {
+test("Telegram failure leaves a critical notification retryable without rolling back its cursor", async () => {
   const store = tempStore();
-  await watchPonsRange(dependencies(store));
+  store.commitPonsRange({
+    toBlock: 120,
+    transitions: [{
+      eventId: EVENT_ID,
+      blockNumber: 120,
+      token: TOKEN,
+      nextToken: createPonsTokenState(launchEvent(), launchRecord(), 10_000),
+      notifications: [{
+        id: `${EVENT_ID}:hard_kill`,
+        eventId: EVENT_ID,
+        transitionType: "hard_kill",
+        token: TOKEN,
+        text: "hard kill",
+      }],
+      checks: [],
+    }],
+  });
   const result = await drainOutbox({
     store,
     send: async () => { throw new Error("telegram unavailable"); },
@@ -114,7 +132,7 @@ test("Telegram failure leaves the already-committed cursor and a retryable outbo
   const state = store.snapshot();
   assert.equal(result.retried, 1);
   assert.equal(state.cursors.ponsV2, 120);
-  assert.equal(state.outbox[`${EVENT_ID}:new_launch`].attempts, 1);
+  assert.equal(state.outbox[`${EVENT_ID}:hard_kill`].attempts, 1);
 });
 
 test("third-party check failures do not roll back the Pons cursor", async () => {
@@ -227,6 +245,31 @@ test("startup reconcile applies an authoritative rescued phase without reviving 
   assert.equal(state.tokens[TOKEN.toLowerCase()].protocolPhase, "rescued");
   assert.equal(state.tokens[TOKEN.toLowerCase()].monitorState, "killed");
   assert.equal(state.tokens[TOKEN.toLowerCase()].watchlist, false);
+  assert.ok(state.outbox[`reconcile:${TOKEN.toLowerCase()}:rescued:rescued`]);
+});
+
+test("startup reconcile updates graduation state without Telegram", async () => {
+  const store = tempStore();
+  await watchPonsRange(dependencies(store));
+  store.commitTokenUpdate({
+    token: TOKEN,
+    nextToken: {
+      ...store.snapshot().tokens[TOKEN.toLowerCase()],
+      watchlist: true,
+      monitorState: "watchlisted",
+    },
+  });
+
+  await reconcilePonsWatchlist({
+    provider: {},
+    store,
+    readLaunch: async () => launchRecord(2),
+    now: () => 20_000,
+  });
+
+  const state = store.snapshot();
+  assert.equal(state.tokens[TOKEN.toLowerCase()].protocolPhase, "pool_created");
+  assert.equal(Object.keys(state.outbox).length, 0);
 });
 
 test("a Pons watch iteration scans only finalized blocks and advances its own cursor", async () => {
@@ -249,7 +292,31 @@ test("a Pons watch iteration scans only finalized blocks and advances its own cu
   assert.deepEqual(ranges, [[120, 123]]);
   assert.equal(result.complete, true);
   assert.equal(runtime.lastBlock, 123);
-  assert.equal(store.snapshot().cursors.ponsV2, 123);
+  const state = store.snapshot();
+  assert.equal(state.cursors.ponsV2, 123);
+  assert.equal(Object.keys(state.outbox).length, 0);
+  assert.equal(Object.keys(state.pendingChecks).length, 0);
+});
+
+test("a saved Pons cursor schedules realtime checks without raw launch notifications", async () => {
+  const store = tempStore();
+  store.commitPonsRange({ toBlock: 119, transitions: [] });
+  const runtime = { lastBlock: null };
+
+  await runPonsWatchIteration(runtime, {
+    provider: {},
+    store,
+    settings: { ponsConfirmations: 2, lineAMaxAgeMinutes: 20 },
+    getBlockNumber: async () => 125,
+    findFirstBlockAtOrAfter: async () => 120,
+    scanRange: async () => [launchEvent()],
+    readLaunch: async () => launchRecord(),
+    now: () => 10_000,
+  });
+
+  const state = store.snapshot();
+  assert.equal(Object.keys(state.outbox).length, 0);
+  assert.ok(state.pendingChecks[`${EVENT_ID}:line_a`]);
 });
 
 test("auxiliary discovery classifies LONG only after an explicit non-Pons factory result", async () => {
@@ -292,7 +359,7 @@ test("LONG classification uses quote addresses and ignores display symbols", asy
   assert.equal(result.pad, "uniswap-native");
 });
 
-test("market heat is persisted and only enqueues a notification when its decision changes", async () => {
+test("market heat is persisted without Telegram notifications", async () => {
   const store = tempStore();
   const base = {
     provider: {},
@@ -313,7 +380,7 @@ test("market heat is persisted and only enqueues a notification when its decisio
   assert.equal(first.decision, "打");
   assert.equal(second.decision, "打");
   assert.equal(state.heat.admissionCap, 3);
-  assert.equal(Object.values(state.outbox).filter((entry) => entry.transitionType === "heat_change").length, 1);
+  assert.equal(Object.keys(state.outbox).length, 0);
 });
 
 test("market heat becomes conservatively no-trade when a required source fails", async () => {

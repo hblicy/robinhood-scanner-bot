@@ -7,6 +7,7 @@ export const ERC20_ABI = [
   "function owner() view returns (address)",
   "function getOwner() view returns (address)",
   "function transfer(address,uint256) returns (bool)",
+  "event Transfer(address indexed from,address indexed to,uint256 value)",
 ];
 
 export const PAIR_V2_ABI = [
@@ -15,6 +16,7 @@ export const PAIR_V2_ABI = [
   "function getReserves() view returns (uint112 reserve0, uint112 reserve1, uint32 blockTimestampLast)",
   "function totalSupply() view returns (uint256)",
   "function balanceOf(address) view returns (uint256)",
+  "event Swap(address indexed sender,uint256 amount0In,uint256 amount1In,uint256 amount0Out,uint256 amount1Out,address indexed to)",
 ];
 
 export const V2_FACTORY_ABI = [

@@ -368,6 +368,17 @@ export function createStore({
       });
     },
 
+    markOutboxSuppressed(id, suppressedAt = now()) {
+      return commit((draft) => {
+        const entry = requireEntry(draft.outbox, id, "outbox entry");
+        entry.status = "suppressed";
+        entry.suppressedAt = suppressedAt;
+        entry.deliveredAt = null;
+        entry.lastError = null;
+        return entry;
+      });
+    },
+
     rescheduleOutbox(id, retry) {
       return commit((draft) => {
         const entry = requireEntry(draft.outbox, id, "outbox entry");
