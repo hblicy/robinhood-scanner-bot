@@ -106,6 +106,23 @@ describe("geckoNewPools", () => {
     assert.equal(events[0].createdAt, Date.parse(recent));
   });
 
+  it("normalizes only the Robinhood Uniswap V2 Gecko venue alias", async () => {
+    const known = geckoRow(new Date(NOW).toISOString());
+    known.relationships.dex.data.id = "uniswap-v2-robinhood";
+    const unknown = geckoRow(new Date(NOW).toISOString());
+    unknown.attributes.address = WRONG_POOL;
+    unknown.relationships.dex.data.id = "mystery-dex";
+
+    const events = await geckoNewPools(1, {
+      fetchImpl: async () => jsonResponse({ data: [known, unknown] }),
+      now: () => NOW,
+      maxAgeMinutes: 30,
+    });
+
+    assert.equal(events[0].venue, "uniswap-v2");
+    assert.equal(events[1].venue, "mystery-dex");
+  });
+
   for (const value of [undefined, "not-a-date"]) {
     it(`rejects an invalid pool_created_at value: ${String(value)}`, async () => {
       await assert.rejects(
