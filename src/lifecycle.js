@@ -1,5 +1,5 @@
 import { ADDR } from "./config.js";
-import { classifyPonsRecord } from "./pons.js";
+import { classifyPonsRecord, computePonsPoolId } from "./pons.js";
 
 const PHASE_RANK = {
   not_graduated: 0,
@@ -35,7 +35,7 @@ export function createPonsTokenState(event, record, now) {
     hook: ADDR.PONS_HOOK,
     birthBlock: event.blockNumber ?? null,
     birthAt: event.createdAt ?? (Number.isFinite(event.blockTimestamp) ? event.blockTimestamp * 1000 : now),
-    poolId: null,
+    poolId: identity.protocolPhase === "pool_created" ? computePonsPoolId(record) : null,
     positionId: null,
     poolRegisteredAt: null,
     watchlist: false,
@@ -110,6 +110,7 @@ export function reducePonsEvent(previous, event, record, now) {
     next.marketReady = false;
   } else if (protocolPhase === "pool_created") {
     if (next.monitorState !== "killed") next.monitorState = "decay";
+    next.poolId = computePonsPoolId(record);
     next.marketReady = false;
   }
   return next;
@@ -216,3 +217,22 @@ export function canGreen(state) {
   return state.pad === "long";
 }
 
+export function applyMarketEvidence(state, evidence, now) {
+  const next = structuredClone(state);
+  next.facts = next.facts || {};
+  const matches = sameAddress(state.token, evidence?.token) &&
+    sameAddress(state.pairToken, evidence?.pairToken) &&
+    String(state.poolId || "").toLowerCase() === String(evidence?.poolId || "").toLowerCase();
+  if (!matches) {
+    next.marketReady = false;
+    next.facts.market = { ...structuredClone(evidence || {}), conflict: true, bindingMismatch: true };
+  } else if (!Number.isFinite(state.poolRegisteredAt)) {
+    next.marketReady = false;
+    next.facts.market = { ...structuredClone(evidence || {}), registrationMissing: true };
+  } else {
+    next.marketReady = state.protocolPhase === "pool_created" ? evidence.marketReady : false;
+    next.facts.market = structuredClone(evidence);
+  }
+  next.updatedAt = now;
+  return next;
+}

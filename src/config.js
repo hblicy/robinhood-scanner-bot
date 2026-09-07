@@ -36,6 +36,7 @@ const ALLOWED_ENV = new Set([
   "PONS_CONFIRMATIONS",
   "PONS_RECONCILE_INTERVAL_MS",
   "OUTBOX_POLL_MS",
+  "DEXPAPRIKA_SCAN",
   "REQUIRE_SOCIAL",
   "POLL_MS",
   "GECKO_POLL_MS",
@@ -195,6 +196,7 @@ export const SETTINGS = {
     envNum("PONS_RECONCILE_INTERVAL_MS", 60_000)
   ),
   outboxPollMs: validatePositiveInteger("OUTBOX_POLL_MS", envNum("OUTBOX_POLL_MS", 5_000)),
+  dexPaprikaScan: envBool("DEXPAPRIKA_SCAN", true),
   maxQueueSize: validatePositiveInteger("MAX_QUEUE_SIZE", envNum("MAX_QUEUE_SIZE", 500)),
   maxSeenEntries: validatePositiveInteger("MAX_SEEN_ENTRIES", envNum("MAX_SEEN_ENTRIES", 10_000)),
   seenTtlMs: validatePositiveInteger("SEEN_TTL_MS", envNum("SEEN_TTL_MS", 86_400_000)),

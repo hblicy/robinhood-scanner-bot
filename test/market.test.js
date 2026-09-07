@@ -1,6 +1,15 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { geckoNewPools, selectDexPair, summarizeDeployerHistory } from "../src/market.js";
+import {
+  geckoNewPools,
+  getDexPaprikaPool,
+  getDexPaprikaTopPools,
+  getDexPaprikaTransactions,
+  normalizeMarketEvidence,
+  searchDexPaprikaPools,
+  selectDexPair,
+  summarizeDeployerHistory,
+} from "../src/market.js";
 
 const TOKEN = "0x1111111111111111111111111111111111111111";
 const QUOTE = "0x2222222222222222222222222222222222222222";
@@ -167,5 +176,130 @@ describe("geckoNewPools", () => {
     });
     assert.equal(events[0].pool, null);
     assert.equal(events[0].poolId, poolId);
+  });
+
+  it("accepts pools.trade V4 ids and rejects bytes32 ids from unknown venues", async () => {
+    const row = geckoRow(new Date(NOW).toISOString());
+    const poolId = `0x${"cd".repeat(32)}`;
+    row.attributes.address = poolId;
+    row.relationships.dex.data.id = "uniswap-pools-trade";
+    row.relationships.quote_token.data.id = "robinhood_0x0000000000000000000000000000000000000000";
+    const events = await geckoNewPools(1, {
+      fetchImpl: async () => jsonResponse({ data: [row] }),
+      now: () => NOW,
+      maxAgeMinutes: 30,
+    });
+    assert.equal(events[0].poolId, poolId);
+
+    row.relationships.dex.data.id = "mystery-dex";
+    await assert.rejects(() => geckoNewPools(1, {
+      fetchImpl: async () => jsonResponse({ data: [row] }),
+      now: () => NOW,
+      maxAgeMinutes: 30,
+    }), /pool address invalid/);
+  });
+});
+
+describe("DexPaprika read-only adapters", () => {
+  const poolId = `0x${"ab".repeat(32)}`;
+  const fixture = {
+    id: poolId,
+    chain: "robinhood",
+    dex_id: "uniswap_v4",
+    dex_name: "Uniswap V4",
+    created_at: "2026-09-06T00:00:00.000Z",
+    liquidity_usd: 12_000,
+    volume_usd: 5_000,
+    price_usd: 0.0001,
+    last_updated: "2026-09-06T00:10:00.000Z",
+    tokens: [
+      { id: TOKEN, symbol: "DOG", decimals: 18 },
+      { id: WETH, symbol: "WETH", decimals: 18 },
+    ],
+  };
+
+  it("uses documented Robinhood pool endpoints and normalizes their schema", async () => {
+    const urls = [];
+    const fetchImpl = async (url) => {
+      urls.push(url);
+      if (url.includes("/transactions")) {
+        return jsonResponse({ transactions: [
+          { id: "buy-1", type: "buy", block_timestamp: 100 },
+          { id: "sell-1", type: "sell", block_timestamp: 101 },
+        ] });
+      }
+      if (url.includes(`/tokens/${TOKEN}/pools`)) return jsonResponse({ pools: [fixture] });
+      if (url.endsWith(`/pools/${poolId}`)) return jsonResponse(fixture);
+      return jsonResponse({ pools: [fixture] });
+    };
+
+    const top = await getDexPaprikaTopPools({ fetchImpl, limit: 10 });
+    const searched = await searchDexPaprikaPools(TOKEN, { fetchImpl, limit: 5 });
+    const pool = await getDexPaprikaPool(poolId, { fetchImpl });
+    const transactions = await getDexPaprikaTransactions(poolId, { fetchImpl, limit: 20 });
+
+    assert.equal(top[0].poolId, poolId);
+    assert.equal(searched[0].tokens[0].address.toLowerCase(), TOKEN.toLowerCase());
+    assert.equal(pool.liquidityUsd, 12_000);
+    assert.deepEqual(transactions.map((item) => item.direction), ["buy", "sell"]);
+    assert.ok(urls.some((url) => /networks\/robinhood\/pools\?/.test(url)));
+    assert.ok(urls.some((url) => url.includes(`/networks/robinhood/tokens/${TOKEN}/pools`)));
+    assert.ok(urls.some((url) => url.endsWith(`/networks/robinhood/pools/${poolId}`)));
+  });
+
+  it("keeps missing or malformed market fields unknown instead of zero", async () => {
+    await assert.rejects(() => getDexPaprikaPool(poolId, {
+      fetchImpl: async () => jsonResponse({ id: poolId, tokens: [] }),
+    }), /DexPaprika pool schema/);
+    await assert.rejects(() => getDexPaprikaPool(poolId, {
+      fetchImpl: async () => jsonResponse({}, { ok: false, status: 429 }),
+    }), /DexPaprika pool.*HTTP 429/);
+  });
+
+  it("requires a bound pool with bidirectional transactions for market readiness", () => {
+    const evidence = normalizeMarketEvidence({
+      expected: { token: TOKEN, pairToken: WETH, poolId },
+      pools: [fixture],
+      transactions: [
+        { direction: "buy", poolId },
+        { direction: "sell", poolId },
+      ],
+      errors: [],
+    });
+    assert.equal(evidence.marketReady, true);
+    assert.equal(evidence.poolId, poolId);
+
+    const unbound = normalizeMarketEvidence({
+      expected: { token: TOKEN, pairToken: WETH, poolId },
+      pools: [{ ...fixture, id: `0x${"ef".repeat(32)}` }],
+      transactions: [],
+      errors: [],
+    });
+    assert.equal(unbound.marketReady, false);
+
+    const unknown = normalizeMarketEvidence({
+      expected: { token: TOKEN, pairToken: WETH, poolId },
+      pools: [],
+      transactions: [],
+      errors: [{ source: "DexPaprika", message: "rate limited" }],
+    });
+    assert.equal(unknown.marketReady, "unknown");
+  });
+
+  it("flags two-times liquidity disagreement and uses the smaller value", () => {
+    const evidence = normalizeMarketEvidence({
+      expected: { token: TOKEN, pairToken: WETH, poolId },
+      pools: [
+        { ...fixture, source: "gecko", liquidity_usd: 30_000 },
+        { ...fixture, source: "dexpaprika", liquidity_usd: 10_000 },
+      ],
+      transactions: [
+        { direction: "buy", poolId },
+        { direction: "sell", poolId },
+      ],
+      errors: [],
+    });
+    assert.equal(evidence.conflict, true);
+    assert.equal(evidence.liquidityUsd, 10_000);
   });
 });

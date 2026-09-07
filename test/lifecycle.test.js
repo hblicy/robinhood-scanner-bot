@@ -7,6 +7,7 @@ import {
   createPonsTokenState,
   evaluateLineA,
   reducePonsEvent,
+  applyMarketEvidence,
 } from "../src/lifecycle.js";
 
 const TOKEN = getAddress("0x1111111111111111111111111111111111111111");
@@ -110,6 +111,7 @@ test("reduces sweep, graduation and rescued phases without inventing market read
   assert.equal(graduated.monitorState, "decay");
   assert.equal(graduated.marketReady, false);
   assert.equal(graduated.positionId, "9");
+  assert.match(graduated.poolId, /^0x[0-9a-f]{64}$/);
 
   const rescued = reducePonsEvent(swept, {
     kind: "reconcile",
@@ -271,4 +273,44 @@ test("green requires known risk, every line, admission heat and a ready graduate
   assert.equal(canGreen({ ...state, admissionHeatDecision: "不打" }), false);
   assert.equal(canGreen({ ...state, lineC: { passed: false } }), false);
   assert.equal(canGreen({ ...state, protocolPhase: "rescued" }), false);
+});
+
+test("market evidence changes readiness but never rewrites the protocol phase", () => {
+  const state = createPonsTokenState(launched(), record({ phase: 2 }), 2_000);
+  const poolId = `0x${"ab".repeat(32)}`;
+  state.poolId = poolId;
+  state.poolRegisteredAt = 2_500;
+  const ready = applyMarketEvidence(state, {
+    token: TOKEN,
+    pairToken: ZeroAddress,
+    poolId,
+    marketReady: true,
+    liquidityUsd: 12_000,
+    source: "dexpaprika",
+  }, 3_000);
+  assert.equal(ready.protocolPhase, "pool_created");
+  assert.equal(ready.marketReady, true);
+
+  const mismatched = applyMarketEvidence(state, {
+    token: TOKEN,
+    pairToken: ZeroAddress,
+    poolId: `0x${"cd".repeat(32)}`,
+    marketReady: true,
+  }, 3_000);
+  assert.equal(mismatched.protocolPhase, "pool_created");
+  assert.equal(mismatched.marketReady, false);
+  assert.equal(mismatched.facts.market.conflict, true);
+});
+
+test("market readiness stays false until the pinned hook registration is known", () => {
+  const state = createPonsTokenState(launched(), record({ phase: 2 }), 2_000);
+  state.poolId = `0x${"ab".repeat(32)}`;
+  const result = applyMarketEvidence(state, {
+    token: TOKEN,
+    pairToken: ZeroAddress,
+    poolId: state.poolId,
+    marketReady: true,
+  }, 3_000);
+  assert.equal(result.marketReady, false);
+  assert.equal(result.facts.market.registrationMissing, true);
 });

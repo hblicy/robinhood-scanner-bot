@@ -26,6 +26,7 @@ test("Pons lifecycle defaults are bounded and deterministic", () => {
   assert.equal(SETTINGS.watchlistCapNormal, 3);
   assert.equal(SETTINGS.watchlistCapHighHeat, 1);
   assert.equal(SETTINGS.curveDeadGraceMs, 14_400_000);
+  assert.equal(SETTINGS.dexPaprikaScan, true);
 });
 
 test("resolved quote allowlist stores addresses rather than display symbols", () => {

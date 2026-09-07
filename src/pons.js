@@ -6,12 +6,13 @@ import {
   getAddress,
   keccak256,
 } from "ethers";
-import { PONS_FACTORY_ABI } from "./abis.js";
+import { PONS_FACTORY_ABI, PONS_HOOK_ABI } from "./abis.js";
 import { getLogsChunked } from "./chain.js";
 import { ADDR, CHAIN } from "./config.js";
 import { safeErrorMessage } from "./safety.js";
 
 const factoryInterface = new Interface(PONS_FACTORY_ABI);
+const hookInterface = new Interface(PONS_HOOK_ABI);
 const PHASES = new Map([
   [0, "not_graduated"],
   [1, "swept"],
@@ -257,6 +258,70 @@ export function computePonsPoolId(record, hook = ADDR.PONS_HOOK) {
   return keccak256(encoded);
 }
 
+export function parsePonsHookLog(log) {
+  let parsed;
+  try {
+    parsed = hookInterface.parseLog(log);
+  } catch (cause) {
+    throw new Error(
+      `Pons hook log parse failed at block ${log?.blockNumber ?? "unknown"} tx ${log?.transactionHash || "unknown"}`,
+      { cause }
+    );
+  }
+  if (parsed.name !== "PoolRegistered") throw new Error(`unsupported Pons hook event ${parsed.name}`);
+  return {
+    eventId: `${CHAIN.id}:${String(log.transactionHash).toLowerCase()}:${normalizedIndex(log)}`,
+    poolId: String(parsed.args.poolId).toLowerCase(),
+    memecoin: asAddress(parsed.args.memecoin, "hook memecoin"),
+    quoteToken: asAddress(parsed.args.quoteToken, "hook quoteToken"),
+    creator: asAddress(parsed.args.creator, "hook creator"),
+    blockNumber: Number(log.blockNumber),
+    transactionHash: String(log.transactionHash).toLowerCase(),
+    logIndex: normalizedIndex(log),
+  };
+}
+
+export async function findPonsPoolRegistration(provider, {
+  poolId,
+  token,
+  pairToken,
+  fromBlock,
+  toBlock,
+  getLogs = getLogsChunked,
+  getBlock = (blockNumber) => provider.getBlock(blockNumber),
+}) {
+  const expectedPool = String(poolId).toLowerCase();
+  const logs = await getLogs({
+    address: ADDR.PONS_HOOK,
+    topics: [hookInterface.getEvent("PoolRegistered").topicHash, expectedPool],
+    fromBlock,
+    toBlock,
+    provider,
+  });
+  if (!logs.length) return null;
+  const registrations = logs.map(parsePonsHookLog).sort((left, right) =>
+    left.blockNumber - right.blockNumber || left.logIndex - right.logIndex
+  );
+  const registration = registrations.at(-1);
+  if (registration.poolId !== expectedPool) {
+    throw new Error(`Pons PoolRegistered poolId mismatch: expected ${expectedPool}, actual ${registration.poolId}`);
+  }
+  if (!sameAddress(registration.memecoin, token)) {
+    throw new Error(`Pons PoolRegistered memecoin mismatch: expected ${token}, actual ${registration.memecoin}`);
+  }
+  let expectedQuote = pairToken;
+  if (sameAddress(expectedQuote, ADDR.NATIVE)) expectedQuote = ZeroAddress;
+  if (!sameAddress(registration.quoteToken, expectedQuote)) {
+    throw new Error(`Pons PoolRegistered quoteToken mismatch: expected ${expectedQuote}, actual ${registration.quoteToken}`);
+  }
+  const block = await getBlock(registration.blockNumber);
+  const timestamp = Number(block?.timestamp);
+  if (!Number.isFinite(timestamp)) {
+    throw new Error(`cannot read timestamp for Pons PoolRegistered block ${registration.blockNumber}`);
+  }
+  return { ...registration, poolRegisteredAt: timestamp * 1000 };
+}
+
 export async function reconcilePonsToken(
   provider,
   token,
@@ -265,4 +330,3 @@ export async function reconcilePonsToken(
   const record = await readLaunch(provider, token);
   return { ...classifyPonsRecord(token, record), record };
 }
-

@@ -1,11 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { AbiCoder, Interface, ZeroAddress, getAddress, keccak256 } from "ethers";
-import { PONS_FACTORY_ABI } from "../src/abis.js";
+import { PONS_FACTORY_ABI, PONS_HOOK_ABI } from "../src/abis.js";
 import { ADDR, CHAIN } from "../src/config.js";
 import {
   classifyPonsRecord,
   computePonsPoolId,
+  findPonsPoolRegistration,
+  parsePonsHookLog,
   parsePonsFactoryLog,
   readPonsLaunch,
   reconcilePonsToken,
@@ -14,6 +16,7 @@ import {
 } from "../src/pons.js";
 
 const iface = new Interface(PONS_FACTORY_ABI);
+const hookIface = new Interface(PONS_HOOK_ABI);
 const TOKEN = getAddress("0x1111111111111111111111111111111111111111");
 const CURVE = getAddress("0x2222222222222222222222222222222222222222");
 const DEPLOYER = getAddress("0x3333333333333333333333333333333333333333");
@@ -209,4 +212,47 @@ test("reconcile uses the factory record as authoritative state", async () => {
   assert.equal(result.identity, "pons-v2");
   assert.equal(result.protocolPhase, "rescued");
   assert.equal(result.record.token, TOKEN);
+});
+
+test("parses and verifies the pinned hook PoolRegistered event", async () => {
+  const poolId = computePonsPoolId(record());
+  const encoded = hookIface.encodeEventLog(hookIface.getEvent("PoolRegistered"), [
+    poolId, TOKEN, QUOTE, DEPLOYER,
+  ]);
+  const hookLog = {
+    address: ADDR.PONS_HOOK,
+    topics: encoded.topics,
+    data: encoded.data,
+    blockNumber: 150,
+    transactionIndex: 0,
+    index: 3,
+    transactionHash: `0x${"ef".repeat(32)}`,
+  };
+  const parsed = parsePonsHookLog(hookLog);
+  assert.equal(parsed.poolId, poolId);
+  assert.equal(parsed.memecoin, TOKEN);
+
+  let filter;
+  const registration = await findPonsPoolRegistration({}, {
+    poolId,
+    token: TOKEN,
+    pairToken: QUOTE,
+    fromBlock: 140,
+    toBlock: 160,
+    getLogs: async (input) => { filter = input; return [hookLog]; },
+    getBlock: async () => ({ timestamp: 1_700_000_000 }),
+  });
+  assert.equal(filter.address, ADDR.PONS_HOOK);
+  assert.equal(filter.topics[1], poolId);
+  assert.equal(registration.poolRegisteredAt, 1_700_000_000_000);
+
+  await assert.rejects(() => findPonsPoolRegistration({}, {
+    poolId,
+    token: "0x5555555555555555555555555555555555555555",
+    pairToken: QUOTE,
+    fromBlock: 140,
+    toBlock: 160,
+    getLogs: async () => [hookLog],
+    getBlock: async () => ({ timestamp: 1_700_000_000 }),
+  }), /memecoin mismatch/);
 });
