@@ -3,7 +3,8 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { DATA_DIR, SETTINGS } from "./config.js";
 
-const STATE_VERSION = 3;
+const STATE_VERSION = 4;
+const MIN_APPLIED_EVENT_TTL_MS = 7 * 86_400_000;
 
 function readJson(dataDir, file, fallback) {
   const filePath = path.join(dataDir, file);
@@ -41,6 +42,82 @@ function validateCursors(cursors) {
   if (cursors.onchain != null && (!Number.isInteger(cursors.onchain) || cursors.onchain < 0)) {
     throw new Error("state.json onchain cursor must be a non-negative integer");
   }
+  if (cursors.ponsV2 != null && (!Number.isInteger(cursors.ponsV2) || cursors.ponsV2 < 0)) {
+    throw new Error("state.json Pons V2 cursor must be a non-negative integer");
+  }
+}
+
+function validateObject(value, name) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`state.json ${name} must contain an object`);
+  }
+}
+
+function emptyLifecycleState() {
+  return {
+    tokens: {},
+    watchlist: [],
+    heat: null,
+    appliedEvents: {},
+    outbox: {},
+    pendingChecks: {},
+  };
+}
+
+export function migrateState(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error("state.json must contain an object");
+  }
+  if (![3, STATE_VERSION].includes(raw.schemaVersion)) {
+    throw new Error(`state.json must use schemaVersion 3 or ${STATE_VERSION}`);
+  }
+  validateObject(raw.seen, "seen");
+  const positions = raw.positions === undefined ? {} : raw.positions;
+  const trades = raw.trades === undefined ? [] : raw.trades;
+  validateHistory(positions, trades);
+  const cursors = {
+    onchain: raw.cursors?.onchain ?? null,
+    ponsV2: raw.cursors?.ponsV2 ?? null,
+  };
+  validateCursors(cursors);
+
+  if (raw.schemaVersion === 3) {
+    return {
+      schemaVersion: STATE_VERSION,
+      seen: structuredClone(raw.seen),
+      positions: structuredClone(positions),
+      trades: structuredClone(trades),
+      cursors,
+      ...emptyLifecycleState(),
+    };
+  }
+
+  const lifecycle = {
+    tokens: raw.tokens ?? {},
+    watchlist: raw.watchlist ?? [],
+    heat: raw.heat ?? null,
+    appliedEvents: raw.appliedEvents ?? {},
+    outbox: raw.outbox ?? {},
+    pendingChecks: raw.pendingChecks ?? {},
+  };
+  validateObject(lifecycle.tokens, "tokens");
+  if (!Array.isArray(lifecycle.watchlist)) throw new Error("state.json watchlist must contain an array");
+  validateObject(lifecycle.appliedEvents, "appliedEvents");
+  validateObject(lifecycle.outbox, "outbox");
+  validateObject(lifecycle.pendingChecks, "pendingChecks");
+  return {
+    schemaVersion: STATE_VERSION,
+    seen: structuredClone(raw.seen),
+    positions: structuredClone(positions),
+    trades: structuredClone(trades),
+    cursors,
+    tokens: structuredClone(lifecycle.tokens),
+    watchlist: structuredClone(lifecycle.watchlist),
+    heat: structuredClone(lifecycle.heat),
+    appliedEvents: structuredClone(lifecycle.appliedEvents),
+    outbox: structuredClone(lifecycle.outbox),
+    pendingChecks: structuredClone(lifecycle.pendingChecks),
+  };
 }
 
 export function createStore({
@@ -48,30 +125,15 @@ export function createStore({
   now = Date.now,
   maxSeenEntries = 10_000,
   seenTtlMs = 86_400_000,
+  appliedEventTtlMs = MIN_APPLIED_EVENT_TTL_MS,
   writeState = atomicWriteState,
 }) {
   let state;
   const stateFile = path.join(dataDir, "state.json");
   if (fs.existsSync(stateFile)) {
     const loaded = readJson(dataDir, "state.json", null);
-    if (!loaded || loaded.schemaVersion !== STATE_VERSION) {
-      throw new Error(`state.json must use schemaVersion ${STATE_VERSION}`);
-    }
-    if (!loaded.seen || typeof loaded.seen !== "object" || Array.isArray(loaded.seen)) {
-      throw new Error("state.json seen must contain an object");
-    }
-    const positions = loaded.positions === undefined ? {} : loaded.positions;
-    const trades = loaded.trades === undefined ? [] : loaded.trades;
-    const cursors = loaded.cursors === undefined ? {} : loaded.cursors;
-    validateHistory(positions, trades);
-    validateCursors(cursors);
-    state = {
-      schemaVersion: STATE_VERSION,
-      seen: structuredClone(loaded.seen),
-      positions: structuredClone(positions),
-      trades: structuredClone(trades),
-      cursors: structuredClone(cursors),
-    };
+    state = migrateState(loaded);
+    if (loaded.schemaVersion !== STATE_VERSION) writeState(dataDir, state);
   } else {
     const seen = readJson(dataDir, "seen.json", {});
     const rawPositions = readJson(dataDir, "positions.json", {});
@@ -80,15 +142,18 @@ export function createStore({
       throw new Error("seen.json must contain an object");
     }
     validateHistory(rawPositions, trades, "legacy state");
-    state = {
+    state = migrateState({
       schemaVersion: STATE_VERSION,
       seen,
       positions: rawPositions,
       trades,
-      cursors: {},
-    };
+      cursors: { onchain: null, ponsV2: null },
+      ...emptyLifecycleState(),
+    });
     writeState(dataDir, state);
   }
+
+  const eventTtlMs = Math.max(MIN_APPLIED_EVENT_TTL_MS, appliedEventTtlMs);
 
   function pruneSeen(seen) {
     const cutoff = now() - seenTtlMs;
@@ -109,7 +174,31 @@ export function createStore({
     return result == null ? result : structuredClone(result);
   }
 
+  function pruneAppliedEvents(draft) {
+    const cutoff = now() - eventTtlMs;
+    const referenced = new Set([
+      ...Object.values(draft.outbox).map((entry) => entry?.eventId).filter(Boolean),
+      ...Object.values(draft.pendingChecks).map((entry) => entry?.eventId).filter(Boolean),
+    ]);
+    for (const [eventId, entry] of Object.entries(draft.appliedEvents)) {
+      if (referenced.has(eventId)) continue;
+      if (Number.isFinite(entry?.appliedAt) && entry.appliedAt < cutoff) {
+        delete draft.appliedEvents[eventId];
+      }
+    }
+  }
+
+  function requireEntry(collection, id, label) {
+    const entry = collection[id];
+    if (!entry) throw new Error(`${label} not found: ${id}`);
+    return entry;
+  }
+
   return {
+    snapshot() {
+      return structuredClone(state);
+    },
+
     hasSeen(token) {
       const item = state.seen[String(token).toLowerCase()];
       return Boolean(item && Number.isFinite(item.updatedAt) && item.updatedAt >= now() - seenTtlMs);
@@ -156,6 +245,132 @@ export function createStore({
         return blockNumber;
       });
     },
+
+    getPonsCursor() {
+      return state.cursors.ponsV2 ?? null;
+    },
+
+    commitPonsRange({ toBlock, transitions }) {
+      if (!Number.isInteger(toBlock) || toBlock < 0) {
+        throw new Error("Pons V2 cursor must be a non-negative integer");
+      }
+      if (state.cursors.ponsV2 != null && toBlock < state.cursors.ponsV2) {
+        throw new Error(`Pons V2 cursor cannot move backwards from ${state.cursors.ponsV2} to ${toBlock}`);
+      }
+      if (!Array.isArray(transitions)) throw new Error("Pons transitions must contain an array");
+      return commit((draft) => {
+        for (const transition of transitions) {
+          const eventId = String(transition?.eventId || "");
+          if (!eventId) throw new Error("Pons transition eventId is required");
+          if (draft.appliedEvents[eventId]) continue;
+          const token = String(transition?.token || "").toLowerCase();
+          if (!token || !transition?.nextToken || typeof transition.nextToken !== "object") {
+            throw new Error(`Pons transition ${eventId} requires token state`);
+          }
+          draft.tokens[token] = structuredClone(transition.nextToken);
+          const watchlist = new Set(draft.watchlist.map((value) => String(value).toLowerCase()));
+          if (transition.nextToken.watchlist) watchlist.add(token);
+          else watchlist.delete(token);
+          draft.watchlist = [...watchlist];
+
+          for (const notification of transition.notifications || []) {
+            if (!notification?.id) throw new Error(`Pons transition ${eventId} notification id is required`);
+            if (!draft.outbox[notification.id]) {
+              draft.outbox[notification.id] = {
+                ...structuredClone(notification),
+                eventId,
+                status: "pending",
+                attempts: 0,
+                nextAttemptAt: now(),
+                createdAt: now(),
+                deliveredAt: null,
+                lastError: null,
+              };
+            }
+          }
+          for (const check of transition.checks || []) {
+            if (!check?.id) throw new Error(`Pons transition ${eventId} check id is required`);
+            if (!draft.pendingChecks[check.id]) {
+              draft.pendingChecks[check.id] = {
+                ...structuredClone(check),
+                eventId,
+                status: "pending",
+                attempts: 0,
+                nextAttemptAt: check.dueAt ?? now(),
+                createdAt: now(),
+                completedAt: null,
+                lastError: null,
+              };
+            }
+          }
+          draft.appliedEvents[eventId] = {
+            appliedAt: now(),
+            blockNumber: transition.blockNumber ?? null,
+          };
+        }
+        draft.cursors.ponsV2 = toBlock;
+        pruneAppliedEvents(draft);
+        return draft.cursors.ponsV2;
+      });
+    },
+
+    listDueOutbox(at = now(), limit = 20) {
+      return Object.values(state.outbox)
+        .filter((entry) => entry.status === "pending" && entry.nextAttemptAt <= at)
+        .sort((a, b) => a.nextAttemptAt - b.nextAttemptAt || a.createdAt - b.createdAt)
+        .slice(0, limit)
+        .map((entry) => structuredClone(entry));
+    },
+
+    markOutboxDelivered(id, deliveredAt = now()) {
+      return commit((draft) => {
+        const entry = requireEntry(draft.outbox, id, "outbox entry");
+        entry.status = "delivered";
+        entry.deliveredAt = deliveredAt;
+        entry.lastError = null;
+        return entry;
+      });
+    },
+
+    rescheduleOutbox(id, retry) {
+      return commit((draft) => {
+        const entry = requireEntry(draft.outbox, id, "outbox entry");
+        entry.status = retry.status || "pending";
+        entry.attempts = retry.attempts;
+        entry.nextAttemptAt = retry.nextAttemptAt;
+        entry.lastError = retry.lastError;
+        return entry;
+      });
+    },
+
+    listDueChecks(at = now(), limit = 20) {
+      return Object.values(state.pendingChecks)
+        .filter((entry) => entry.status === "pending" && entry.nextAttemptAt <= at)
+        .sort((a, b) => a.nextAttemptAt - b.nextAttemptAt || a.createdAt - b.createdAt)
+        .slice(0, limit)
+        .map((entry) => structuredClone(entry));
+    },
+
+    completeCheck(id, completedAt = now()) {
+      return commit((draft) => {
+        const entry = requireEntry(draft.pendingChecks, id, "pending check");
+        entry.status = "completed";
+        entry.completedAt = completedAt;
+        entry.lastError = null;
+        return entry;
+      });
+    },
+
+    rescheduleCheck(id, retry) {
+      return commit((draft) => {
+        const entry = requireEntry(draft.pendingChecks, id, "pending check");
+        entry.status = retry.status || "pending";
+        entry.attempts = retry.attempts;
+        entry.nextAttemptAt = retry.nextAttemptAt;
+        entry.lastError = retry.lastError;
+        return entry;
+      });
+    },
   };
 }
 
@@ -177,3 +392,5 @@ export const markSeen = (...args) => getDefaultStore().markSeen(...args);
 export const getSeen = (...args) => getDefaultStore().getSeen(...args);
 export const getOnchainCursor = (...args) => getDefaultStore().getOnchainCursor(...args);
 export const setOnchainCursor = (...args) => getDefaultStore().setOnchainCursor(...args);
+export const getPonsCursor = (...args) => getDefaultStore().getPonsCursor(...args);
+export const commitPonsRange = (...args) => getDefaultStore().commitPonsRange(...args);
