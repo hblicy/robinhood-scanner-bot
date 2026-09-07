@@ -195,7 +195,7 @@ function cleanCount(value) {
 
 function honeypotRiskLabel(honeypot, sellabilityStatus) {
   if (sellabilityStatus === "blocked" || honeypot === true) return "风险 已阻断";
-  if (sellabilityStatus === "confirmed" || honeypot === false) return "风险 未发现阻断";
+  if (sellabilityStatus === "confirmed" && honeypot === false) return "风险 未发现阻断";
   return "风险 未确认";
 }
 
