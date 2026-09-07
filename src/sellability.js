@@ -126,7 +126,9 @@ function poolBindingMismatch() {
 
 function hasMeaningfulSellSegment(receipt, binding, meaningfulThreshold) {
   let sellerTokenIn = 0n;
-  let quoteNetOutflow = 0n;
+  let segmentQuoteNetOutflow = 0n;
+  let totalQuoteNetOutflow = 0n;
+  let qualifyingSwap = false;
 
   for (const receiptLog of sortReceiptLogs(receipt.logs ?? [])) {
     const isTransfer = receiptLog.topics?.[0]?.toLowerCase() === transferEvent.topicHash.toLowerCase();
@@ -139,8 +141,14 @@ function hasMeaningfulSellSegment(receipt, binding, meaningfulThreshold) {
     if (isTransfer && sameAddress(receiptLog.address, binding.quote)) {
       const quoteTransfer = parseTransfer(receiptLog);
       if (!sameAddress(quoteTransfer.from, binding.pool) || !sameAddress(quoteTransfer.to, binding.pool)) {
-        if (sameAddress(quoteTransfer.from, binding.pool)) quoteNetOutflow += quoteTransfer.value;
-        if (sameAddress(quoteTransfer.to, binding.pool)) quoteNetOutflow -= quoteTransfer.value;
+        if (sameAddress(quoteTransfer.from, binding.pool)) {
+          segmentQuoteNetOutflow += quoteTransfer.value;
+          totalQuoteNetOutflow += quoteTransfer.value;
+        }
+        if (sameAddress(quoteTransfer.to, binding.pool)) {
+          segmentQuoteNetOutflow -= quoteTransfer.value;
+          totalQuoteNetOutflow -= quoteTransfer.value;
+        }
       }
     }
 
@@ -153,13 +161,13 @@ function hasMeaningfulSellSegment(receipt, binding, meaningfulThreshold) {
       swapTokenIn >= meaningfulThreshold &&
       quoteOut > 0n &&
       sellerTokenIn >= swapTokenIn &&
-      quoteNetOutflow > 0n) {
-      return true;
+      segmentQuoteNetOutflow > 0n) {
+      qualifyingSwap = true;
     }
     sellerTokenIn = 0n;
-    quoteNetOutflow = 0n;
+    segmentQuoteNetOutflow = 0n;
   }
-  return false;
+  return qualifyingSwap && totalQuoteNetOutflow > 0n;
 }
 
 export function decodeTransferCall(data) {
@@ -413,19 +421,23 @@ export async function inspectSellability(context, dependencies = {}) {
     const poolBalance = await readBalance(provider, context.token, context.pool, head, retry);
     const meaningfulThreshold = poolBalance / 10000n > oneToken ? poolBalance / 10000n : oneToken;
     const sellers = new Set();
-    const receiptHashes = new Set();
-    let receiptReads = 0;
+    const receiptHashes = [];
+    const seenReceiptHashes = new Set();
     for (const { log, transfer } of [...logs].reverse()) {
       if (!sameAddress(transfer.to, binding.pool) || transfer.value < meaningfulThreshold) continue;
       const hash = log.transactionHash;
-      if (!hash || receiptHashes.has(hash)) continue;
-      receiptHashes.add(hash);
-      const seller = transfer.from.toLowerCase();
-      if (sellers.has(seller) || excludedAddress(transfer.from, binding.pool) || !(await isEoa(transfer.from))) continue;
+      if (!hash || seenReceiptHashes.has(hash)) continue;
+      seenReceiptHashes.add(hash);
+      receiptHashes.push(hash);
+    }
+    let receiptReads = 0;
+    for (const hash of receiptHashes) {
       if (receiptReads >= MAX_RECEIPTS) break;
       receiptReads++;
       const receipt = await retry(() => provider.getTransactionReceipt(hash));
-      if (Number(receipt?.status) !== 1 || !sameAddress(receipt?.from, transfer.from)) continue;
+      if (Number(receipt?.status) !== 1 || typeof receipt?.from !== "string") continue;
+      const seller = receipt.from.toLowerCase();
+      if (sellers.has(seller) || excludedAddress(receipt.from, binding.pool) || !(await isEoa(receipt.from))) continue;
       if (hasMeaningfulSellSegment(receipt, binding, meaningfulThreshold)) sellers.add(seller);
       if (sellers.size >= 3 || receiptReads === MAX_RECEIPTS) break;
     }

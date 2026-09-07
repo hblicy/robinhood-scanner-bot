@@ -749,6 +749,58 @@ describe("V2 sellability evidence", () => {
     assert.equal(result.ladderSamples, 3);
   });
 
+  it("does not count a sell when its quote output is fully returned to the pool later in the receipt", async () => {
+    const evidence = threeSellerEvidence();
+    for (const [hash, receiptValue] of evidence.receipts) {
+      receiptValue.logs.push(transferLog({
+        token: QUOTE,
+        from: ADDR.V2_ROUTER,
+        to: POOL,
+        value: 5n,
+        index: 4,
+        transactionHash: hash,
+      }));
+    }
+    const result = await inspectSellability(context(), { provider: fakeProvider(evidence) });
+    assert.equal(result.status, "unknown");
+    assert.equal(result.reason, "insufficient-meaningful-sells");
+  });
+
+  it("does not count a sell followed by an equal reverse buy in the same receipt", async () => {
+    const evidence = threeSellerEvidence();
+    let sellerIndex = 0;
+    for (const [hash, receiptValue] of evidence.receipts) {
+      const seller = BUYERS[sellerIndex++];
+      receiptValue.logs.push(
+        transferLog({ token: QUOTE, from: seller, to: POOL, value: 5n, index: 4, transactionHash: hash }),
+        transferLog({ token: TOKEN, from: POOL, to: seller, value: 2n, index: 5, transactionHash: hash }),
+        swapLog({ amount1In: 5n, amount0Out: 2n, index: 6, transactionHash: hash }),
+      );
+    }
+    const result = await inspectSellability(context(), { provider: fakeProvider(evidence) });
+    assert.equal(result.status, "unknown");
+    assert.equal(result.reason, "insufficient-meaningful-sells");
+  });
+
+  it("binds a shared transaction hash to receipt.from even when a later unrelated transfer is seen first", async () => {
+    const evidence = threeSellerEvidence();
+    evidence.logs.push(...BUYERS.slice(0, 3).map((_, index) => transferLog({
+      from: BUYERS[index + 3],
+      to: POOL,
+      value: 2n,
+      blockNumber: 30 + index,
+      transactionHash: `0xsell${index}`,
+    })));
+    const provider = fakeProvider(evidence);
+    let receiptReads = 0;
+    const originalReceipt = provider.getTransactionReceipt;
+    provider.getTransactionReceipt = async (hash) => { receiptReads++; return originalReceipt(hash); };
+    const result = await inspectSellability(context(), { provider });
+    assert.equal(result.status, "confirmed");
+    assert.equal(result.meaningfulSellers, 3);
+    assert.equal(receiptReads, 3);
+  });
+
   it("confirms a token1 sell when any exact-pool Swap in the receipt is meaningful", async () => {
     const evidence = threeSellerEvidence({ tokenIsToken0: false });
     for (const receiptValue of evidence.receipts.values()) {
