@@ -15,6 +15,7 @@ const transferEvent = transferInterface.getEvent("Transfer");
 const MAX_BUYERS = 5;
 const MAX_LADDER_WALLETS = 3;
 const MAX_RECEIPTS = 30;
+const MAX_CODE_LOOKUPS = 50;
 
 function sameAddress(a, b) {
   return typeof a === "string" && typeof b === "string" && a.toLowerCase() === b.toLowerCase();
@@ -59,9 +60,15 @@ export function decodeTransferCall(data) {
   return Boolean(transferInterface.decodeFunctionResult("transfer", data)[0]);
 }
 
-export async function resolveStartBlock(context, head, findBlock = findFirstBlockAtOrAfter) {
+export async function resolveStartBlock(
+  context,
+  head,
+  findBlock = findFirstBlockAtOrAfter,
+  provider = getProvider(),
+  retry = (fn) => withRetry(fn)
+) {
   if (Number.isInteger(context?.blockNumber) && context.blockNumber >= 0) return context.blockNumber;
-  if (Number.isFinite(context?.pairCreatedAt)) return findBlock(context.pairCreatedAt, head);
+  if (Number.isFinite(context?.pairCreatedAt)) return findBlock(context.pairCreatedAt, head, provider, retry);
   return null;
 }
 
@@ -198,7 +205,7 @@ export async function inspectSellability(context, dependencies = {}) {
 
   try {
     const head = await retry(() => provider.getBlockNumber());
-    const start = await resolveStartBlock(context, head, findBlock);
+    const start = await resolveStartBlock(context, head, findBlock, provider, retry);
     if (start == null) return unavailable("pool creation block unavailable");
 
     const rawLogs = await getLogs({
@@ -212,9 +219,23 @@ export async function inspectSellability(context, dependencies = {}) {
     const logs = sortLogs(rawLogs).map((log) => ({ log, transfer: parseTransfer(log) }));
     const buys = logs.filter(({ transfer }) => sameAddress(transfer.from, context.pool));
     const buyers = [];
+    const buyerCandidates = new Set();
+    const codeCache = new Map();
+    let codeLookups = 0;
+    const isEoa = async (address) => {
+      const key = address.toLowerCase();
+      if (codeCache.has(key)) return codeCache.get(key);
+      if (codeLookups >= MAX_CODE_LOOKUPS) throw new Error("EOA code lookup budget exhausted");
+      codeLookups++;
+      const eoa = await retry(() => provider.getCode(address)) === "0x";
+      codeCache.set(key, eoa);
+      return eoa;
+    };
     for (const { transfer } of [...buys].reverse()) {
-      if (buyers.some((wallet) => sameAddress(wallet, transfer.to)) || excludedAddress(transfer.to, context.pool)) continue;
-      if (await retry(() => provider.getCode(transfer.to)) !== "0x") continue;
+      const key = transfer.to.toLowerCase();
+      if (buyerCandidates.has(key) || excludedAddress(transfer.to, context.pool)) continue;
+      buyerCandidates.add(key);
+      if (!(await isEoa(transfer.to))) continue;
       buyers.push(transfer.to);
       if (buyers.length === MAX_BUYERS) break;
     }
@@ -225,18 +246,20 @@ export async function inspectSellability(context, dependencies = {}) {
     const oneToken = 10n ** BigInt(decimals);
     const balances = new Map();
     for (const wallet of buyers) {
-      let ledgerBalance = 0n;
+      let intervalNet = 0n;
       for (const { transfer } of logs) {
-        if (sameAddress(transfer.to, wallet)) ledgerBalance += transfer.value;
-        if (sameAddress(transfer.from, wallet)) ledgerBalance -= transfer.value;
+        if (sameAddress(transfer.to, wallet)) intervalNet += transfer.value;
+        if (sameAddress(transfer.from, wallet)) intervalNet -= transfer.value;
       }
+      const startBalance = start === 0 ? 0n : await readBalance(provider, context.token, wallet, start - 1, retry);
+      const expectedBalance = startBalance + intervalNet;
       const reportedBalance = await readBalance(provider, context.token, wallet, head, retry);
       balances.set(wallet.toLowerCase(), reportedBalance);
-      if (evaluateLedgerBalance({ ledgerBalance, reportedBalance, oneToken }).blocked) {
+      if (evaluateLedgerBalance({ ledgerBalance: expectedBalance, reportedBalance, oneToken }).blocked) {
         return sellabilityResult(SELLABILITY.BLOCKED, "hidden-balance-mutation", {
           buyerSamples,
           ladderSamples,
-          details: [`wallet=${wallet} ledger=${ledgerBalance} reported=${reportedBalance}`],
+          details: [`wallet=${wallet} expectedBalance=${expectedBalance} reported=${reportedBalance}`],
         });
       }
     }
@@ -273,23 +296,26 @@ export async function inspectSellability(context, dependencies = {}) {
     let receiptReads = 0;
     for (const { log, transfer } of [...logs].reverse()) {
       if (!sameAddress(transfer.to, context.pool) || transfer.value < meaningfulThreshold || excludedAddress(transfer.from, context.pool)) continue;
-      if (await retry(() => provider.getCode(transfer.from)) !== "0x") continue;
       const hash = log.transactionHash;
       if (!hash || receiptHashes.has(hash)) continue;
       receiptHashes.add(hash);
+      if (sellers.has(transfer.from.toLowerCase()) || !(await isEoa(transfer.from))) continue;
       receiptReads++;
       const receipt = await retry(() => provider.getTransactionReceipt(hash));
       if (Number(receipt?.status) !== 1) {
         if (receiptReads === MAX_RECEIPTS) break;
         continue;
       }
-      const paidQuote = (receipt.logs ?? []).some((receiptLog) => {
-        if (!sameAddress(receiptLog.address, normalizedQuote(context.quote))) return false;
-        if (receiptLog.topics?.[0]?.toLowerCase() !== transferEvent.topicHash.toLowerCase()) return false;
+      let quoteNetOutflow = 0n;
+      for (const receiptLog of receipt.logs ?? []) {
+        if (!sameAddress(receiptLog.address, normalizedQuote(context.quote))) continue;
+        if (receiptLog.topics?.[0]?.toLowerCase() !== transferEvent.topicHash.toLowerCase()) continue;
         const quoteTransfer = parseTransfer(receiptLog);
-        return sameAddress(quoteTransfer.from, context.pool) && quoteTransfer.value > 0n;
-      });
-      if (paidQuote) sellers.add(transfer.from.toLowerCase());
+        if (sameAddress(quoteTransfer.from, context.pool) && sameAddress(quoteTransfer.to, context.pool)) continue;
+        if (sameAddress(quoteTransfer.from, context.pool)) quoteNetOutflow += quoteTransfer.value;
+        if (sameAddress(quoteTransfer.to, context.pool)) quoteNetOutflow -= quoteTransfer.value;
+      }
+      if (quoteNetOutflow > 0n) sellers.add(transfer.from.toLowerCase());
       if (sellers.size >= 3 || receiptReads === MAX_RECEIPTS) break;
     }
     return finalizeSellability({ buyerSamples, ladderSamples, sellers });

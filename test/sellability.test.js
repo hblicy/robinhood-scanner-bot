@@ -55,7 +55,7 @@ function fakeProvider({ logs = [], balances = new Map(), codes = new Map(), call
 }
 
 function context(extra = {}) {
-  return { token: TOKEN, quote: QUOTE, pool: POOL, venue: "uniswap-v2", decimals: 0, blockNumber: 5, ...extra };
+  return { token: TOKEN, quote: QUOTE, pool: POOL, venue: "uniswap-v2", decimals: 0, blockNumber: 0, ...extra };
 }
 
 describe("sellability core", () => {
@@ -357,9 +357,11 @@ describe("V2 sellability evidence", () => {
 
   it("resolves creation block from event, timestamp fallback, or no evidence", async () => {
     let asked = null;
+    const provider = { name: "injected provider" };
+    const retry = async (operation) => operation();
     assert.equal(await resolveStartBlock({ blockNumber: 7, pairCreatedAt: 1 }, 9, async () => { throw new Error("unused"); }), 7);
-    assert.equal(await resolveStartBlock({ pairCreatedAt: 123 }, 9, async (at, head) => { asked = [at, head]; return 6; }), 6);
-    assert.deepEqual(asked, [123, 9]);
+    assert.equal(await resolveStartBlock({ pairCreatedAt: 123 }, 9, async (...args) => { asked = args; return 6; }, provider, retry), 6);
+    assert.deepEqual(asked, [123, 9, provider, retry]);
     assert.equal(await resolveStartBlock({}, 9), null);
     const result = await inspectSellability(context({ blockNumber: null, pairCreatedAt: null }), { provider: fakeProvider() });
     assert.equal(result.reason, "evidence-unavailable");
@@ -444,6 +446,76 @@ describe("V2 sellability evidence", () => {
       .filter((request) => request.data.startsWith(iface.getFunction("transfer").selector))
       .map((request) => iface.parseTransaction({ data: request.data }).args[1]);
     assert.deepEqual(amounts, [1n, 1n, 1n, 1n]);
+  });
+
+  it("includes a buyer's pre-window balance when detecting hidden mutations", async () => {
+    const logs = [transferLog({ from: POOL, to: BUYERS[0], value: 100n, blockNumber: 5 })];
+    const makeProvider = (headBalance) => {
+      const provider = fakeProvider({ logs, balances: new Map([[BUYERS[0].toLowerCase(), headBalance]]) });
+      const originalCall = provider.call;
+      provider.call = async (request) => {
+        const parsed = iface.parseTransaction({ data: request.data });
+        if (parsed.name === "balanceOf" && parsed.args[0].toLowerCase() === BUYERS[0].toLowerCase() && request.blockTag === 4) {
+          return iface.encodeFunctionResult("balanceOf", [100n]);
+        }
+        return originalCall(request);
+      };
+      return provider;
+    };
+    const blocked = await inspectSellability(context({ blockNumber: 5 }), { provider: makeProvider(150n) });
+    assert.equal(blocked.reason, "hidden-balance-mutation");
+    assert.match(blocked.details.join(" "), /expectedBalance=200/);
+
+    const normal = await inspectSellability(context({ blockNumber: 5 }), { provider: makeProvider(200n) });
+    assert.notEqual(normal.reason, "hidden-balance-mutation");
+  });
+
+  it("requires quote evidence to have net pool outflow", async () => {
+    const sales = BUYERS.slice(0, 3).flatMap((seller, i) => [
+      transferLog({ from: POOL, to: seller, value: 100n, transactionHash: `0xe${i}` }),
+      transferLog({ from: seller, to: POOL, value: 2n, blockNumber: 20 + i, transactionHash: `0xf${i}` }),
+    ]);
+    const receipts = new Map(BUYERS.slice(0, 3).map((seller, i) => {
+      const hash = `0xf${i}`;
+      const router = ADDR.V2_ROUTER;
+      const logs = i === 0
+        ? [transferLog({ token: QUOTE, from: POOL, to: POOL, value: 5n, transactionHash: hash })]
+        : [
+          transferLog({ token: QUOTE, from: POOL, to: router, value: 5n, transactionHash: hash }),
+          transferLog({ token: QUOTE, from: router, to: POOL, value: i === 1 ? 5n : 6n, transactionHash: hash }),
+        ];
+      return [hash, receipt({ logs })];
+    }));
+    const provider = fakeProvider({ logs: sales, balances: new Map(BUYERS.slice(0, 3).map((buyer) => [buyer.toLowerCase(), 98n])), receipts });
+    const result = await inspectSellability(context(), { provider });
+    assert.equal(result.status, "unknown");
+    assert.equal(result.reason, "insufficient-meaningful-sells");
+  });
+
+  it("shares a bounded EOA code lookup cache across buyer and seller evidence", async () => {
+    const logs = [
+      transferLog({ from: POOL, to: BUYERS[0], value: 100n }),
+      transferLog({ from: BUYERS[0], to: POOL, value: 2n, blockNumber: 20, transactionHash: "0xcode" }),
+    ];
+    const provider = fakeProvider({ logs, balances: new Map([[BUYERS[0].toLowerCase(), 98n]]) });
+    let codeCalls = 0;
+    const originalCode = provider.getCode;
+    provider.getCode = async (address) => { codeCalls++; return originalCode(address); };
+    await inspectSellability(context(), { provider });
+    assert.equal(codeCalls, 1);
+  });
+
+  it("returns unavailable evidence when the shared EOA lookup budget is exhausted", async () => {
+    const addresses = Array.from({ length: 51 }, (_, index) => `0x${(1000 + index).toString(16).padStart(40, "0")}`);
+    const codes = new Map(addresses.map((address) => [address.toLowerCase(), "0x1234"]));
+    const provider = fakeProvider({
+      logs: addresses.map((address, index) => transferLog({ from: POOL, to: address, value: 1n, blockNumber: index + 5 })),
+      codes,
+    });
+    const result = await inspectSellability(context(), { provider });
+    assert.equal(result.status, "unknown");
+    assert.equal(result.reason, "evidence-unavailable");
+    assert.match(result.details.join(" "), /EOA code lookup budget exhausted/);
   });
 
   it("requires three distinct non-dust successful sales with quote transfers", async () => {
