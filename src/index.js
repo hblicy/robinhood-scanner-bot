@@ -4,7 +4,7 @@ import { safeErrorMessage } from "./safety.js";
 
 export function assertSupportedCommand(command) {
   if (!["watch", "scan", "check"].includes(command)) {
-    throw new Error("commands: watch | scan | check <token>");
+    throw new Error("Transaction functionality is not included. commands: watch | scan | check <token>");
   }
   return command;
 }

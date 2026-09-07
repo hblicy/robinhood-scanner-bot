@@ -48,8 +48,8 @@ describe("push-only command surface", () => {
 
   it("rejects paper and live as unsupported commands", () => {
     assert.equal(typeof scanner.assertSupportedCommand, "function");
-    assert.throws(() => scanner.assertSupportedCommand("paper"), /commands: watch \| scan \| check <token>/);
-    assert.throws(() => scanner.assertSupportedCommand("live"), /commands: watch \| scan \| check <token>/);
+    assert.throws(() => scanner.assertSupportedCommand("paper"), /Transaction functionality is not included.*commands: watch \| scan \| check <token>/);
+    assert.throws(() => scanner.assertSupportedCommand("live"), /Transaction functionality is not included.*commands: watch \| scan \| check <token>/);
   });
 
   it("rejects removed commands before loading invalid scanner configuration", () => {
@@ -61,7 +61,7 @@ describe("push-only command surface", () => {
       });
       const output = `${result.stdout}${result.stderr}`;
       assert.notEqual(result.status, 0);
-      assert.match(output, /commands: watch \| scan \| check <token>/);
+      assert.match(output, /Transaction functionality is not included.*commands: watch \| scan \| check <token>/);
       assert.doesNotMatch(output, /MAX_AGE_MINUTES|MAX_QUEUE_SIZE|Robinhood Chain scanner/);
     }
   });

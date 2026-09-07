@@ -3,7 +3,7 @@ import { getDefaultStore, getOnchainCursor, hasSeen, markSeen, setOnchainCursor 
 import { findFirstBlockAtOrAfter, getBlockNumber, getProvider, scanOnchain, sleep } from "./chain.js";
 import { geckoNewPools } from "./market.js";
 import { analyze } from "./analyze.js";
-import { alertReport, formatAlert, sendTelegram } from "./notify.js";
+import { alertReport, formatAlert, formatLifecycleNotification, sendTelegram } from "./notify.js";
 import { CandidateQueue } from "./queue.js";
 import { candidateKey, handleCandidate } from "./runtime.js";
 import { safeErrorMessage, sanitizeRpcUrl } from "./safety.js";
@@ -11,6 +11,7 @@ import { acquireInstanceLock } from "./instance-lock.js";
 import { createPonsTokenState, reducePonsEvent } from "./lifecycle.js";
 import { classifyPonsRecord, readPonsLaunch, scanPonsRange, verifyPonsDeployment } from "./pons.js";
 import { drainOutbox, nextRetryAt } from "./outbox.js";
+import { formatInspectionReport, inspectToken } from "./check.js";
 
 const DEFAULT_ANALYSIS_CONCURRENCY = 2;
 const candidates = new CandidateQueue({
@@ -27,19 +28,19 @@ function lifecycleNotification(event, state) {
     pool_graduated: "graduated",
   }[event.kind];
   if (!transitionType) return null;
-  const label = {
-    new_launch: "Pons V2 新币",
-    swept: "Pons V2 已 Sweep，正式池未确认",
-    graduated: "Pons V2 已链上毕业",
-  }[transitionType];
   const id = `${event.eventId}:${transitionType}`;
-  return {
+  const notification = {
     id,
     eventId: event.eventId,
     transitionType,
     token: state.token,
-    text: `${label}\nCA ${state.token}\nID ${id}`,
+    reason: event.kind === "token_launched"
+      ? "Factory TokenLaunched 已确认"
+      : event.kind === "launch_swept"
+        ? "Factory LaunchSwept 已确认，等待 Hook 注册"
+        : "Factory PoolGraduated 已确认",
   };
+  return { ...notification, text: formatLifecycleNotification(notification) };
 }
 
 function lifecycleChecks(event, state, now) {
@@ -175,8 +176,9 @@ export async function reconcilePonsWatchlist({
       eventId: event.eventId,
       transitionType,
       token: address,
-      text: `Pons V2 ${phase}\nCA ${address}\nID ${event.eventId}`,
+      reason: `Factory getter 阶段为 ${phase}`,
     };
+    notification.text = formatLifecycleNotification(notification);
     store.commitTokenUpdate({ token: address, nextToken, notification });
     updated += 1;
   }
@@ -589,13 +591,19 @@ async function watch() {
 async function scanOnce(supplied = null) {
   const dependencies = supplied || {
     settings: SETTINGS,
+    provider: getProvider(),
     getBlockNumber,
     findFirstBlockAtOrAfter,
     scanOnchain,
     geckoNewPools,
+    previewPonsRange,
+    verifyPonsDeployment,
     analyze,
     consoleAlert: async (report) => {
       console.log(formatAlert(report).replace(/<[^>]+>/g, ""));
+    },
+    consolePons: async (report) => {
+      console.log(`Pons ${report.nextToken.protocolPhase} ${report.nextToken.token} ID ${report.eventId}`);
     },
     log: console.log,
   };
@@ -603,6 +611,28 @@ async function scanOnce(supplied = null) {
   banner();
   const sources = [];
   if (settings.onchainScan) {
+    if (dependencies.previewPonsRange) {
+      sources.push({
+        name: "pons",
+        run: async () => {
+          if (dependencies.verifyPonsDeployment) await dependencies.verifyPonsDeployment(dependencies.provider);
+          const latestHead = await dependencies.getBlockNumber();
+          const head = latestHead - (settings.ponsConfirmations ?? settings.confirmationBlocks ?? 0);
+          if (head < 0) return [];
+          const from = await dependencies.findFirstBlockAtOrAfter(
+            (dependencies.now || Date.now)() - settings.maxAgeMinutes * 60_000,
+            head
+          );
+          const preview = await dependencies.previewPonsRange({
+            provider: dependencies.provider,
+            fromBlock: from,
+            toBlock: head,
+            now: dependencies.now || Date.now,
+          });
+          return preview.transitions.map((transition) => ({ kind: "pons-lifecycle", ...transition }));
+        },
+      });
+    }
     sources.push({
       name: "onchain",
       run: async () => {
@@ -624,7 +654,7 @@ async function scanOnce(supplied = null) {
 
   const results = await Promise.allSettled(sources.map(({ run }) => run()));
   const sourceFailures = [];
-  const discovered = { onchain: [], gecko: [] };
+  const discovered = { pons: [], onchain: [], gecko: [] };
   results.forEach((result, index) => {
     const source = sources[index].name;
     if (result.status === "fulfilled") {
@@ -640,7 +670,9 @@ async function scanOnce(supplied = null) {
   });
   const onchain = discovered.onchain;
   const gecko = discovered.gecko;
-  dependencies.log(`candidates: onchain=${onchain.length} gecko=${gecko.length}`);
+  const pons = discovered.pons;
+  dependencies.log(`candidates: pons=${pons.length} onchain=${onchain.length} gecko=${gecko.length}`);
+  for (const report of pons) await (dependencies.consolePons || dependencies.consoleAlert)(report);
   let reports = [];
   let candidateFailure = null;
   try {
@@ -665,28 +697,15 @@ async function scanOnce(supplied = null) {
       candidateFailure?.message,
     ].filter(Boolean).join("; "));
   }
-  return reports;
+  return [...pons, ...reports];
 }
 
-async function checkOne(token) {
+async function checkOne(token, supplied = null) {
   if (!token) throw new Error("usage: node src/index.js check 0xToken");
-  const report = await analyze({
-    source: "manual",
-    venue: "unknown",
-    pool: null,
-    token,
-    quote: "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73",
-    createdAt: null,
-  });
-  const { formatAlert } = await import("./notify.js");
-  console.log(formatAlert(report).replace(/<[^>]+>/g, ""));
-  console.log(
-    JSON.stringify(
-      { score: report.score, verdict: report.verdict, red: report.red, facts: report.facts, meta: report.meta },
-      null,
-      2
-    )
-  );
+  const dependencies = supplied || {};
+  const report = await inspectToken(token, dependencies, { timeoutMs: dependencies.timeoutMs ?? 90_000 });
+  (dependencies.log || console.log)(formatInspectionReport(report));
+  return report;
 }
 
 function banner() {

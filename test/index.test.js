@@ -183,6 +183,49 @@ describe("scanner orchestration", () => {
     assert.deepEqual(calls, { seen: 0, telegram: 0, console: 1 });
   });
 
+  it("previews Pons lifecycle events in scan without persistent or Telegram calls", async () => {
+    const calls = { preview: 0, store: 0, telegram: 0, console: 0 };
+    const reports = await scanOnce({
+      settings: {
+        maxQueueSize: 1,
+        onchainScan: true,
+        geckoScan: false,
+        minScore: 55,
+        maxAgeMinutes: 30,
+        confirmationBlocks: 2,
+        ponsConfirmations: 2,
+      },
+      provider: {},
+      getBlockNumber: async () => 10,
+      findFirstBlockAtOrAfter: async () => 3,
+      scanOnchain: async () => [],
+      previewPonsRange: async ({ fromBlock, toBlock }) => {
+        calls.preview += 1;
+        assert.deepEqual([fromBlock, toBlock], [3, 8]);
+        return {
+          events: [{ token: "0x1" }],
+          transitions: [{
+            eventId: "4663:0xevent:1",
+            nextToken: { token: "0x1", identity: "pons-v2", protocolPhase: "not_graduated" },
+          }],
+        };
+      },
+      verifyPonsDeployment: async () => ({ ok: true }),
+      geckoNewPools: async () => [],
+      analyze: async () => { throw new Error("unexpected analysis"); },
+      consoleAlert: async () => { calls.console += 1; },
+      markSeen: () => { calls.store += 1; },
+      alertReport: async () => { calls.telegram += 1; },
+      log: () => {},
+      now: () => 1,
+    });
+    assert.equal(calls.preview, 1);
+    assert.equal(calls.store, 0);
+    assert.equal(calls.telegram, 0);
+    assert.equal(calls.console, 1);
+    assert.equal(reports[0].kind, "pons-lifecycle");
+  });
+
   it("processes every one-shot candidate before aggregating failures", async () => {
     const alerted = [];
     await assert.rejects(

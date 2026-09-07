@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { sendTelegramWith } from "../src/notify.js";
+import { formatLifecycleNotification, sendTelegramWith } from "../src/notify.js";
 
 const settings = {
   telegramToken: "DUMMY_SECRET_TOKEN",
@@ -77,4 +77,22 @@ describe("Telegram delivery", () => {
     assert.equal(new Set(signals).size, 3);
     assert.ok(signals.every((signal) => signal.aborted));
   });
+});
+
+describe("lifecycle notifications", () => {
+  for (const transitionType of ["new_launch", "hard_kill", "graduated", "market_ready", "rescued", "green"]) {
+    it(`formats a short stable ${transitionType} notification`, () => {
+      const text = formatLifecycleNotification({
+        transitionType,
+        token: "0x1111111111111111111111111111111111111111",
+        id: `4663:0x${"a".repeat(64)}:1:${transitionType}`,
+        reason: "direct <reason>",
+      });
+      assert.match(text, /0x1111111111111111111111111111111111111111/);
+      assert.match(text, new RegExp(transitionType));
+      assert.match(text, /direct &lt;reason&gt;/);
+      assert.ok(text.length < 500);
+      assert.doesNotMatch(text, /\/100|加权|评分/);
+    });
+  }
 });
