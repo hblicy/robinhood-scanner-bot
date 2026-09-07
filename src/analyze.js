@@ -40,6 +40,17 @@ async function settled(promise) {
   }
 }
 
+function normalizeHoneypotSellability(result, sellability) {
+  const normalized = { ...result, sellability };
+  if (sellability.status === SELLABILITY.CONFIRMED) {
+    return { ...normalized, honeypot: false, complete: true, sellOk: true };
+  }
+  if (sellability.status === SELLABILITY.BLOCKED) {
+    return { ...normalized, honeypot: true, complete: true, sellOk: false };
+  }
+  return { ...normalized, honeypot: null, complete: false, sellOk: null };
+}
+
 export class RetryableAnalysisError extends Error {
   constructor(source, token, cause = null) {
     const detail = cause ? `: ${safeErrorMessage(cause)}` : ": not indexed yet";
@@ -184,11 +195,14 @@ export function scoreFromFacts(f) {
     red.push("蜜罐 / 无法卖出");
   } else if (f.honeypot === false) {
     score += 10;
+    const taxesKnown = Number.isFinite(f.buyTaxBps) && Number.isFinite(f.sellTaxBps);
     checks.push({
       key: "honeypot",
       ok: true,
       pts: 10,
-      detail: `买税 ${f.buyTaxBps ?? 0}bps / 卖税 ${f.sellTaxBps ?? 0}bps`,
+      detail: taxesKnown
+        ? `买税 ${f.buyTaxBps}bps / 卖税 ${f.sellTaxBps}bps`
+        : "已确认卖出证据，税率未知",
     });
   } else {
     checks.push({ key: "honeypot", ok: false, pts: 0, detail: "模拟未完成，勿当通过" });
@@ -345,12 +359,7 @@ export async function analyze(event, overrides = {}) {
     SELLABILITY.UNKNOWN,
     hpRaw.reason || "evidence-unavailable"
   );
-  const sellabilityHoneypot = sellability.status === SELLABILITY.CONFIRMED
-    ? false
-    : sellability.status === SELLABILITY.BLOCKED
-      ? true
-      : null;
-  const hp = { ...hpRaw, sellability };
+  const hp = normalizeHoneypotSellability(hpRaw, sellability);
 
   const mkt = event.market || {};
   const holdersKnown = holdersResult.ok && supply > 0n && holders.length > 0;
@@ -366,7 +375,7 @@ export async function analyze(event, overrides = {}) {
       deployerHistoryKnown &&
       lpBurnedPct !== null &&
       hp.complete === true &&
-      sellabilityHoneypot === false
+      hp.honeypot === false
   );
   const facts = {
     ageMinutes,
@@ -384,7 +393,7 @@ export async function analyze(event, overrides = {}) {
     holdersKnown,
     creatorKnown,
     creatorPct,
-    honeypot: sellabilityHoneypot,
+    honeypot: hp.honeypot,
     honeypotReason: hp.reason,
     buyTaxBps: hp.buyTaxBps,
     sellTaxBps: hp.sellTaxBps,
@@ -468,14 +477,10 @@ export async function honeypotCheck(
   };
 
   const blocked = (reason, detail) => {
-    result.honeypot = true;
-    result.complete = true;
-    result.sellOk = false;
     result.reason = reason;
-    result.sellability = sellabilityResult(SELLABILITY.BLOCKED, reason, {
+    return normalizeHoneypotSellability(result, sellabilityResult(SELLABILITY.BLOCKED, reason, {
       details: detail ? [detail] : [],
-    });
-    return result;
+    }));
   };
 
   if (!flags.hasCode) {
@@ -509,24 +514,14 @@ export async function honeypotCheck(
     pairCreatedAt,
     decimals,
   });
-  result.sellability = sellability;
   if (sellability.status === SELLABILITY.BLOCKED) {
-    result.honeypot = true;
-    result.complete = true;
-    result.sellOk = false;
     result.reason = sellability.reason || result.reason || "无法卖出";
   } else if (sellability.status === SELLABILITY.CONFIRMED) {
-    result.honeypot = false;
-    result.complete = true;
-    result.sellOk = true;
     result.reason = result.reason || sellability.reason || "已确认真实卖出证据";
   } else {
-    result.honeypot = null;
-    result.complete = false;
-    result.sellOk = null;
     result.reason = sellability.reason || "evidence-unavailable";
   }
-  return result;
+  return normalizeHoneypotSellability(result, sellability);
 }
 
 async function simulateV2Quotes(token, quote) {

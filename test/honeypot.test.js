@@ -83,6 +83,19 @@ describe("honeypotCheck", () => {
     }
   });
 
+  it("uses the default sellability collector for unsupported V3 and V4 venues", async () => {
+    for (const venue of ["uniswap-v3", "uniswap-v4"]) {
+      const result = await honeypotCheck({ ...input, venue, pool: venue === "uniswap-v4" ? null : input.pool }, {
+        bytecodeFlags: async () => ({ hasCode: true }),
+      });
+      assert.equal(result.honeypot, null);
+      assert.equal(result.complete, false);
+      assert.equal(result.sellOk, null);
+      assert.equal(result.sellability.status, "unknown");
+      assert.equal(result.sellability.reason, "unsupported-venue");
+    }
+  });
+
   it("does not treat successful V2 quotes as confirmed sellability", async () => {
     const result = await honeypotCheck(input, {
       bytecodeFlags: async () => ({ hasCode: true }),

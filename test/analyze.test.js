@@ -170,6 +170,9 @@ describe("analyze data completeness", () => {
     }));
     const honeypotCheck = report.checks.find((check) => check.key === "honeypot");
     assert.equal(report.sellability.status, "unknown");
+    assert.equal(report.honeypot.honeypot, null);
+    assert.equal(report.honeypot.complete, false);
+    assert.equal(report.honeypot.sellOk, null);
     assert.equal(report.facts.honeypot, null);
     assert.equal(honeypotCheck.pts, 0);
     assert.doesNotMatch(honeypotCheck.detail, /买税/);
@@ -203,6 +206,8 @@ describe("analyze data completeness", () => {
         complete: true,
         sellOk: true,
         reason: "confirmed real sells",
+        buyTaxBps: null,
+        sellTaxBps: null,
         sellability: {
           status: "confirmed",
           reason: null,
@@ -213,7 +218,32 @@ describe("analyze data completeness", () => {
         },
       }),
     }));
+    const honeypotCheck = report.checks.find((check) => check.key === "honeypot");
     assert.equal(report.facts.honeypot, false);
-    assert.equal(report.checks.find((check) => check.key === "honeypot").pts, 10);
+    assert.equal(honeypotCheck.pts, 10);
+    assert.match(honeypotCheck.detail, /税率未知/);
+    assert.doesNotMatch(honeypotCheck.detail, /0bps/);
+  });
+
+  it("shows exact zero taxes when confirmed sellability supplies them", async () => {
+    const report = await analyze(event, dependencies({
+      honeypotCheck: async () => ({
+        honeypot: false,
+        complete: true,
+        sellOk: true,
+        reason: "confirmed real sells",
+        buyTaxBps: 0,
+        sellTaxBps: 0,
+        sellability: {
+          status: "confirmed",
+          reason: null,
+          buyerSamples: 3,
+          ladderSamples: 2,
+          meaningfulSellers: 3,
+          details: [],
+        },
+      }),
+    }));
+    assert.match(report.checks.find((check) => check.key === "honeypot").detail, /买税 0bps \/ 卖税 0bps/);
   });
 });
