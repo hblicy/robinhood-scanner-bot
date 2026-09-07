@@ -29,7 +29,10 @@ describe("push-only command surface", () => {
       /PRIVATE_KEY/,
       /ENABLE_LIVE_TRADING/,
       /signTransaction/,
+      /sendTransaction\s*\(/,
       /broadcastTransaction/,
+      /eth_sendRawTransaction/,
+      /eth_sendTransaction/,
       /swapExactETHForTokens/,
       /swapExactTokensForETH/,
       /exactInputSingle/,
@@ -44,6 +47,28 @@ describe("push-only command surface", () => {
       assert.doesNotMatch(`${source}\n${example}`, pattern);
     }
     assert.equal(fs.existsSync(path.join(root, "src", "trade.js")), false);
+  });
+
+  it("keeps src/sellability.js read-only", () => {
+    const file = path.join(root, "src", "sellability.js");
+    assert.equal(fs.existsSync(file), true);
+    const source = fs.readFileSync(file, "utf8");
+    const forbidden = [
+      /\bWallet\b/,
+      /PRIVATE_KEY/,
+      /approve/,
+      /swapExact/,
+      /exactInput/,
+      /signTransaction/,
+      /sendTransaction/,
+      /broadcastTransaction/,
+      /eth_sendRawTransaction/,
+      /eth_sendTransaction/,
+    ];
+    for (const pattern of forbidden) {
+      assert.doesNotMatch(source, pattern);
+    }
+    assert.match(source, /provider\.call\s*\(/);
   });
 
   it("rejects paper and live as unsupported commands", () => {
