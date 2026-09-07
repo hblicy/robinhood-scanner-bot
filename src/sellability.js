@@ -1,5 +1,5 @@
-import { Interface } from "ethers";
-import { ERC20_ABI } from "./abis.js";
+import { getAddress, Interface } from "ethers";
+import { ERC20_ABI, PAIR_V2_ABI, V2_FACTORY_ABI } from "./abis.js";
 import { getProvider, getLogsChunked, findFirstBlockAtOrAfter, isContractCallRevert, withRetry } from "./chain.js";
 import { ADDR } from "./config.js";
 import { safeErrorMessage } from "./safety.js";
@@ -12,10 +12,14 @@ export const SELLABILITY = Object.freeze({
 
 const transferInterface = new Interface(ERC20_ABI);
 const transferEvent = transferInterface.getEvent("Transfer");
+const pairInterface = new Interface(PAIR_V2_ABI);
+const swapEvent = pairInterface.getEvent("Swap");
+const factoryInterface = new Interface(V2_FACTORY_ABI);
 const MAX_BUYERS = 5;
 const MAX_LADDER_WALLETS = 3;
 const MAX_RECEIPTS = 30;
 const MAX_CODE_LOOKUPS = 50;
+const MAX_TRANSFER_LOGS = 10_000;
 
 function sameAddress(a, b) {
   return typeof a === "string" && typeof b === "string" && a.toLowerCase() === b.toLowerCase();
@@ -24,6 +28,15 @@ function sameAddress(a, b) {
 function excludedAddress(address, pool) {
   return [pool, ADDR.V2_ROUTER, ADDR.V3_ROUTER, ADDR.V4_POOL_MANAGER, ADDR.ZERO, ADDR.DEAD]
     .some((value) => sameAddress(address, value));
+}
+
+function isLowAddress(address) {
+  try {
+    const value = BigInt(address);
+    return value > 0n && value <= 0xffffn;
+  } catch {
+    return true;
+  }
 }
 
 function sortLogs(logs) {
@@ -53,6 +66,58 @@ async function readBalance(provider, token, address, head, retry) {
 
 function normalizedQuote(quote) {
   return sameAddress(quote, ADDR.ZERO) || sameAddress(quote, ADDR.NATIVE) ? ADDR.WETH : quote;
+}
+
+function decodeAddressResult(iface, functionName, data) {
+  try {
+    return getAddress(iface.decodeFunctionResult(functionName, data)[0]);
+  } catch {
+    return null;
+  }
+}
+
+async function readAddressFunction(provider, to, iface, functionName, args, head, retry) {
+  const data = iface.encodeFunctionData(functionName, args);
+  const result = await retry(() => provider.call({ to, data, blockTag: head }));
+  return decodeAddressResult(iface, functionName, result);
+}
+
+async function bindV2Pool(context, provider, head, retry) {
+  let token;
+  let quote;
+  let pool;
+  try {
+    token = getAddress(context.token);
+    quote = getAddress(normalizedQuote(context.quote));
+    pool = getAddress(context.pool);
+  } catch {
+    return null;
+  }
+
+  const factoryPair = await readAddressFunction(
+    provider,
+    ADDR.V2_FACTORY,
+    factoryInterface,
+    "getPair",
+    [token, quote],
+    head,
+    retry
+  );
+  if (!sameAddress(factoryPair, pool)) return null;
+
+  const [token0, token1] = await Promise.all([
+    readAddressFunction(provider, pool, pairInterface, "token0", [], head, retry),
+    readAddressFunction(provider, pool, pairInterface, "token1", [], head, retry),
+  ]);
+  const tokenIsToken0 = sameAddress(token0, token) && sameAddress(token1, quote);
+  const tokenIsToken1 = sameAddress(token1, token) && sameAddress(token0, quote);
+  if (!tokenIsToken0 && !tokenIsToken1) return null;
+
+  return { token, quote, pool, tokenIsToken0 };
+}
+
+function poolBindingMismatch() {
+  return sellabilityResult(SELLABILITY.UNKNOWN, "pool-binding-mismatch");
 }
 
 export function decodeTransferCall(data) {
@@ -204,18 +269,30 @@ export async function inspectSellability(context, dependencies = {}) {
   let ladderSamples = 0;
 
   try {
-    const head = await retry(() => provider.getBlockNumber());
+    const head = Number.isInteger(context.analysisBlock) && context.analysisBlock >= 0
+      ? context.analysisBlock
+      : await retry(() => provider.getBlockNumber());
+    if (!Number.isInteger(head) || head < 0) throw new Error("analysis block unavailable");
+    const binding = await bindV2Pool(context, provider, head, retry);
+    if (!binding) return poolBindingMismatch();
     const start = await resolveStartBlock(context, head, findBlock, provider, retry);
     if (start == null) return unavailable("pool creation block unavailable");
+    if (!Number.isInteger(start) || start < 0 || start > head) {
+      return unavailable(`pool creation block ${start} is after analysis block ${head}`);
+    }
 
     const rawLogs = await getLogs({
       address: context.token,
       topics: [transferEvent.topicHash],
       fromBlock: start,
       toBlock: head,
+      maxLogs: MAX_TRANSFER_LOGS,
       provider,
       retry,
     });
+    if (!Array.isArray(rawLogs) || rawLogs.length > MAX_TRANSFER_LOGS) {
+      throw new Error(`log budget exceeded: max ${MAX_TRANSFER_LOGS}`);
+    }
     const logs = sortLogs(rawLogs).map((log) => ({ log, transfer: parseTransfer(log) }));
     const buys = logs.filter(({ transfer }) => sameAddress(transfer.from, context.pool));
     const buyers = [];
@@ -223,11 +300,13 @@ export async function inspectSellability(context, dependencies = {}) {
     const codeCache = new Map();
     let codeLookups = 0;
     const isEoa = async (address) => {
+      if (isLowAddress(address)) return false;
       const key = address.toLowerCase();
       if (codeCache.has(key)) return codeCache.get(key);
       if (codeLookups >= MAX_CODE_LOOKUPS) throw new Error("EOA code lookup budget exhausted");
       codeLookups++;
-      const eoa = await retry(() => provider.getCode(address)) === "0x";
+      const code = await retry(() => provider.getCode(address, head));
+      const eoa = typeof code === "string" && code.toLowerCase() === "0x";
       codeCache.set(key, eoa);
       return eoa;
     };
@@ -251,8 +330,7 @@ export async function inspectSellability(context, dependencies = {}) {
         if (sameAddress(transfer.to, wallet)) intervalNet += transfer.value;
         if (sameAddress(transfer.from, wallet)) intervalNet -= transfer.value;
       }
-      const startBalance = start === 0 ? 0n : await readBalance(provider, context.token, wallet, start - 1, retry);
-      const expectedBalance = startBalance + intervalNet;
+      const expectedBalance = intervalNet;
       const reportedBalance = await readBalance(provider, context.token, wallet, head, retry);
       balances.set(wallet.toLowerCase(), reportedBalance);
       if (evaluateLedgerBalance({ ledgerBalance: expectedBalance, reportedBalance, oneToken }).blocked) {
@@ -295,27 +373,35 @@ export async function inspectSellability(context, dependencies = {}) {
     const receiptHashes = new Set();
     let receiptReads = 0;
     for (const { log, transfer } of [...logs].reverse()) {
-      if (!sameAddress(transfer.to, context.pool) || transfer.value < meaningfulThreshold || excludedAddress(transfer.from, context.pool)) continue;
+      if (!sameAddress(transfer.to, binding.pool) || transfer.value <= 0n || excludedAddress(transfer.from, binding.pool)) continue;
       const hash = log.transactionHash;
       if (!hash || receiptHashes.has(hash)) continue;
       receiptHashes.add(hash);
-      if (sellers.has(transfer.from.toLowerCase()) || !(await isEoa(transfer.from))) continue;
+      if (receiptReads >= MAX_RECEIPTS) break;
       receiptReads++;
       const receipt = await retry(() => provider.getTransactionReceipt(hash));
-      if (Number(receipt?.status) !== 1) {
-        if (receiptReads === MAX_RECEIPTS) break;
-        continue;
-      }
+      if (Number(receipt?.status) !== 1 || !sameAddress(receipt?.from, transfer.from)) continue;
+      const seller = receipt.from.toLowerCase();
+      if (sellers.has(seller) || excludedAddress(receipt.from, binding.pool) || !(await isEoa(receipt.from))) continue;
       let quoteNetOutflow = 0n;
+      let hasMeaningfulSwap = false;
       for (const receiptLog of receipt.logs ?? []) {
-        if (!sameAddress(receiptLog.address, normalizedQuote(context.quote))) continue;
-        if (receiptLog.topics?.[0]?.toLowerCase() !== transferEvent.topicHash.toLowerCase()) continue;
-        const quoteTransfer = parseTransfer(receiptLog);
-        if (sameAddress(quoteTransfer.from, context.pool) && sameAddress(quoteTransfer.to, context.pool)) continue;
-        if (sameAddress(quoteTransfer.from, context.pool)) quoteNetOutflow += quoteTransfer.value;
-        if (sameAddress(quoteTransfer.to, context.pool)) quoteNetOutflow -= quoteTransfer.value;
+        if (sameAddress(receiptLog.address, binding.quote) &&
+          receiptLog.topics?.[0]?.toLowerCase() === transferEvent.topicHash.toLowerCase()) {
+          const quoteTransfer = parseTransfer(receiptLog);
+          if (!sameAddress(quoteTransfer.from, binding.pool) || !sameAddress(quoteTransfer.to, binding.pool)) {
+            if (sameAddress(quoteTransfer.from, binding.pool)) quoteNetOutflow += quoteTransfer.value;
+            if (sameAddress(quoteTransfer.to, binding.pool)) quoteNetOutflow -= quoteTransfer.value;
+          }
+        }
+        if (!sameAddress(receiptLog.address, binding.pool) ||
+          receiptLog.topics?.[0]?.toLowerCase() !== swapEvent.topicHash.toLowerCase()) continue;
+        const swap = pairInterface.parseLog(receiptLog);
+        const tokenAmountIn = BigInt(binding.tokenIsToken0 ? swap.args.amount0In : swap.args.amount1In);
+        const quoteAmountOut = BigInt(binding.tokenIsToken0 ? swap.args.amount1Out : swap.args.amount0Out);
+        if (tokenAmountIn >= meaningfulThreshold && quoteAmountOut > 0n) hasMeaningfulSwap = true;
       }
-      if (quoteNetOutflow > 0n) sellers.add(transfer.from.toLowerCase());
+      if (hasMeaningfulSwap && quoteNetOutflow > 0n) sellers.add(seller);
       if (sellers.size >= 3 || receiptReads === MAX_RECEIPTS) break;
     }
     return finalizeSellability({ buyerSamples, ladderSamples, sellers });

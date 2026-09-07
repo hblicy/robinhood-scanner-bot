@@ -169,10 +169,20 @@ export async function getLogsChunked({
   fromBlock,
   toBlock,
   chunk = 2000,
+  maxLogs = Infinity,
   provider = getProvider(),
   retry = (fn) => withRetry(fn),
 }) {
+  if (maxLogs !== Infinity && (!Number.isInteger(maxLogs) || maxLogs < 0)) {
+    throw new Error("maxLogs must be a non-negative integer or Infinity");
+  }
   const out = [];
+  const append = (logs) => {
+    if (logs.length > maxLogs - out.length) {
+      throw new Error(`log budget exceeded: max ${maxLogs}`);
+    }
+    out.push(...logs);
+  };
   let start = fromBlock;
   while (start <= toBlock) {
     const end = Math.min(start + chunk - 1, toBlock);
@@ -185,14 +195,16 @@ export async function getLogsChunked({
           toBlock: end,
         })
       );
-      out.push(...logs);
+      append(logs);
     } catch (err) {
       if (end - start + 1 > 40 && isLogRangeLimitError(err)) {
         const mid = Math.floor((start + end) / 2);
         const nextChunk = Math.max(40, Math.floor((end - start + 1) / 2));
-        const left = await getLogsChunked({ address, topics, fromBlock: start, toBlock: mid, chunk: nextChunk, provider, retry });
-        const right = await getLogsChunked({ address, topics, fromBlock: mid + 1, toBlock: end, chunk: nextChunk, provider, retry });
-        out.push(...left, ...right);
+        const remaining = maxLogs - out.length;
+        const left = await getLogsChunked({ address, topics, fromBlock: start, toBlock: mid, chunk: nextChunk, maxLogs: remaining, provider, retry });
+        append(left);
+        const right = await getLogsChunked({ address, topics, fromBlock: mid + 1, toBlock: end, chunk: nextChunk, maxLogs: maxLogs - out.length, provider, retry });
+        append(right);
       } else {
         throw err;
       }
