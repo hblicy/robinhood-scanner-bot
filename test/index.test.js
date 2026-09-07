@@ -145,6 +145,45 @@ describe("scanner orchestration", () => {
     assert.deepEqual(alerted, ["0x1", "0x2"]);
   });
 
+  it("routes auxiliary candidates through Pons identity before generic analysis", async () => {
+    const analyzed = [];
+    const reports = await runReadOnlyCandidates(
+      [{ token: "pons" }, { token: "long" }],
+      {
+        maxQueueSize: 2,
+        maxAgeMinutes: 30,
+        minScore: 55,
+        now: () => 1,
+        classifyCandidate: async (event) => event.token === "pons"
+          ? { ...event, identity: "pons-v2", pad: "pons-v2" }
+          : { ...event, identity: "not_pons", pad: "long" },
+        analyze: async (event) => {
+          analyzed.push(event.token);
+          return { ...event, score: 90, verdict: "green", meta: { symbol: event.token }, red: [], honeypot: {} };
+        },
+        consoleAlert: async () => {},
+        log: () => {},
+      }
+    );
+    assert.deepEqual(analyzed, ["long"]);
+    assert.equal(reports.length, 1);
+  });
+
+  it("does not treat an unknown Pons identity as a generic candidate", async () => {
+    let analyzed = 0;
+    await assert.rejects(() => runReadOnlyCandidates([{ token: "unknown" }], {
+      maxQueueSize: 1,
+      maxAgeMinutes: 30,
+      minScore: 55,
+      now: () => 1,
+      classifyCandidate: async (event) => ({ ...event, identity: "unknown", pad: "unknown", error: "RPC timeout" }),
+      analyze: async () => { analyzed += 1; },
+      consoleAlert: async () => {},
+      log: () => {},
+    }), /Pons identity unknown.*RPC timeout/);
+    assert.equal(analyzed, 0);
+  });
+
   it("keeps scanOnce free of persistent and Telegram calls", async () => {
     const calls = { seen: 0, telegram: 0, console: 0 };
     const ranges = [];
@@ -295,6 +334,28 @@ describe("scanner orchestration", () => {
     });
     assert.equal(rpcCalls, 0);
     assert.equal(reports.length, 1);
+  });
+
+  it("fails a stuck one-shot scan with an explicit global timeout", async () => {
+    await assert.rejects(() => scanOnce({
+      timeoutMs: 5,
+      settings: {
+        maxQueueSize: 1,
+        onchainScan: true,
+        geckoScan: false,
+        minScore: 55,
+        maxAgeMinutes: 30,
+        confirmationBlocks: 2,
+      },
+      getBlockNumber: async () => new Promise(() => {}),
+      findFirstBlockAtOrAfter: async () => 3,
+      scanOnchain: async () => [],
+      geckoNewPools: async () => [],
+      analyze: async () => null,
+      consoleAlert: async () => {},
+      log: () => {},
+      now: () => 1,
+    }), /scan timed out after 5ms/);
   });
 
   it("processes a healthy source before reporting another source failure", async () => {

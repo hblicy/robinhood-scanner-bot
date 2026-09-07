@@ -1,7 +1,7 @@
 import { SETTINGS, CHAIN, DATA_DIR, isQuote } from "./config.js";
 import { getDefaultStore, getOnchainCursor, hasSeen, markSeen, setOnchainCursor } from "./store.js";
 import { findFirstBlockAtOrAfter, getBlockNumber, getProvider, scanOnchain, sleep } from "./chain.js";
-import { geckoNewPools } from "./market.js";
+import { geckoNewPools, getDexPaprikaTopPools } from "./market.js";
 import { analyze } from "./analyze.js";
 import { alertReport, formatAlert, formatLifecycleNotification, sendTelegram } from "./notify.js";
 import { CandidateQueue } from "./queue.js";
@@ -12,6 +12,7 @@ import { createPonsTokenState, reducePonsEvent } from "./lifecycle.js";
 import { classifyPonsRecord, readPonsLaunch, scanPonsRange, verifyPonsDeployment } from "./pons.js";
 import { drainOutbox, nextRetryAt } from "./outbox.js";
 import { formatInspectionReport, inspectToken } from "./check.js";
+import { evaluateHeat } from "./decay.js";
 
 const DEFAULT_ANALYSIS_CONCURRENCY = 2;
 const candidates = new CandidateQueue({
@@ -146,6 +147,139 @@ export async function runPendingChecks({
     }
   }
   return result;
+}
+
+export function createInspectionCheckHandlers({
+  provider,
+  store,
+  now = Date.now,
+  inspect = inspectToken,
+  timeoutMs = 90_000,
+}) {
+  const handle = async (check) => {
+    const previous = store.snapshot().tokens[String(check.token).toLowerCase()];
+    if (!previous) throw new Error(`pending check token state missing for ${check.token}`);
+    const report = await inspect(check.token, { provider, now }, { timeoutMs });
+    if (report.timedOut) {
+      throw new Error(`inspection timeout; unfinished=${(report.unfinishedSources || []).join(",") || "unknown"}`);
+    }
+    if (report.identity !== "pons-v2") {
+      throw new Error(`inspection Factory identity is ${report.identity || "unknown"}`);
+    }
+
+    const nextToken = structuredClone(previous);
+    nextToken.facts = nextToken.facts || {};
+    nextToken.facts.inspection = report;
+    nextToken.riskDataStatus = report.riskDataStatus || "unknown";
+    nextToken.lineB = {
+      passed: report.curve?.status === "sufficient" && report.curve?.bidirectional === true,
+      sampleStatus: report.curve?.status || "unknown",
+      tradeCount: report.curve?.tradeCount ?? null,
+      uniqueTraders: report.curve?.uniqueTraders ?? null,
+    };
+    if (nextToken.protocolPhase === "pool_created" && [true, false, "unknown"].includes(report.marketReady)) {
+      nextToken.marketReady = report.marketReady;
+    }
+    if (report.monitorState === "killed" && nextToken.protocolPhase !== "rescued") {
+      nextToken.monitorState = "killed";
+      nextToken.watchlist = false;
+      nextToken.killReason = report.reasons?.[0] || "inspection-hard-kill";
+    }
+    nextToken.updatedAt = now();
+
+    let transitionType = null;
+    if (previous.monitorState !== "killed" && nextToken.monitorState === "killed") transitionType = "hard_kill";
+    else if (previous.marketReady !== true && nextToken.marketReady === true) transitionType = "market_ready";
+    const notification = transitionType ? {
+      id: `${check.id}:${transitionType}`,
+      eventId: check.eventId,
+      transitionType,
+      token: check.token,
+      reason: report.reasons?.[0] || (transitionType === "market_ready" ? "Hook 与双向市场证据已确认" : "风险硬门槛触发"),
+    } : null;
+    if (notification) notification.text = formatLifecycleNotification(notification);
+    return { token: check.token, nextToken, notification };
+  };
+  return Object.fromEntries([
+    "curve_flow",
+    "holders",
+    "deployer_24h",
+    "line_a",
+    "market",
+    "line_c",
+  ].map((type) => [type, handle]));
+}
+
+function heatPoolCategory(pool) {
+  if (pool?.category) return pool.category;
+  const tokens = Array.isArray(pool?.tokens) ? pool.tokens : [];
+  if (tokens.some((token) => String(token.symbol || "").replace(/^\$/, "").toUpperCase() === "PONS")) {
+    return "pons";
+  }
+  const nonQuote = tokens.filter((token) => !isQuote(token.address));
+  if (nonQuote.length === 0) return "infrastructure";
+  if (nonQuote.every((token) => String(token.symbol || "").toUpperCase() === "NVDA")) return "stock";
+  return "memecoin";
+}
+
+export async function refreshMarketHeat({
+  provider,
+  store,
+  settings = SETTINGS,
+  now = Date.now,
+  getBlockNumber: readHead = getBlockNumber,
+  findFirstBlockAtOrAfter: findStart = findFirstBlockAtOrAfter,
+  scanRange = scanPonsRange,
+  getTopPools = getDexPaprikaTopPools,
+}) {
+  const at = now();
+  const [launchesResult, poolsResult] = await Promise.allSettled([
+    (async () => {
+      const head = await readHead();
+      const from = await findStart(at - 86_400_000, head, provider);
+      const events = await scanRange(provider, from, head);
+      return events.filter((event) => event.kind === "token_launched").length;
+    })(),
+    getTopPools(),
+  ]);
+  const errors = [];
+  if (launchesResult.status === "rejected") {
+    errors.push({ source: "pons_launches_24h", message: safeErrorMessage(launchesResult.reason) });
+  }
+  if (poolsResult.status === "rejected") {
+    errors.push({ source: "dexpaprika_top_pools", message: safeErrorMessage(poolsResult.reason) });
+  }
+  const pools = poolsResult.status === "fulfilled" ? poolsResult.value : [];
+  const topPools = pools.map((pool) => ({ category: heatPoolCategory(pool) }));
+  const ponsCount = topPools.filter((pool) => pool.category === "pons").length;
+  const heat = evaluateHeat({
+    launches24h: launchesResult.status === "fulfilled" ? launchesResult.value : null,
+    topPools,
+    ponsPopularPct: topPools.length ? (ponsCount / topPools.length) * 100 : null,
+    fetchedAt: errors.length ? null : at,
+    now: at,
+  }, {
+    ttlMs: 2 * 3_600_000,
+    highHeatLaunches24h: settings.highHeatLaunches24h,
+    normalCap: settings.watchlistCapNormal,
+    highHeatCap: settings.watchlistCapHighHeat,
+  });
+  heat.errors = errors;
+  const previous = store.getHeat();
+  let notification = null;
+  if (previous?.decision !== heat.decision) {
+    const hour = Math.floor(at / 3_600_000);
+    notification = {
+      id: `heat:${hour}:${heat.decision === "打" ? "go" : "no"}`,
+      eventId: null,
+      transitionType: "heat_change",
+      token: "market",
+      reason: `决策=${heat.decision}，24h 发射=${heat.launches24h ?? "unknown"}，新准入上限=${heat.admissionCap}`,
+    };
+    notification.text = formatLifecycleNotification(notification);
+  }
+  store.commitHeat({ heat, notification });
+  return heat;
 }
 
 export async function reconcilePonsWatchlist({
@@ -411,10 +545,17 @@ export async function runReadOnlyCandidates(events, dependencies) {
     return drainQueue(
       queue,
       dependencies.analysisConcurrency ?? DEFAULT_ANALYSIS_CONCURRENCY,
-      async (event) => {
-      try {
+       async (event) => {
+       try {
+        const classified = dependencies.classifyCandidate
+          ? await dependencies.classifyCandidate(event)
+          : event;
+        if (classified.identity === "pons-v2") return;
+        if (classified.identity === "unknown") {
+          throw new Error(`Pons identity unknown for ${event.token}: ${classified.error || "Factory read failed"}`);
+        }
         const report = await handleCandidate(
-          event,
+          classified,
           { persistSeen: false },
           {
             now: dependencies.now,
@@ -443,7 +584,8 @@ export async function runReadOnlyCandidates(events, dependencies) {
   if (failures.length) {
     throw new AggregateError(
       failures.map(({ error }) => error),
-      `candidate analysis failed: ${failures.map(({ event }) => event.token).join(", ")}`
+      `candidate analysis failed: ${failures.map(({ event, error }) =>
+        `${event.token}: ${safeErrorMessage(error)}`).join(", ")}`
     );
   }
   return reports;
@@ -457,6 +599,7 @@ async function watch() {
     banner();
     const provider = getProvider();
     const store = getDefaultStore();
+    const pendingHandlers = createInspectionCheckHandlers({ provider, store });
     if (SETTINGS.onchainScan) {
       await verifyPonsDeployment(provider);
       await reconcilePonsWatchlist({ provider, store });
@@ -495,8 +638,13 @@ async function watch() {
         DEFAULT_ANALYSIS_CONCURRENCY,
         async (event) => {
           try {
+            const classified = await classifyAuxiliaryCandidate(event, { provider });
+            if (classified.identity === "pons-v2") return;
+            if (classified.identity === "unknown") {
+              throw new Error(`Pons identity unknown for ${event.token}: ${classified.error}`);
+            }
             await handleCandidate(
-              event,
+              classified,
               { persistSeen: true },
               {
                 now: Date.now,
@@ -567,6 +715,23 @@ async function watch() {
         await sleep(SETTINGS.outboxPollMs);
       }
     })());
+    loops.push((async () => {
+      while (true) {
+        const result = await runPendingChecks({ store, handlers: pendingHandlers });
+        if (result.failed) console.error(`pending checks: ${result.failed} checks exhausted retries`);
+        await sleep(SETTINGS.outboxPollMs);
+      }
+    })());
+    if (SETTINGS.dexPaprikaScan) {
+      loops.push((async () => {
+        while (true) {
+          const heat = await refreshMarketHeat({ provider, store });
+          console.log(`market heat: ${heat.decision} level=${heat.level} launches24h=${heat.launches24h ?? "unknown"} cap=${heat.admissionCap}`);
+          const hour = Math.floor(Date.now() / 3_600_000);
+          await sleep(Math.max(1, (hour + 1) * 3_600_000 - Date.now()));
+        }
+      })());
+    }
     if (SETTINGS.geckoScan) {
       const handleEvents = createSourceProcessor();
       loops.push((async () => {
@@ -588,7 +753,7 @@ async function watch() {
   }
 }
 
-async function scanOnce(supplied = null) {
+async function scanOnceCore(supplied = null) {
   const dependencies = supplied || {
     settings: SETTINGS,
     provider: getProvider(),
@@ -599,6 +764,7 @@ async function scanOnce(supplied = null) {
     previewPonsRange,
     verifyPonsDeployment,
     analyze,
+    classifyCandidate: (event) => classifyAuxiliaryCandidate(event, { provider: dependencies.provider }),
     consoleAlert: async (report) => {
       console.log(formatAlert(report).replace(/<[^>]+>/g, ""));
     },
@@ -682,6 +848,7 @@ async function scanOnce(supplied = null) {
       minScore: settings.minScore,
       now: dependencies.now || Date.now,
       analyze: dependencies.analyze,
+      classifyCandidate: dependencies.classifyCandidate,
       consoleAlert: dependencies.consoleAlert,
       log: dependencies.log,
     });
@@ -698,6 +865,19 @@ async function scanOnce(supplied = null) {
     ].filter(Boolean).join("; "));
   }
   return [...pons, ...reports];
+}
+
+async function scanOnce(supplied = null) {
+  const timeoutMs = supplied?.timeoutMs ?? 120_000;
+  let timer;
+  const timeout = new Promise((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(`scan timed out after ${timeoutMs}ms`)), timeoutMs);
+  });
+  try {
+    return await Promise.race([scanOnceCore(supplied), timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function checkOne(token, supplied = null) {

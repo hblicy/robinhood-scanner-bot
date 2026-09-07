@@ -59,8 +59,8 @@ function unknownReport(token, errors = []) {
   };
 }
 
-async function inspect(token, deps, pending) {
-  const errors = [];
+async function inspect(token, deps, pending, progress) {
+  const errors = progress.errors;
   const source = async (name, fn) => {
     pending.add(name);
     try {
@@ -85,17 +85,24 @@ async function inspect(token, deps, pending) {
     return unknownReport(token, errors);
   }
   if (classification.identity !== "pons-v2") {
-    return {
+    return Object.assign(progress, {
       ...unknownReport(token, errors),
       identity: "not_pons",
       protocolPhase: "not_applicable",
       hookStatus: "not_applicable",
       marketReady: "not_applicable",
       reasons: ["Factory exists=false"],
-    };
+    });
   }
 
   const record = factory.value;
+  Object.assign(progress, {
+    identity: classification.identity,
+    protocolPhase: phaseLabel(record),
+    hookStatus: record.phase < 2 ? "not_applicable" : "unknown",
+    marketReady: record.phase < 2 ? false : "unknown",
+    record,
+  });
   const now = deps.now();
   const curvePromise = source("curve", async () => {
     const head = await deps.getBlockNumber(deps.provider);
@@ -186,7 +193,7 @@ async function inspect(token, deps, pending) {
   if (lineA.killReason) reasons.unshift(lineA.killReason);
   for (const reason of lineA.reasons || []) if (!reasons.includes(reason)) reasons.push(reason);
 
-  return {
+  return Object.assign(progress, {
     token,
     identity: classification.identity,
     protocolPhase: phaseLabel(record),
@@ -201,24 +208,37 @@ async function inspect(token, deps, pending) {
     errors,
     unfinishedSources: [],
     timedOut: false,
-  };
+  });
 }
 
 export async function inspectToken(token, supplied = {}, { timeoutMs = 90_000 } = {}) {
   const address = getAddress(token);
   const deps = { ...defaultDependencies(), ...supplied };
+  const destroyProviderOnTimeout = supplied.destroyProviderOnTimeout ?? !Object.hasOwn(supplied, "provider");
   const pending = new Set();
+  const progress = unknownReport(address);
   let timer;
   const timeout = new Promise((resolve) => {
-    timer = setTimeout(() => resolve({
-      ...unknownReport(address),
-      timedOut: true,
-      unfinishedSources: [...pending],
-      reasons: ["global inspection timeout"],
-    }), timeoutMs);
+    timer = setTimeout(() => {
+      let cleanupError = null;
+      if (destroyProviderOnTimeout && typeof deps.provider?.destroy === "function") {
+        try {
+          deps.provider.destroy();
+        } catch (cause) {
+          cleanupError = { source: "provider_cleanup", message: safeErrorMessage(cause) };
+        }
+      }
+      resolve({
+        ...progress,
+        errors: cleanupError ? [...progress.errors, cleanupError] : [...progress.errors],
+        timedOut: true,
+        unfinishedSources: [...pending],
+        reasons: ["global inspection timeout"],
+      });
+    }, timeoutMs);
   });
   try {
-    return await Promise.race([inspect(address, deps, pending), timeout]);
+    return await Promise.race([inspect(address, deps, pending, progress), timeout]);
   } finally {
     clearTimeout(timer);
   }

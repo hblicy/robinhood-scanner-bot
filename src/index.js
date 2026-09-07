@@ -18,8 +18,11 @@ export async function main() {
 
 const isMain = Boolean(process.argv[1]) && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 if (isMain) {
-  main().catch((error) => {
-    console.error(safeErrorMessage(error));
-    process.exitCode = 1;
-  });
+  main().then(
+    () => process.exit(0),
+    (error) => {
+      console.error(safeErrorMessage(error));
+      process.exit(1);
+    }
+  );
 }

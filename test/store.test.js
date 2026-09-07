@@ -355,6 +355,37 @@ describe("createStore", () => {
     assert.equal(state.pendingChecks[`${EVENT_ID}:holders`].completedAt, 1200);
   });
 
+  it("atomically applies a pending-check result and its outbox notification", () => {
+    const store = openStore(tempDir());
+    const checkId = `${EVENT_ID}:curve_flow`;
+    store.commitPonsRange({
+      toBlock: 120,
+      transitions: [{
+        eventId: EVENT_ID,
+        token: TOKEN,
+        nextToken: tokenState(),
+        checks: [{ id: checkId, type: "curve_flow", dueAt: 1000 }],
+      }],
+    });
+    const notification = {
+      id: `${checkId}:hard_kill`,
+      eventId: EVENT_ID,
+      transitionType: "hard_kill",
+      token: TOKEN,
+      text: "killed",
+    };
+    store.applyCheckResult(checkId, {
+      token: TOKEN,
+      nextToken: { ...store.snapshot().tokens[TOKEN.toLowerCase()], monitorState: "killed" },
+      notification,
+      completedAt: 1100,
+    });
+    const state = store.snapshot();
+    assert.equal(state.pendingChecks[checkId].status, "completed");
+    assert.equal(state.tokens[TOKEN.toLowerCase()].monitorState, "killed");
+    assert.equal(state.outbox[notification.id].status, "pending");
+  });
+
   it("atomically updates a reconciled token and its notification", () => {
     const store = openStore(tempDir());
     store.commitTokenUpdate({
@@ -372,5 +403,22 @@ describe("createStore", () => {
     store.setHeat({ decision: "打", admissionCap: 3, calculatedAt: 1000 });
     assert.deepEqual(store.getHeat(), { decision: "打", admissionCap: 3, calculatedAt: 1000 });
     assert.equal(store.getPonsCursor(), null);
+  });
+
+  it("atomically persists heat with an optional outbox notification", () => {
+    const store = openStore(tempDir());
+    store.commitHeat({
+      heat: { decision: "不打", admissionCap: 1, calculatedAt: 1000 },
+      notification: {
+        id: "heat:0:no",
+        transitionType: "heat_change",
+        token: "market",
+        text: "heat changed",
+      },
+    });
+    const state = store.snapshot();
+    assert.equal(state.heat.decision, "不打");
+    assert.equal(state.outbox["heat:0:no"].status, "pending");
+    assert.equal(state.cursors.ponsV2, null);
   });
 });

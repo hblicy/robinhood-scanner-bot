@@ -7,10 +7,12 @@ import { ZeroAddress, getAddress } from "ethers";
 import { createStore } from "../src/store.js";
 import {
   classifyAuxiliaryCandidate,
+  createInspectionCheckHandlers,
   previewPonsRange,
   reconcilePonsWatchlist,
   runPendingChecks,
   runPonsWatchIteration,
+  refreshMarketHeat,
   watchPonsRange,
 } from "../src/scanner.js";
 import { ADDR } from "../src/config.js";
@@ -134,6 +136,52 @@ test("third-party check failures do not roll back the Pons cursor", async () => 
   assert.match(state.pendingChecks[`${EVENT_ID}:curve_flow`].lastError, /Gecko unavailable/);
 });
 
+test("inspection pending checks atomically update risk state and enqueue a transition", async () => {
+  const store = tempStore();
+  await watchPonsRange(dependencies(store));
+  const handlers = createInspectionCheckHandlers({
+    provider: {},
+    store,
+    now: () => 20_000,
+    inspect: async () => ({
+      token: TOKEN,
+      identity: "pons-v2",
+      protocolPhase: "not_graduated",
+      monitorState: "killed",
+      marketReady: false,
+      riskDataStatus: "known",
+      reasons: ["cannot-sell"],
+      curve: { status: "sufficient", tradeCount: 5, uniqueTraders: 3, bidirectional: false },
+      timedOut: false,
+      errors: [],
+    }),
+  });
+  const result = await runPendingChecks({ store, handlers, now: () => 20_000, limit: 1 });
+  const state = store.snapshot();
+  assert.equal(result.completed, 1);
+  assert.equal(state.tokens[TOKEN.toLowerCase()].monitorState, "killed");
+  assert.equal(state.tokens[TOKEN.toLowerCase()].killReason, "cannot-sell");
+  assert.equal(state.pendingChecks[`${EVENT_ID}:curve_flow`].status, "completed");
+  assert.ok(state.outbox[`${EVENT_ID}:curve_flow:hard_kill`]);
+});
+
+test("timed-out inspections remain retryable without changing token state", async () => {
+  const store = tempStore();
+  await watchPonsRange(dependencies(store));
+  const before = store.snapshot().tokens[TOKEN.toLowerCase()];
+  const handlers = createInspectionCheckHandlers({
+    provider: {},
+    store,
+    now: () => 20_000,
+    inspect: async () => ({ timedOut: true, unfinishedSources: ["holders"] }),
+  });
+  const result = await runPendingChecks({ store, handlers, now: () => 20_000, limit: 1 });
+  const state = store.snapshot();
+  assert.equal(result.retried, 1);
+  assert.deepEqual(state.tokens[TOKEN.toLowerCase()], before);
+  assert.match(state.pendingChecks[`${EVENT_ID}:curve_flow`].lastError, /holders/);
+});
+
 test("required factory identity read failure prevents range commit", async () => {
   const store = tempStore();
   await assert.rejects(() => watchPonsRange(dependencies(store, {
@@ -242,4 +290,45 @@ test("LONG classification uses quote addresses and ignores display symbols", asy
     readLaunch: async () => ({ ...launchRecord(), exists: false }),
   });
   assert.equal(result.pad, "uniswap-native");
+});
+
+test("market heat is persisted and only enqueues a notification when its decision changes", async () => {
+  const store = tempStore();
+  const base = {
+    provider: {},
+    store,
+    now: () => 3_600_000,
+    getBlockNumber: async () => 100,
+    findFirstBlockAtOrAfter: async () => 50,
+    scanRange: async () => [
+      { kind: "token_launched" },
+      { kind: "token_launched" },
+    ],
+    getTopPools: async () => [{ category: "memecoin" }],
+    settings: { highHeatLaunches24h: 20_000, watchlistCapNormal: 3, watchlistCapHighHeat: 1 },
+  };
+  const first = await refreshMarketHeat(base);
+  const second = await refreshMarketHeat(base);
+  const state = store.snapshot();
+  assert.equal(first.decision, "打");
+  assert.equal(second.decision, "打");
+  assert.equal(state.heat.admissionCap, 3);
+  assert.equal(Object.values(state.outbox).filter((entry) => entry.transitionType === "heat_change").length, 1);
+});
+
+test("market heat becomes conservatively no-trade when a required source fails", async () => {
+  const store = tempStore();
+  const heat = await refreshMarketHeat({
+    provider: {},
+    store,
+    now: () => 3_600_000,
+    getBlockNumber: async () => 100,
+    findFirstBlockAtOrAfter: async () => 50,
+    scanRange: async () => { throw new Error("Factory rate limited"); },
+    getTopPools: async () => [{ category: "memecoin" }],
+    settings: { highHeatLaunches24h: 20_000, watchlistCapNormal: 3, watchlistCapHighHeat: 1 },
+  });
+  assert.equal(heat.decision, "不打");
+  assert.equal(heat.stale, true);
+  assert.match(heat.errors[0].message, /Factory rate limited/);
 });

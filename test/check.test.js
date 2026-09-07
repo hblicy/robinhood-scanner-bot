@@ -68,9 +68,15 @@ describe("read-only token inspection", () => {
 
   it("returns an explicit unknown report with unfinished sources on global timeout", async () => {
     const never = new Promise(() => {});
-    const report = await inspectToken(TOKEN, dependencies({ readLaunch: async () => never }), { timeoutMs: 5 });
+    let destroyed = 0;
+    const report = await inspectToken(TOKEN, dependencies({
+      provider: { destroy: () => { destroyed += 1; } },
+      destroyProviderOnTimeout: true,
+      readLaunch: async () => never,
+    }), { timeoutMs: 5 });
     const text = formatInspectionReport(report);
     assert.equal(report.timedOut, true);
+    assert.equal(destroyed, 1);
     assert.equal(report.identity, "unknown");
     assert.ok(report.unfinishedSources.includes("factory"));
     assert.match(text, /全局超时/);
@@ -85,5 +91,15 @@ describe("read-only token inspection", () => {
     assert.equal(report.riskDataStatus, "unknown");
     assert.ok(report.errors.some((entry) => entry.source === "token_metadata"));
     assert.match(formatInspectionReport(report), /blockscout rate limited/);
+  });
+
+  it("preserves completed Factory identity when a downstream source times out", async () => {
+    const report = await inspectToken(TOKEN, dependencies({
+      loadCurveTrades: async () => new Promise(() => {}),
+    }), { timeoutMs: 5 });
+    assert.equal(report.timedOut, true);
+    assert.equal(report.identity, "pons-v2");
+    assert.equal(report.protocolPhase, "not_graduated");
+    assert.ok(report.unfinishedSources.includes("curve"));
   });
 });

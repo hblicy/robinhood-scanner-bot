@@ -264,6 +264,28 @@ export function createStore({
       });
     },
 
+    commitHeat({ heat, notification = null }) {
+      if (!heat || typeof heat !== "object" || Array.isArray(heat)) {
+        throw new Error("heat snapshot must contain an object");
+      }
+      return commit((draft) => {
+        draft.heat = structuredClone(heat);
+        if (notification?.id && !draft.outbox[notification.id]) {
+          draft.outbox[notification.id] = {
+            ...structuredClone(notification),
+            eventId: notification.eventId ?? null,
+            status: "pending",
+            attempts: 0,
+            nextAttemptAt: now(),
+            createdAt: now(),
+            deliveredAt: null,
+            lastError: null,
+          };
+        }
+        return draft.heat;
+      });
+    },
+
     commitPonsRange({ toBlock, transitions }) {
       if (!Number.isInteger(toBlock) || toBlock < 0) {
         throw new Error("Pons V2 cursor must be a non-negative integer");
@@ -386,7 +408,7 @@ export function createStore({
       });
     },
 
-    applyCheckResult(id, { token, nextToken, completedAt = now() }) {
+    applyCheckResult(id, { token, nextToken, notification = null, completedAt = now() }) {
       const key = String(token || "").toLowerCase();
       if (!key || !nextToken || typeof nextToken !== "object") {
         throw new Error(`pending check ${id} requires token state`);
@@ -401,6 +423,18 @@ export function createStore({
         entry.status = "completed";
         entry.completedAt = completedAt;
         entry.lastError = null;
+        if (notification?.id && !draft.outbox[notification.id]) {
+          draft.outbox[notification.id] = {
+            ...structuredClone(notification),
+            eventId: notification.eventId ?? entry.eventId ?? null,
+            status: "pending",
+            attempts: 0,
+            nextAttemptAt: now(),
+            createdAt: now(),
+            deliveredAt: null,
+            lastError: null,
+          };
+        }
         return entry;
       });
     },

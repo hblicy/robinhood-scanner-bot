@@ -76,6 +76,7 @@ const LIFECYCLE_LABELS = {
   green: "🟢 三线通过",
   swept: "⏳ Curve 已 Sweep",
   phase_changed: "🔄 链上阶段变化",
+  heat_change: "🌡️ 市场温度变化",
 };
 
 export function formatLifecycleNotification(notification) {
