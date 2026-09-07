@@ -43,6 +43,10 @@ function sortLogs(logs) {
   return [...logs].sort((a, b) => Number(a.blockNumber) - Number(b.blockNumber) || Number(a.index ?? a.logIndex ?? 0) - Number(b.index ?? b.logIndex ?? 0));
 }
 
+function sortReceiptLogs(logs) {
+  return [...logs].sort((a, b) => Number(a.index ?? a.logIndex ?? -1) - Number(b.index ?? b.logIndex ?? -1));
+}
+
 function parseTransfer(log) {
   const parsed = transferInterface.parseLog(log);
   return { from: parsed.args.from, to: parsed.args.to, value: BigInt(parsed.args.value) };
@@ -68,18 +72,18 @@ function normalizedQuote(quote) {
   return sameAddress(quote, ADDR.ZERO) || sameAddress(quote, ADDR.NATIVE) ? ADDR.WETH : quote;
 }
 
-function decodeAddressResult(iface, functionName, data) {
+function decodeAddressResult(iface, functionName, data, address) {
   try {
     return getAddress(iface.decodeFunctionResult(functionName, data)[0]);
-  } catch {
-    return null;
+  } catch (cause) {
+    throw new Error(`failed to decode ${functionName} address result from ${address}`, { cause });
   }
 }
 
 async function readAddressFunction(provider, to, iface, functionName, args, head, retry) {
   const data = iface.encodeFunctionData(functionName, args);
   const result = await retry(() => provider.call({ to, data, blockTag: head }));
-  return decodeAddressResult(iface, functionName, result);
+  return decodeAddressResult(iface, functionName, result, to);
 }
 
 async function bindV2Pool(context, provider, head, retry) {
@@ -118,6 +122,44 @@ async function bindV2Pool(context, provider, head, retry) {
 
 function poolBindingMismatch() {
   return sellabilityResult(SELLABILITY.UNKNOWN, "pool-binding-mismatch");
+}
+
+function hasMeaningfulSellSegment(receipt, binding, meaningfulThreshold) {
+  let sellerTokenIn = 0n;
+  let quoteNetOutflow = 0n;
+
+  for (const receiptLog of sortReceiptLogs(receipt.logs ?? [])) {
+    const isTransfer = receiptLog.topics?.[0]?.toLowerCase() === transferEvent.topicHash.toLowerCase();
+    if (isTransfer && sameAddress(receiptLog.address, binding.token)) {
+      const tokenTransfer = parseTransfer(receiptLog);
+      if (sameAddress(tokenTransfer.from, receipt.from) && sameAddress(tokenTransfer.to, binding.pool)) {
+        sellerTokenIn += tokenTransfer.value;
+      }
+    }
+    if (isTransfer && sameAddress(receiptLog.address, binding.quote)) {
+      const quoteTransfer = parseTransfer(receiptLog);
+      if (!sameAddress(quoteTransfer.from, binding.pool) || !sameAddress(quoteTransfer.to, binding.pool)) {
+        if (sameAddress(quoteTransfer.from, binding.pool)) quoteNetOutflow += quoteTransfer.value;
+        if (sameAddress(quoteTransfer.to, binding.pool)) quoteNetOutflow -= quoteTransfer.value;
+      }
+    }
+
+    if (!sameAddress(receiptLog.address, binding.pool) ||
+      receiptLog.topics?.[0]?.toLowerCase() !== swapEvent.topicHash.toLowerCase()) continue;
+    const swap = pairInterface.parseLog(receiptLog);
+    const swapTokenIn = BigInt(binding.tokenIsToken0 ? swap.args.amount0In : swap.args.amount1In);
+    const quoteOut = BigInt(binding.tokenIsToken0 ? swap.args.amount1Out : swap.args.amount0Out);
+    if (sellerTokenIn >= meaningfulThreshold &&
+      swapTokenIn >= meaningfulThreshold &&
+      quoteOut > 0n &&
+      sellerTokenIn >= swapTokenIn &&
+      quoteNetOutflow > 0n) {
+      return true;
+    }
+    sellerTokenIn = 0n;
+    quoteNetOutflow = 0n;
+  }
+  return false;
 }
 
 export function decodeTransferCall(data) {
@@ -330,7 +372,8 @@ export async function inspectSellability(context, dependencies = {}) {
         if (sameAddress(transfer.to, wallet)) intervalNet += transfer.value;
         if (sameAddress(transfer.from, wallet)) intervalNet -= transfer.value;
       }
-      const expectedBalance = intervalNet;
+      const openingBalance = start === 0 ? 0n : await readBalance(provider, binding.token, wallet, start - 1, retry);
+      const expectedBalance = openingBalance + intervalNet;
       const reportedBalance = await readBalance(provider, context.token, wallet, head, retry);
       balances.set(wallet.toLowerCase(), reportedBalance);
       if (evaluateLedgerBalance({ ledgerBalance: expectedBalance, reportedBalance, oneToken }).blocked) {
@@ -373,35 +416,17 @@ export async function inspectSellability(context, dependencies = {}) {
     const receiptHashes = new Set();
     let receiptReads = 0;
     for (const { log, transfer } of [...logs].reverse()) {
-      if (!sameAddress(transfer.to, binding.pool) || transfer.value <= 0n || excludedAddress(transfer.from, binding.pool)) continue;
+      if (!sameAddress(transfer.to, binding.pool) || transfer.value < meaningfulThreshold) continue;
       const hash = log.transactionHash;
       if (!hash || receiptHashes.has(hash)) continue;
       receiptHashes.add(hash);
+      const seller = transfer.from.toLowerCase();
+      if (sellers.has(seller) || excludedAddress(transfer.from, binding.pool) || !(await isEoa(transfer.from))) continue;
       if (receiptReads >= MAX_RECEIPTS) break;
       receiptReads++;
       const receipt = await retry(() => provider.getTransactionReceipt(hash));
       if (Number(receipt?.status) !== 1 || !sameAddress(receipt?.from, transfer.from)) continue;
-      const seller = receipt.from.toLowerCase();
-      if (sellers.has(seller) || excludedAddress(receipt.from, binding.pool) || !(await isEoa(receipt.from))) continue;
-      let quoteNetOutflow = 0n;
-      let hasMeaningfulSwap = false;
-      for (const receiptLog of receipt.logs ?? []) {
-        if (sameAddress(receiptLog.address, binding.quote) &&
-          receiptLog.topics?.[0]?.toLowerCase() === transferEvent.topicHash.toLowerCase()) {
-          const quoteTransfer = parseTransfer(receiptLog);
-          if (!sameAddress(quoteTransfer.from, binding.pool) || !sameAddress(quoteTransfer.to, binding.pool)) {
-            if (sameAddress(quoteTransfer.from, binding.pool)) quoteNetOutflow += quoteTransfer.value;
-            if (sameAddress(quoteTransfer.to, binding.pool)) quoteNetOutflow -= quoteTransfer.value;
-          }
-        }
-        if (!sameAddress(receiptLog.address, binding.pool) ||
-          receiptLog.topics?.[0]?.toLowerCase() !== swapEvent.topicHash.toLowerCase()) continue;
-        const swap = pairInterface.parseLog(receiptLog);
-        const tokenAmountIn = BigInt(binding.tokenIsToken0 ? swap.args.amount0In : swap.args.amount1In);
-        const quoteAmountOut = BigInt(binding.tokenIsToken0 ? swap.args.amount1Out : swap.args.amount0Out);
-        if (tokenAmountIn >= meaningfulThreshold && quoteAmountOut > 0n) hasMeaningfulSwap = true;
-      }
-      if (hasMeaningfulSwap && quoteNetOutflow > 0n) sellers.add(seller);
+      if (hasMeaningfulSellSegment(receipt, binding, meaningfulThreshold)) sellers.add(seller);
       if (sellers.size >= 3 || receiptReads === MAX_RECEIPTS) break;
     }
     return finalizeSellability({ buyerSamples, ladderSamples, sellers });

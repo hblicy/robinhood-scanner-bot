@@ -30,6 +30,10 @@ const iface = new Interface(ERC20_ABI);
 const pairIface = new Interface(PAIR_V2_ABI);
 const factoryIface = new Interface(V2_FACTORY_ABI);
 
+function sameAddressForTest(a, b) {
+  return typeof a === "string" && typeof b === "string" && a.toLowerCase() === b.toLowerCase();
+}
+
 function transferLog({ token = TOKEN, from, to, value, blockNumber = 10, index = 0, transactionHash = "0x01" }) {
   const encoded = iface.encodeEventLog(iface.getEvent("Transfer"), [from, to, value]);
   return { address: token, ...encoded, blockNumber, index, transactionHash };
@@ -43,6 +47,8 @@ function swapLog({
   amount1In = 0n,
   amount0Out = 0n,
   amount1Out = 0n,
+  blockNumber = 10,
+  index = 0,
   transactionHash = "0x01",
 } = {}) {
   const encoded = pairIface.encodeEventLog(pairIface.getEvent("Swap"), [
@@ -53,7 +59,7 @@ function swapLog({
     amount1Out,
     to,
   ]);
-  return { address: pool, ...encoded, transactionHash };
+  return { address: pool, ...encoded, blockNumber, index, transactionHash };
 }
 
 function receipt({ status = 1, from = null, logs = [] } = {}) {
@@ -143,6 +149,7 @@ function threeSellerEvidence({
         amount1In: tokenIsToken0 ? 0n : amountIn,
         amount0Out: tokenIsToken0 ? 0n : quoteOut,
         amount1Out: tokenIsToken0 ? quoteOut : 0n,
+        index: 3,
         transactionHash: hash,
       })
       : swapLog({
@@ -151,14 +158,16 @@ function threeSellerEvidence({
         amount1In: tokenIsToken0 ? quoteOut : 0n,
         amount0Out: tokenIsToken0 ? amountIn : 0n,
         amount1Out: tokenIsToken0 ? 0n : amountIn,
+        index: 3,
         transactionHash: hash,
       });
     return [hash, receipt({
       status: receiptStatus,
       from: receiptFrom(seller, index),
       logs: [
+        transferLog({ token: TOKEN, from: seller, to: POOL, value: transferValue, index: 1, transactionHash: hash }),
+        ...(includeQuote ? [transferLog({ token: quoteToken, from: POOL, to: ADDR.V2_ROUTER, value: quoteOut, index: 2, transactionHash: hash })] : []),
         ...(includeSwap ? [swap] : []),
-        ...(includeQuote ? [transferLog({ token: quoteToken, from: POOL, to: ADDR.V2_ROUTER, value: quoteOut, transactionHash: hash })] : []),
       ],
     })];
   }));
@@ -515,6 +524,22 @@ describe("V2 sellability evidence", () => {
     }
   });
 
+  it("treats malformed factory and pair address results as unavailable evidence", async () => {
+    for (const target of ["getPair", "token0", "token1"]) {
+      const provider = fakeProvider();
+      const originalCall = provider.call;
+      provider.call = async (request) => {
+        if (target === "getPair" && sameAddressForTest(request.to, ADDR.V2_FACTORY)) return "0x";
+        if (sameAddressForTest(request.to, POOL) && request.data === pairIface.encodeFunctionData(target, [])) return "0x";
+        return originalCall(request);
+      };
+      const result = await inspectSellability(context(), { provider });
+      assert.equal(result.status, "unknown", target);
+      assert.equal(result.reason, "evidence-unavailable", target);
+      assert.match(result.details.join(" "), new RegExp(`${target}.*${target === "getPair" ? ADDR.V2_FACTORY : POOL}`, "i"), target);
+    }
+  });
+
   it("converts a pool binding RPC failure into unavailable evidence", async () => {
     const result = await inspectSellability(context(), {
       provider: fakeProvider({ errors: { factory: new Error("factory rpc failed") } }),
@@ -619,13 +644,45 @@ describe("V2 sellability evidence", () => {
     assert.deepEqual(amounts, [1n, 1n, 1n, 1n]);
   });
 
-  it("does not read buyer balances from a block before the analysis head", async () => {
+  it("includes the opening balance when checking the buyer ledger", async () => {
     const logs = [transferLog({ from: POOL, to: BUYERS[0], value: 100n, blockNumber: 5 })];
-    const provider = fakeProvider({ logs, balances: new Map([[BUYERS[0].toLowerCase(), 100n]]) });
-    await inspectSellability(context({ analysisBlock: 77, blockNumber: 5 }), { provider });
-    const balanceCalls = provider.calls.filter((request) => request.data.startsWith(iface.getFunction("balanceOf").selector));
-    assert.ok(balanceCalls.length > 0);
-    assert.ok(balanceCalls.every(({ blockTag }) => blockTag === 77));
+    const makeProvider = (headBalance) => {
+      const provider = fakeProvider({ logs, balances: new Map([[BUYERS[0].toLowerCase(), headBalance]]) });
+      const originalCall = provider.call;
+      provider.call = async (request) => {
+        if (sameAddressForTest(request.to, TOKEN) &&
+          request.data.startsWith(iface.getFunction("balanceOf").selector) &&
+          iface.parseTransaction({ data: request.data }).args[0].toLowerCase() === BUYERS[0].toLowerCase() &&
+          request.blockTag === 4) {
+          return iface.encodeFunctionResult("balanceOf", [100n]);
+        }
+        return originalCall(request);
+      };
+      return provider;
+    };
+    const blocked = await inspectSellability(context({ analysisBlock: 77, blockNumber: 5 }), { provider: makeProvider(150n) });
+    assert.equal(blocked.status, "blocked");
+    assert.equal(blocked.reason, "hidden-balance-mutation");
+    assert.match(blocked.details.join(" "), /expectedBalance=200/);
+
+    const normal = await inspectSellability(context({ analysisBlock: 77, blockNumber: 5 }), { provider: makeProvider(200n) });
+    assert.notEqual(normal.reason, "hidden-balance-mutation");
+  });
+
+  it("returns unavailable when the opening balance read fails", async () => {
+    const provider = fakeProvider({
+      logs: [transferLog({ from: POOL, to: BUYERS[0], value: 100n, blockNumber: 5 })],
+      balances: new Map([[BUYERS[0].toLowerCase(), 200n]]),
+    });
+    const originalCall = provider.call;
+    provider.call = async (request) => {
+      if (sameAddressForTest(request.to, TOKEN) && request.blockTag === 4) throw new Error("historical state unavailable");
+      return originalCall(request);
+    };
+    const result = await inspectSellability(context({ analysisBlock: 77, blockNumber: 5 }), { provider });
+    assert.equal(result.status, "unknown");
+    assert.equal(result.reason, "evidence-unavailable");
+    assert.match(result.details.join(" "), /historical state unavailable/);
   });
 
   it("requires quote evidence to have net pool outflow", async () => {
@@ -637,14 +694,18 @@ describe("V2 sellability evidence", () => {
       const hash = `0xf${i}`;
       const router = ADDR.V2_ROUTER;
       const logs = i === 0
-        ? [transferLog({ token: QUOTE, from: POOL, to: POOL, value: 5n, transactionHash: hash })]
+        ? [transferLog({ token: QUOTE, from: POOL, to: POOL, value: 5n, index: 2, transactionHash: hash })]
         : [
-          transferLog({ token: QUOTE, from: POOL, to: router, value: 5n, transactionHash: hash }),
-          transferLog({ token: QUOTE, from: router, to: POOL, value: i === 1 ? 5n : 6n, transactionHash: hash }),
+          transferLog({ token: QUOTE, from: POOL, to: router, value: 5n, index: 2, transactionHash: hash }),
+          transferLog({ token: QUOTE, from: router, to: POOL, value: i === 1 ? 5n : 6n, index: 3, transactionHash: hash }),
         ];
       return [hash, receipt({
         from: seller,
-        logs: [swapLog({ amount0In: 2n, amount1Out: 5n, transactionHash: hash }), ...logs],
+        logs: [
+          transferLog({ token: TOKEN, from: seller, to: POOL, value: 2n, index: 1, transactionHash: hash }),
+          ...logs,
+          swapLog({ amount0In: 2n, amount1Out: 5n, index: 4, transactionHash: hash }),
+        ],
       })];
     }));
     const provider = fakeProvider({ logs: sales, balances: new Map(BUYERS.slice(0, 3).map((buyer) => [buyer.toLowerCase(), 98n])), receipts });
@@ -717,6 +778,77 @@ describe("V2 sellability evidence", () => {
     const result = await inspectSellability(context(), { provider });
     assert.equal(result.status, "unknown");
     assert.equal(result.reason, "insufficient-meaningful-sells");
+  });
+
+  it("does not let a dust seller borrow another account's token input", async () => {
+    const evidence = threeSellerEvidence({ transferValue: 1n, amountIn: 100n, poolBalance: 20_000n });
+    for (const receiptValue of evidence.receipts.values()) {
+      receiptValue.logs.unshift(transferLog({
+        token: TOKEN,
+        from: BUYERS[5],
+        to: POOL,
+        value: 100n,
+        index: 0,
+      }));
+    }
+    const provider = fakeProvider(evidence);
+    let receiptReads = 0;
+    const originalReceipt = provider.getTransactionReceipt;
+    provider.getTransactionReceipt = async (hash) => { receiptReads++; return originalReceipt(hash); };
+    const result = await inspectSellability(context(), { provider });
+    assert.equal(result.status, "unknown");
+    assert.equal(receiptReads, 0);
+  });
+
+  it("does not associate seller input that occurs after the Swap", async () => {
+    const evidence = threeSellerEvidence();
+    let index = 0;
+    for (const [hash, receiptValue] of evidence.receipts) {
+      const seller = BUYERS[index++];
+      receiptValue.logs = [
+        transferLog({ token: QUOTE, from: POOL, to: ADDR.V2_ROUTER, value: 5n, index: 0, transactionHash: hash }),
+        swapLog({ amount0In: 2n, amount1Out: 5n, index: 1, transactionHash: hash }),
+        transferLog({ token: TOKEN, from: seller, to: POOL, value: 2n, index: 2, transactionHash: hash }),
+      ];
+    }
+    const result = await inspectSellability(context(), { provider: fakeProvider(evidence) });
+    assert.equal(result.status, "unknown");
+    assert.equal(result.reason, "insufficient-meaningful-sells");
+  });
+
+  it("does not carry seller input across a previous exact-pool Swap segment", async () => {
+    const evidence = threeSellerEvidence();
+    let index = 0;
+    for (const [hash, receiptValue] of evidence.receipts) {
+      const seller = BUYERS[index++];
+      receiptValue.logs = [
+        transferLog({ token: TOKEN, from: seller, to: POOL, value: 2n, index: 1, transactionHash: hash }),
+        swapLog({ amount1In: 5n, amount0Out: 2n, index: 2, transactionHash: hash }),
+        transferLog({ token: QUOTE, from: POOL, to: ADDR.V2_ROUTER, value: 5n, index: 3, transactionHash: hash }),
+        swapLog({ amount0In: 2n, amount1Out: 5n, index: 4, transactionHash: hash }),
+      ];
+    }
+    const result = await inspectSellability(context(), { provider: fakeProvider(evidence) });
+    assert.equal(result.status, "unknown");
+    assert.equal(result.reason, "insufficient-meaningful-sells");
+  });
+
+  it("does not let 30 newer dust Transfers exhaust the receipt budget", async () => {
+    const evidence = threeSellerEvidence({ poolBalance: 20_000n });
+    evidence.logs.push(...Array.from({ length: 30 }, (_, index) => transferLog({
+      from: `0x${(0x300000 + index).toString(16).padStart(40, "0")}`,
+      to: POOL,
+      value: 1n,
+      blockNumber: 30 + index,
+      transactionHash: `0xdust${index}`,
+    })));
+    const provider = fakeProvider(evidence);
+    let receiptReads = 0;
+    const originalReceipt = provider.getTransactionReceipt;
+    provider.getTransactionReceipt = async (hash) => { receiptReads++; return originalReceipt(hash); };
+    const result = await inspectSellability(context(), { provider });
+    assert.equal(result.status, "confirmed");
+    assert.equal(receiptReads, 3);
   });
 
   it("does not count a receipt with missing or mismatched from", async () => {
