@@ -157,6 +157,24 @@ describe("analyze data completeness", () => {
     assert.equal(report.facts.sellabilityMeaningfulSellers, 0);
   });
 
+  it("does not reward a legacy safe result when sellability evidence is missing", async () => {
+    const report = await analyze(event, dependencies({
+      honeypotCheck: async () => ({
+        honeypot: false,
+        complete: true,
+        sellOk: true,
+        reason: "legacy safe result",
+        buyTaxBps: 0,
+        sellTaxBps: 0,
+      }),
+    }));
+    const honeypotCheck = report.checks.find((check) => check.key === "honeypot");
+    assert.equal(report.sellability.status, "unknown");
+    assert.equal(report.facts.honeypot, null);
+    assert.equal(honeypotCheck.pts, 0);
+    assert.doesNotMatch(honeypotCheck.detail, /买税/);
+  });
+
   it("skips a token when sellability is blocked", async () => {
     const report = await analyze(event, dependencies({
       honeypotCheck: async () => ({

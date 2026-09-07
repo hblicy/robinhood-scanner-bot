@@ -345,6 +345,11 @@ export async function analyze(event, overrides = {}) {
     SELLABILITY.UNKNOWN,
     hpRaw.reason || "evidence-unavailable"
   );
+  const sellabilityHoneypot = sellability.status === SELLABILITY.CONFIRMED
+    ? false
+    : sellability.status === SELLABILITY.BLOCKED
+      ? true
+      : null;
   const hp = { ...hpRaw, sellability };
 
   const mkt = event.market || {};
@@ -361,7 +366,7 @@ export async function analyze(event, overrides = {}) {
       deployerHistoryKnown &&
       lpBurnedPct !== null &&
       hp.complete === true &&
-      hp.honeypot === false
+      sellabilityHoneypot === false
   );
   const facts = {
     ageMinutes,
@@ -379,7 +384,7 @@ export async function analyze(event, overrides = {}) {
     holdersKnown,
     creatorKnown,
     creatorPct,
-    honeypot: hp.honeypot,
+    honeypot: sellabilityHoneypot,
     honeypotReason: hp.reason,
     buyTaxBps: hp.buyTaxBps,
     sellTaxBps: hp.sellTaxBps,
