@@ -4,6 +4,12 @@ export function candidateKey(event) {
     .join("|");
 }
 
+function normalizeSellabilityReason(reason) {
+  if (reason == null || reason === "") return "none";
+  if (typeof reason !== "string") return "evidence-unavailable";
+  return reason.length <= 64 && /^[a-z0-9-]+$/.test(reason) ? reason : "evidence-unavailable";
+}
+
 export async function handleCandidate(event, options, dependencies) {
   const ageReference = Number.isFinite(event.observedAt) ? event.observedAt : dependencies.now();
   const ageMinutes = event.createdAt
@@ -20,7 +26,7 @@ export async function handleCandidate(event, options, dependencies) {
   dependencies.log(`analyzing ${event.token} via ${event.source}/${event.venue}`);
   const report = await dependencies.analyze(event);
   const sellabilityStatus = report.sellability?.status || "unknown";
-  const sellabilityReason = report.sellability?.reason || "none";
+  const sellabilityReason = normalizeSellabilityReason(report.sellability?.reason);
   const shouldAlert =
     sellabilityStatus === "blocked" ||
     (sellabilityStatus === "confirmed" && (
