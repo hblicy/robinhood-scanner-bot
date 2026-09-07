@@ -20,6 +20,8 @@
 - 每次支持的 V2 分析只取得一次 `analysisBlock`。token code、Router 报价、Transfer 日志 `toBlock`、余额、transfer `eth_call`、Factory/Pair 读取和 EOA code 查询全部绑定该区块。
 - quote 的原生币/零地址表示先规范化为 WETH；Factory `getPair(token, quote)` 必须等于候选 pool，pool `token0/token1` 必须恰好是目标 token 与 quote，并据此固定 Swap 方向。
 - 成功解码后的 Factory/Pair 不匹配返回 `pool-binding-mismatch`；RPC、ABI 解码失败或创建起点晚于快照返回 `evidence-unavailable`。所有这些结论都是静默 `unknown`。
+- `honeypotCheck` 的最终顺序是 unsupported 前置返回、单次 head、精确池绑定、token bytecode hard failure、Router 买卖报价 hard failure，最后才读取历史 sellability。绑定结果传入 `inspectSellability` 复用，Factory/Pair 每次分析只绑定一次。
+- 池绑定 mismatch/unavailable 时不调用 bytecode、quote 或历史采集；明确的 `no-contract-code`、`buy-quote-unavailable`、`sell-quote-zero` 保持 `blocked`，不被历史 `unknown` 遮蔽。成功报价只是必要条件，不能把历史 `unknown` 升级为 `confirmed`。
 
 ### 账本、额度与真实卖出
 

@@ -23,6 +23,7 @@ import {
   normalizeSellabilityEvidence,
   sellabilityResult,
   SELLABILITY,
+  validateV2PoolBinding,
 } from "./sellability.js";
 
 const BUY_ETH = parseEther("0.001");
@@ -502,13 +503,14 @@ export async function honeypotCheck(
   const inspectBytecode = dependencies.bytecodeFlags || bytecodeFlags;
   const quoteRoundTrip = dependencies.quoteRoundTrip || simulateV2Quotes;
   const inspect = dependencies.inspectSellability || inspectSellability;
+  const validateBinding = dependencies.validateV2PoolBinding || validateV2PoolBinding;
   const analysisBlock = await readBlockNumber();
   if (!Number.isInteger(analysisBlock) || analysisBlock < 0) throw new Error("analysis block unavailable");
   const quoteValue = String(quote || "").toLowerCase();
   const quoteAddr = isQuote(quote) && quoteValue !== ADDR.NATIVE.toLowerCase() && quoteValue !== ADDR.ZERO.toLowerCase()
     ? quote
     : ADDR.WETH;
-  const inspectedSellability = await inspect({
+  const inspectionContext = {
     token,
     quote: quoteAddr,
     venue,
@@ -517,12 +519,35 @@ export async function honeypotCheck(
     pairCreatedAt,
     decimals,
     analysisBlock,
-  }, { provider });
-  const sellability = normalizeSellabilityEvidence(inspectedSellability, false);
+  };
+  const bindingEvidence = await validateBinding(inspectionContext, {
+    provider,
+    retry: dependencies.retry,
+  });
+  if (!bindingEvidence?.ok || !bindingEvidence.binding) {
+    const sellability = sellabilityResult(
+      SELLABILITY.UNKNOWN,
+      bindingEvidence?.reason || "evidence-unavailable",
+      { details: bindingEvidence?.details }
+    );
+    return normalizeHoneypotSellability({
+      honeypot: null,
+      complete: false,
+      reason: sellability.reason,
+      buyOk: null,
+      sellOk: null,
+      buyTaxBps: null,
+      sellTaxBps: null,
+      flags: null,
+      sellability,
+    }, sellability);
+  }
+
+  let sellability = sellabilityResult(SELLABILITY.UNKNOWN, "evidence-unavailable");
   const result = {
     honeypot: null,
     complete: false,
-    reason: sellability.reason || "",
+    reason: "",
     buyOk: null,
     sellOk: null,
     buyTaxBps: null,
@@ -530,10 +555,6 @@ export async function honeypotCheck(
     flags: null,
     sellability,
   };
-
-  if (sellability.status !== SELLABILITY.CONFIRMED) {
-    return normalizeHoneypotSellability(result, sellability);
-  }
 
   const readOptions = { provider, blockTag: analysisBlock };
   const flags = await inspectBytecode(token, readOptions);
@@ -559,6 +580,18 @@ export async function honeypotCheck(
   }
   if (sim.sellOk === false) {
     return blocked("sell-quote-zero", sim.reason || "无法报价卖出（蜜罐）");
+  }
+
+  const inspectedSellability = await inspect(inspectionContext, {
+    provider,
+    retry: dependencies.retry,
+    poolBinding: bindingEvidence.binding,
+  });
+  sellability = normalizeSellabilityEvidence(inspectedSellability, false);
+  result.sellability = sellability;
+  result.reason = sellability.reason || result.reason;
+  if (sellability.status !== SELLABILITY.CONFIRMED) {
+    return normalizeHoneypotSellability(result, sellability);
   }
 
   result.honeypot = false;

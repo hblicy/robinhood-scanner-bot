@@ -53,6 +53,8 @@ blocked    发现隐藏余额、额度限卖、明确 revert/false 或卖出报�
 
 读取任何 Transfer 证据前，必须在同一快照完成池身份绑定：原生币或零地址 quote 先规范化为 WETH；V2 Factory `getPair(token, quote)` 必须等于候选 pool；pool 的 `token0/token1` 必须恰好由目标 token 和规范化 quote 组成，并记录目标 token 的方向。成功解码后的地址不匹配返回 `unknown / pool-binding-mismatch`；RPC 或 ABI 解码失败返回 `unknown / evidence-unavailable`。
 
+最终执行顺序固定为：unsupported venue/pool 前置返回 → 取得一次 `analysisBlock` → 精确 V2 池绑定 → token 字节码 hard failure → Router 买入/卖出报价 hard failure → 历史 sellability 证据。池绑定结果传给历史检查复用，不重复读取 Factory/Pair。绑定 mismatch/unavailable 时不得调用字节码、报价或历史采集；`no-contract-code`、`buy-quote-unavailable`、`sell-quote-zero` 等明确失败必须得到 `blocked`，不能被后续历史证据不足的 `unknown` 遮蔽。反之，报价成功本身也不能把历史 `unknown` 升级为 `confirmed`。
+
 ## Transfer 账本一致性
 
 对普通候选从池创建区块扫描到分析时的安全区块，读取目标 token 的 Transfer 日志。区块起点优先使用发现事件自带的 `blockNumber`；Gecko 候选使用 DexScreener 的 `pairCreatedAt` 通过现有区块时间二分逻辑定位。起点无法确定时结论为 `unknown`。

@@ -13,6 +13,7 @@ import {
   normalizeSellabilityEvidence,
   resolveStartBlock,
   sellabilityResult,
+  validateV2PoolBinding,
 } from "../src/sellability.js";
 
 const TOKEN = "0x0000000000000000000000000000000000010011";
@@ -559,6 +560,23 @@ describe("V2 sellability evidence", () => {
       assert.equal(result.reason, "pool-binding-mismatch");
       assert.equal(provider.logRequests.length, 0);
     }
+  });
+
+  it("reuses a matching prevalidated pool binding without repeating factory or pair reads", async () => {
+    const provider = fakeProvider();
+    const bindingEvidence = await validateV2PoolBinding(context({ analysisBlock: 77 }), { provider });
+    assert.equal(bindingEvidence.ok, true);
+    assert.equal(provider.calls.length, 3);
+
+    const result = await inspectSellability(context({ analysisBlock: 77 }), {
+      provider,
+      poolBinding: bindingEvidence.binding,
+    });
+    assert.equal(result.status, "unknown");
+    const bindingTargets = provider.calls.filter(({ to }) =>
+      sameAddressForTest(to, ADDR.V2_FACTORY) || sameAddressForTest(to, POOL)
+    );
+    assert.equal(bindingTargets.length, 3);
   });
 
   it("treats malformed factory and pair address results as unavailable evidence", async () => {

@@ -120,8 +120,36 @@ async function bindV2Pool(context, provider, head, retry) {
   return { token, quote, pool, tokenIsToken0 };
 }
 
-function poolBindingMismatch() {
-  return sellabilityResult(SELLABILITY.UNKNOWN, "pool-binding-mismatch");
+function matchesBindingContext(context, binding) {
+  return typeof binding?.tokenIsToken0 === "boolean" &&
+    sameAddress(binding.token, context?.token) &&
+    sameAddress(binding.quote, normalizedQuote(context?.quote)) &&
+    sameAddress(binding.pool, context?.pool);
+}
+
+export async function validateV2PoolBinding(context, dependencies = {}) {
+  if (context?.venue !== "uniswap-v2" || !context?.pool) {
+    return { ok: false, reason: "unsupported-venue", binding: null, details: [] };
+  }
+
+  const provider = dependencies.provider ?? getProvider();
+  const retry = dependencies.retry ?? ((fn) => withRetry(fn));
+  try {
+    const head = Number.isInteger(context.analysisBlock) && context.analysisBlock >= 0
+      ? context.analysisBlock
+      : await retry(() => provider.getBlockNumber());
+    if (!Number.isInteger(head) || head < 0) throw new Error("analysis block unavailable");
+    const binding = await bindV2Pool(context, provider, head, retry);
+    if (!binding) return { ok: false, reason: "pool-binding-mismatch", binding: null, details: [] };
+    return { ok: true, reason: null, binding, details: [] };
+  } catch (error) {
+    return {
+      ok: false,
+      reason: "evidence-unavailable",
+      binding: null,
+      details: [`V2 pool binding unavailable: ${safeErrorMessage(error)}`],
+    };
+  }
 }
 
 function hasMeaningfulSellSegment(receipt, binding, meaningfulThreshold) {
@@ -356,8 +384,15 @@ export async function inspectSellability(context, dependencies = {}) {
       ? context.analysisBlock
       : await retry(() => provider.getBlockNumber());
     if (!Number.isInteger(head) || head < 0) throw new Error("analysis block unavailable");
-    const binding = await bindV2Pool(context, provider, head, retry);
-    if (!binding) return poolBindingMismatch();
+    const bindingEvidence = matchesBindingContext(context, dependencies.poolBinding)
+      ? { ok: true, binding: dependencies.poolBinding }
+      : await validateV2PoolBinding({ ...context, analysisBlock: head }, { provider, retry });
+    if (!bindingEvidence.ok) {
+      return sellabilityResult(SELLABILITY.UNKNOWN, bindingEvidence.reason || "evidence-unavailable", {
+        details: bindingEvidence.details,
+      });
+    }
+    const binding = bindingEvidence.binding;
     const start = await resolveStartBlock(context, head, findBlock, provider, retry);
     if (start == null) return unavailable("pool creation block unavailable");
     if (!Number.isInteger(start) || start < 0 || start > head) {
