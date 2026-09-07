@@ -6,6 +6,12 @@ const UA = {
   accept: "application/json",
   "user-agent": "robinhood-scanner-bot/1.0",
 };
+const DEXPAPRIKA_BASE = "https://api.dexpaprika.com";
+const V4_GECKO_VENUES = new Set([
+  "uniswap-v4",
+  "uniswap-v4-robinhood",
+  "uniswap-pools-trade",
+]);
 
 async function getJson(url, { fetchImpl = fetch, timeoutMs = 12000 } = {}) {
   const ctrl = new AbortController();
@@ -61,7 +67,10 @@ export async function geckoNewPools(
       const { token, quote } = picked;
       const venue = rel.dex?.data?.id || "unknown";
       const poolAddress = isEthAddress(a.address) ? getAddress(a.address) : null;
-      const poolId = /v4/i.test(venue) && /^0x[0-9a-fA-F]{64}$/.test(String(a.address || ""))
+      const validPoolId = /^0x[0-9a-fA-F]{64}$/.test(String(a.address || ""));
+      const supportedV4Venue = V4_GECKO_VENUES.has(String(venue).toLowerCase());
+      if (!poolAddress && validPoolId && !supportedV4Venue) continue;
+      const poolId = supportedV4Venue && validPoolId
         ? String(a.address).toLowerCase()
         : null;
       if (!poolAddress && !poolId) {
@@ -213,6 +222,171 @@ export function summarizeDeployerHistory(txs, cap = 50, pageSize = 200) {
     created: created.length,
     recent: created.slice(0, cap).map((t) => t.contractAddress),
     known: txs.length < pageSize,
+  };
+}
+
+function optionalNumber(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function normalizePaprikaPool(raw) {
+  if (!raw || typeof raw !== "object" || !raw.id || !Array.isArray(raw.tokens) || raw.tokens.length < 2) {
+    throw new Error("DexPaprika pool schema is missing id or tokens");
+  }
+  const tokens = raw.tokens.map((token) => {
+    if (!token?.id || !isEthAddress(token.id)) throw new Error("DexPaprika pool schema contains an invalid token");
+    return {
+      address: getAddress(token.id),
+      symbol: token.symbol || "",
+      name: token.name || "",
+      decimals: optionalNumber(token.decimals),
+    };
+  });
+  return {
+    source: raw.source || "dexpaprika",
+    poolId: String(raw.id).toLowerCase(),
+    dexId: raw.dex_id || null,
+    dexName: raw.dex_name || null,
+    chain: raw.chain || CHAIN.geckoNetwork,
+    tokens,
+    createdAt: raw.created_at ? Date.parse(raw.created_at) : null,
+    liquidityUsd: optionalNumber(raw.liquidity_usd),
+    volume24hUsd: optionalNumber(raw.volume_usd_24h ?? raw.volume_usd),
+    priceUsd: optionalNumber(raw.price_usd),
+    lastUpdatedAt: raw.last_updated ? Date.parse(raw.last_updated) : null,
+    raw,
+  };
+}
+
+async function paprikaJson(path, label, options) {
+  try {
+    return await getJson(`${DEXPAPRIKA_BASE}${path}`, options);
+  } catch (cause) {
+    throw new Error(`${label} failed: ${safeErrorMessage(cause)}`, { cause });
+  }
+}
+
+export async function getDexPaprikaTopPools({
+  fetchImpl = fetch,
+  timeoutMs = 12000,
+  limit = 10,
+} = {}) {
+  const json = await paprikaJson(
+    `/networks/${CHAIN.geckoNetwork}/pools?limit=${limit}&order_by=volume_usd&sort=desc`,
+    "DexPaprika top pools",
+    { fetchImpl, timeoutMs }
+  );
+  if (!Array.isArray(json?.pools)) throw new Error("DexPaprika top pools schema must contain pools");
+  return json.pools.map(normalizePaprikaPool);
+}
+
+export async function searchDexPaprikaPools(token, {
+  fetchImpl = fetch,
+  timeoutMs = 12000,
+  limit = 10,
+} = {}) {
+  const address = getAddress(token);
+  const json = await paprikaJson(
+    `/networks/${CHAIN.geckoNetwork}/tokens/${address}/pools?limit=${limit}&order_by=volume_usd&sort=desc`,
+    `DexPaprika token pools ${address}`,
+    { fetchImpl, timeoutMs }
+  );
+  if (!Array.isArray(json?.pools)) throw new Error("DexPaprika token pools schema must contain pools");
+  return json.pools.map(normalizePaprikaPool);
+}
+
+export async function getDexPaprikaPool(poolId, {
+  fetchImpl = fetch,
+  timeoutMs = 12000,
+} = {}) {
+  const id = String(poolId || "");
+  const json = await paprikaJson(
+    `/networks/${CHAIN.geckoNetwork}/pools/${encodeURIComponent(id)}`,
+    `DexPaprika pool ${id}`,
+    { fetchImpl, timeoutMs }
+  );
+  return normalizePaprikaPool(json);
+}
+
+export async function getDexPaprikaTransactions(poolId, {
+  fetchImpl = fetch,
+  timeoutMs = 12000,
+  limit = 20,
+} = {}) {
+  const id = String(poolId || "");
+  const json = await paprikaJson(
+    `/networks/${CHAIN.geckoNetwork}/pools/${encodeURIComponent(id)}/transactions?limit=${limit}`,
+    `DexPaprika pool transactions ${id}`,
+    { fetchImpl, timeoutMs }
+  );
+  if (!Array.isArray(json?.transactions)) {
+    throw new Error("DexPaprika transactions schema must contain transactions");
+  }
+  return json.transactions.map((transaction) => ({
+    id: transaction.id || transaction.hash || null,
+    poolId: id.toLowerCase(),
+    direction: ["buy", "sell"].includes(String(transaction.type || "").toLowerCase())
+      ? String(transaction.type).toLowerCase()
+      : "unknown",
+    blockTimestamp: optionalNumber(transaction.block_timestamp),
+    raw: transaction,
+  }));
+}
+
+function addressMatches(left, right) {
+  return String(left || "").toLowerCase() === String(right || "").toLowerCase();
+}
+
+export function normalizeMarketEvidence({ expected, pools = [], transactions = [], errors = [] }) {
+  const expectedPool = String(expected?.poolId || "").toLowerCase();
+  const normalizedPools = [];
+  for (const pool of pools) {
+    try {
+      normalizedPools.push(pool.poolId && pool.tokens ? pool : normalizePaprikaPool(pool));
+    } catch (error) {
+      errors = [...errors, { source: pool?.source || "market", message: safeErrorMessage(error) }];
+    }
+  }
+  const bound = normalizedPools.filter((pool) =>
+    pool.poolId === expectedPool &&
+    pool.tokens.some((token) => addressMatches(token.address, expected.token)) &&
+    pool.tokens.some((token) => addressMatches(token.address, expected.pairToken))
+  );
+  if (!bound.length) {
+    return {
+      token: expected.token,
+      pairToken: expected.pairToken,
+      poolId: expectedPool,
+      marketReady: errors.length ? "unknown" : false,
+      liquidityUsd: null,
+      conflict: false,
+      errors,
+      sources: normalizedPools,
+    };
+  }
+  const liquidities = bound.map((pool) => pool.liquidityUsd).filter((value) => Number.isFinite(value));
+  const minLiquidity = liquidities.length ? Math.min(...liquidities) : null;
+  const maxLiquidity = liquidities.length ? Math.max(...liquidities) : null;
+  const conflict = liquidities.length > 1 && minLiquidity > 0 && maxLiquidity >= minLiquidity * 2;
+  const matchingTransactions = transactions.filter((transaction) =>
+    !transaction.poolId || String(transaction.poolId).toLowerCase() === expectedPool
+  );
+  const directions = new Set(matchingTransactions.map((transaction) => transaction.direction));
+  const hasBidirectional = directions.has("buy") && directions.has("sell");
+  const hasLiquidity = Number.isFinite(minLiquidity) && minLiquidity > 0;
+  return {
+    token: expected.token,
+    pairToken: expected.pairToken,
+    poolId: expectedPool,
+    marketReady: hasLiquidity && hasBidirectional ? true : errors.length ? "unknown" : false,
+    liquidityUsd: minLiquidity,
+    conflict,
+    errors,
+    sources: bound,
+    transactionCount: matchingTransactions.length,
+    bidirectional: hasBidirectional,
   };
 }
 

@@ -67,6 +67,30 @@ export function formatAlert(report) {
   return lines.join("\n");
 }
 
+const LIFECYCLE_LABELS = {
+  new_launch: "🆕 Pons V2 新币",
+  hard_kill: "⛔ 硬淘汰",
+  graduated: "🎓 链上毕业",
+  market_ready: "✅ 市场已就绪",
+  rescued: "🛟 Factory 已救援",
+  green: "🟢 三线通过",
+  swept: "⏳ Curve 已 Sweep",
+  phase_changed: "🔄 链上阶段变化",
+  heat_change: "🌡️ 市场温度变化",
+};
+
+export function formatLifecycleNotification(notification) {
+  const type = String(notification?.transitionType || "unknown");
+  const label = LIFECYCLE_LABELS[type] || "Pons V2 状态变化";
+  const reason = notification?.reason || "链上状态变化";
+  return [
+    `${label} [${esc(type)}]`,
+    `<b>CA</b> <code>${esc(notification?.token)}</code>`,
+    `<b>原因</b> ${esc(reason)}`,
+    `<b>ID</b> <code>${esc(notification?.id)}</code>`,
+  ].join("\n");
+}
+
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }

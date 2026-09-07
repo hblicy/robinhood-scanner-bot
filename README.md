@@ -1,6 +1,6 @@
 # Robinhood Chain 扫链推送机器人
 
-把 Robinhood Chain 新池发现、风险分析、评分和 Telegram 告警整合成一个只读机器人。
+把 Robinhood Chain 的 Pons V2 生命周期、新池发现、风险分析和 Telegram 状态告警整合成一个只读机器人。
 
 本版本只有扫描与推送功能：不读取私钥，不创建钱包，不签名、授权或广播交易，也不维护模拟仓位。Memecoin 风险极高，本工具不是投资建议。
 
@@ -8,6 +8,7 @@
 
 | 检查项 | 实现方式 |
 | --- | --- |
+| Pons V2 生命周期 | 以 Factory getter 和事件一致性确认身份，监听 Launch、Sweep、Graduated、Rescued，并核对 Hook 注册 |
 | 新池发现 | 链上监听 Uniswap V2 `PairCreated`、V3 `PoolCreated`、V4 `Initialize`，并读取 GeckoTerminal `new_pools` |
 | 年龄与市场数据 | 按 `MAX_AGE_MINUTES` 过滤，读取成交、买卖笔数、流动性和市值 |
 | 社交与叙事 | 读取 DexScreener 社交链接并匹配名称关键词 |
@@ -34,11 +35,23 @@ npm run watch
 # 一次性扫描后退出；不写 data/，不发送 Telegram；部分失败时退出码非零
 npm run scan
 
-# 只读分析指定代币
+# 只读检查指定代币；90 秒后仍未完成的数据源会明确标记 unknown
 npm run check -- 0x你的合约地址
 ```
 
 只有 `watch`、`scan`、`check` 三个命令。`paper` 和 `live` 已移除，传入时会在连接 RPC、读取状态或发送通知前直接报错退出。
+
+Linux 服务器可以在 `screen` 中持续运行：
+
+```bash
+screen -S robinhood
+cd ~/robinhood-scanner-bot
+npm run watch
+# Ctrl+A，再按 D：退出 screen 但保持机器人运行
+screen -r robinhood
+```
+
+单个 GeckoTerminal、DexPaprika 或 Blockscout 限流/超时时，对应辅助证据会标记为 `unknown`，不会被当作安全通过。`watch` 会按有上限的退避重试；Factory 原始日志、ABI 解码或状态不变量失败则会保留错误并停止推进该生命周期区间。
 
 ## Telegram
 
@@ -69,23 +82,31 @@ CONFIRMATION_BLOCKS=2
 MAX_QUEUE_SIZE=500
 MAX_SEEN_ENTRIES=10000
 SEEN_TTL_MS=86400000
+DEXPAPRIKA_SCAN=true
 ```
 
-布尔值只接受 `true/false`、`1/0`、`yes/no`、`on/off`；`QUOTE_TOKENS` 只接受 `WETH`、`ETH`、`USDG`，并且至少启用一个扫描来源。数值越界时程序会明确报错。公共 RPC 可以用于试跑；长期监听建议使用稳定的专用 RPC。
+布尔值只接受 `true/false`、`1/0`、`yes/no`、`on/off`；`QUOTE_TOKENS` 接受内置 `WETH`、`ETH`、`USDG` 或明确的 20-byte 地址，symbol 只用于显示，不能决定 LONG 分类。至少启用一个扫描来源。数值越界时程序会明确报错。公共 RPC 可以用于试跑；长期监听建议使用稳定的专用 RPC。
 
 ## 扫描恢复与本地状态
 
-`watch` 会写入 `data/state.json`，仅维护：
+`watch` 会以 schema v4 原子写入 `data/state.json`，维护：
 
 - 已处理候选 `seen`，用于去重；
 - `cursors.onchain`，表示最后一个全部候选均处理成功的区块；
+- `cursors.ponsV2`、`tokens` 和 `watchlist`，保存独立的 Pons 生命周期游标与观察状态；
+- `appliedEvents`、`outbox` 和 `pendingChecks`，用于事件去重、Telegram 可靠投递和辅助数据重试；
+- `heat`，保存当前市场热度快照，不改变已有观察对象的准入决定；
 - 旧版本留下的 `positions`、`trades` 历史字段，原样保留但不再读取、轮询或修改其业务内容。
 
-首次运行按区块时间二分定位年龄窗口起点。已有游标时，从“已保存游标”和“当前年龄窗口起点”中较新的位置继续。链上默认只处理落后最新高度 2 个区块的已确认范围。某一区间只要有核心分析、日志解析或 Telegram 推送失败，就不会推进游标；下一轮会重扫该区间，成功候选由 `seen` 去重，失败候选会重试。超过 `MAX_AGE_MINUTES` 的候选严格跳过。
+Pons 链上阶段为 `not_graduated → swept → pool_created`，`rescued` 是不可回退终态；观察状态另行使用 `observed/watchlisted/curve_dead/decay/killed`。`pool_created` 只说明链上毕业，只有 Hook、池绑定、流动性和双向交易证据完整时 `marketReady` 才为 `true`。三类状态不会互相代替。
 
-链上与 GeckoTerminal 独立运行：一个来源故障不会阻止另一个来源。`scan` 会处理已取得的候选后汇总错误并以非零状态退出，不会把部分成功伪装成整轮成功。`watch` 对同一 `data/` 使用单实例锁，重复启动会明确报错。
+首次运行按区块时间二分定位年龄窗口起点。已有游标时，从“已保存游标”和“当前年龄窗口起点”中较新的位置继续。链上默认只处理落后最新高度 2 个区块的已确认范围。Factory 日志、身份 getter 和状态转换与 Pons 游标同次落盘；Telegram 或外部市场源失败不会回滚已确认的 Factory 游标，而会留在 outbox/pending check 中重试。超过 `MAX_AGE_MINUTES` 的辅助候选严格跳过。
+
+链上与 GeckoTerminal 独立运行：一个来源故障不会阻止另一个来源。`scan` 会处理已取得的候选后汇总错误并以非零状态退出，不会把部分成功伪装成整轮成功；整轮超过 120 秒会明确报超时，公共 RPC 无法及时扫完时请换专用 RPC。`watch` 对同一 `data/` 使用单实例锁，重复启动会明确报错。
 
 `scan` 和 `check` 不创建锁、不创建或修改 `data/`，也不发送 Telegram。配置文件通过局部解析读取，旧 `.env` 中的私钥或交易字段不会注入进程配置，也不会被程序访问。
+
+升级前建议先备份 `data/state.json`。程序会从旧 schema v3 迁移到 v4，但不会删除旧版 `positions`、`trades` 或其他历史文件。
 
 ## 明确不做
 

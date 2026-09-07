@@ -1,13 +1,18 @@
-import { SETTINGS, CHAIN, DATA_DIR } from "./config.js";
-import { getOnchainCursor, hasSeen, markSeen, setOnchainCursor } from "./store.js";
-import { findFirstBlockAtOrAfter, getBlockNumber, scanOnchain, sleep } from "./chain.js";
-import { geckoNewPools } from "./market.js";
+import { SETTINGS, CHAIN, DATA_DIR, isQuote } from "./config.js";
+import { getDefaultStore, getOnchainCursor, hasSeen, markSeen, setOnchainCursor } from "./store.js";
+import { findFirstBlockAtOrAfter, getBlockNumber, getProvider, scanOnchain, sleep } from "./chain.js";
+import { geckoNewPools, getDexPaprikaTopPools } from "./market.js";
 import { analyze } from "./analyze.js";
-import { alertReport, formatAlert, sendTelegram } from "./notify.js";
+import { alertReport, formatAlert, formatLifecycleNotification, sendTelegram } from "./notify.js";
 import { CandidateQueue } from "./queue.js";
 import { candidateKey, handleCandidate } from "./runtime.js";
 import { safeErrorMessage, sanitizeRpcUrl } from "./safety.js";
 import { acquireInstanceLock } from "./instance-lock.js";
+import { createPonsTokenState, reducePonsEvent } from "./lifecycle.js";
+import { classifyPonsRecord, readPonsLaunch, scanPonsRange, verifyPonsDeployment } from "./pons.js";
+import { drainOutbox, nextRetryAt } from "./outbox.js";
+import { formatInspectionReport, inspectToken } from "./check.js";
+import { evaluateHeat } from "./decay.js";
 
 const DEFAULT_ANALYSIS_CONCURRENCY = 2;
 const candidates = new CandidateQueue({
@@ -16,6 +21,325 @@ const candidates = new CandidateQueue({
   keyOf: candidateKey,
 });
 let draining = false;
+
+function lifecycleNotification(event, state) {
+  const transitionType = {
+    token_launched: "new_launch",
+    launch_swept: "swept",
+    pool_graduated: "graduated",
+  }[event.kind];
+  if (!transitionType) return null;
+  const id = `${event.eventId}:${transitionType}`;
+  const notification = {
+    id,
+    eventId: event.eventId,
+    transitionType,
+    token: state.token,
+    reason: event.kind === "token_launched"
+      ? "Factory TokenLaunched 已确认"
+      : event.kind === "launch_swept"
+        ? "Factory LaunchSwept 已确认，等待 Hook 注册"
+        : "Factory PoolGraduated 已确认",
+  };
+  return { ...notification, text: formatLifecycleNotification(notification) };
+}
+
+function lifecycleChecks(event, state, now) {
+  const types = event.kind === "token_launched"
+    ? ["curve_flow", "holders", "deployer_24h", "line_a"]
+    : event.kind === "pool_graduated"
+      ? ["market", "line_c"]
+      : [];
+  return types.map((type) => ({
+    id: `${event.eventId}:${type}`,
+    eventId: event.eventId,
+    type,
+    token: state.token,
+    dueAt: now,
+  }));
+}
+
+async function buildPonsTransitions(events, {
+  provider,
+  readLaunch,
+  now,
+  initialTokens = {},
+}) {
+  const working = structuredClone(initialTokens);
+  const transitions = [];
+  for (const event of events) {
+    const record = await readLaunch(provider, event.token);
+    const key = event.token.toLowerCase();
+    const previous = working[key] || null;
+    const nextToken = previous
+      ? reducePonsEvent(previous, event, record, now())
+      : createPonsTokenState(event, record, now());
+    working[key] = nextToken;
+    const notification = lifecycleNotification(event, nextToken);
+    transitions.push({
+      eventId: event.eventId,
+      blockNumber: event.blockNumber,
+      token: event.token,
+      nextToken,
+      notifications: notification ? [notification] : [],
+      checks: lifecycleChecks(event, nextToken, now()),
+    });
+  }
+  return transitions;
+}
+
+export async function previewPonsRange({
+  provider,
+  fromBlock,
+  toBlock,
+  now = Date.now,
+  scanRange = scanPonsRange,
+  readLaunch = readPonsLaunch,
+  initialTokens = {},
+}) {
+  const events = await scanRange(provider, fromBlock, toBlock);
+  const transitions = await buildPonsTransitions(events, {
+    provider,
+    readLaunch,
+    now,
+    initialTokens,
+  });
+  return { events, transitions };
+}
+
+export async function watchPonsRange(options) {
+  const snapshot = options.store.snapshot();
+  const result = await previewPonsRange({ ...options, initialTokens: snapshot.tokens });
+  options.store.commitPonsRange({ toBlock: options.toBlock, transitions: result.transitions });
+  return result;
+}
+
+export async function runPendingChecks({
+  store,
+  handlers,
+  now = Date.now,
+  limit = 20,
+  maxAttempts = 5,
+}) {
+  const result = { completed: 0, retried: 0, failed: 0 };
+  for (const check of store.listDueChecks(now(), limit)) {
+    try {
+      const handler = handlers?.[check.type];
+      if (typeof handler !== "function") throw new Error(`no pending-check handler for ${check.type}`);
+      const update = await handler(check);
+      if (update?.nextToken && update?.token) {
+        store.applyCheckResult(check.id, { ...update, completedAt: now() });
+      } else {
+        store.completeCheck(check.id, now());
+      }
+      result.completed += 1;
+    } catch (cause) {
+      const attempts = Number(check.attempts || 0) + 1;
+      const exhausted = attempts >= maxAttempts;
+      store.rescheduleCheck(check.id, {
+        status: exhausted ? "failed" : "pending",
+        attempts,
+        nextAttemptAt: nextRetryAt(now(), attempts),
+        lastError: safeErrorMessage(cause),
+      });
+      if (exhausted) result.failed += 1;
+      else result.retried += 1;
+    }
+  }
+  return result;
+}
+
+export function createInspectionCheckHandlers({
+  provider,
+  store,
+  now = Date.now,
+  inspect = inspectToken,
+  timeoutMs = 90_000,
+}) {
+  const handle = async (check) => {
+    const previous = store.snapshot().tokens[String(check.token).toLowerCase()];
+    if (!previous) throw new Error(`pending check token state missing for ${check.token}`);
+    const report = await inspect(check.token, { provider, now }, { timeoutMs });
+    if (report.timedOut) {
+      throw new Error(`inspection timeout; unfinished=${(report.unfinishedSources || []).join(",") || "unknown"}`);
+    }
+    if (report.identity !== "pons-v2") {
+      throw new Error(`inspection Factory identity is ${report.identity || "unknown"}`);
+    }
+
+    const nextToken = structuredClone(previous);
+    nextToken.facts = nextToken.facts || {};
+    nextToken.facts.inspection = report;
+    nextToken.riskDataStatus = report.riskDataStatus || "unknown";
+    nextToken.lineB = {
+      passed: report.curve?.status === "sufficient" && report.curve?.bidirectional === true,
+      sampleStatus: report.curve?.status || "unknown",
+      tradeCount: report.curve?.tradeCount ?? null,
+      uniqueTraders: report.curve?.uniqueTraders ?? null,
+    };
+    if (nextToken.protocolPhase === "pool_created" && [true, false, "unknown"].includes(report.marketReady)) {
+      nextToken.marketReady = report.marketReady;
+    }
+    if (report.monitorState === "killed" && nextToken.protocolPhase !== "rescued") {
+      nextToken.monitorState = "killed";
+      nextToken.watchlist = false;
+      nextToken.killReason = report.reasons?.[0] || "inspection-hard-kill";
+    }
+    nextToken.updatedAt = now();
+
+    let transitionType = null;
+    if (previous.monitorState !== "killed" && nextToken.monitorState === "killed") transitionType = "hard_kill";
+    else if (previous.marketReady !== true && nextToken.marketReady === true) transitionType = "market_ready";
+    const notification = transitionType ? {
+      id: `${check.id}:${transitionType}`,
+      eventId: check.eventId,
+      transitionType,
+      token: check.token,
+      reason: report.reasons?.[0] || (transitionType === "market_ready" ? "Hook 与双向市场证据已确认" : "风险硬门槛触发"),
+    } : null;
+    if (notification) notification.text = formatLifecycleNotification(notification);
+    return { token: check.token, nextToken, notification };
+  };
+  return Object.fromEntries([
+    "curve_flow",
+    "holders",
+    "deployer_24h",
+    "line_a",
+    "market",
+    "line_c",
+  ].map((type) => [type, handle]));
+}
+
+function heatPoolCategory(pool) {
+  if (pool?.category) return pool.category;
+  const tokens = Array.isArray(pool?.tokens) ? pool.tokens : [];
+  if (tokens.some((token) => String(token.symbol || "").replace(/^\$/, "").toUpperCase() === "PONS")) {
+    return "pons";
+  }
+  const nonQuote = tokens.filter((token) => !isQuote(token.address));
+  if (nonQuote.length === 0) return "infrastructure";
+  if (nonQuote.every((token) => String(token.symbol || "").toUpperCase() === "NVDA")) return "stock";
+  return "memecoin";
+}
+
+export async function refreshMarketHeat({
+  provider,
+  store,
+  settings = SETTINGS,
+  now = Date.now,
+  getBlockNumber: readHead = getBlockNumber,
+  findFirstBlockAtOrAfter: findStart = findFirstBlockAtOrAfter,
+  scanRange = scanPonsRange,
+  getTopPools = getDexPaprikaTopPools,
+}) {
+  const at = now();
+  const [launchesResult, poolsResult] = await Promise.allSettled([
+    (async () => {
+      const head = await readHead();
+      const from = await findStart(at - 86_400_000, head, provider);
+      const events = await scanRange(provider, from, head);
+      return events.filter((event) => event.kind === "token_launched").length;
+    })(),
+    getTopPools(),
+  ]);
+  const errors = [];
+  if (launchesResult.status === "rejected") {
+    errors.push({ source: "pons_launches_24h", message: safeErrorMessage(launchesResult.reason) });
+  }
+  if (poolsResult.status === "rejected") {
+    errors.push({ source: "dexpaprika_top_pools", message: safeErrorMessage(poolsResult.reason) });
+  }
+  const pools = poolsResult.status === "fulfilled" ? poolsResult.value : [];
+  const topPools = pools.map((pool) => ({ category: heatPoolCategory(pool) }));
+  const ponsCount = topPools.filter((pool) => pool.category === "pons").length;
+  const heat = evaluateHeat({
+    launches24h: launchesResult.status === "fulfilled" ? launchesResult.value : null,
+    topPools,
+    ponsPopularPct: topPools.length ? (ponsCount / topPools.length) * 100 : null,
+    fetchedAt: errors.length ? null : at,
+    now: at,
+  }, {
+    ttlMs: 2 * 3_600_000,
+    highHeatLaunches24h: settings.highHeatLaunches24h,
+    normalCap: settings.watchlistCapNormal,
+    highHeatCap: settings.watchlistCapHighHeat,
+  });
+  heat.errors = errors;
+  const previous = store.getHeat();
+  let notification = null;
+  if (previous?.decision !== heat.decision) {
+    const hour = Math.floor(at / 3_600_000);
+    notification = {
+      id: `heat:${hour}:${heat.decision === "打" ? "go" : "no"}`,
+      eventId: null,
+      transitionType: "heat_change",
+      token: "market",
+      reason: `决策=${heat.decision}，24h 发射=${heat.launches24h ?? "unknown"}，新准入上限=${heat.admissionCap}`,
+    };
+    notification.text = formatLifecycleNotification(notification);
+  }
+  store.commitHeat({ heat, notification });
+  return heat;
+}
+
+export async function reconcilePonsWatchlist({
+  provider,
+  store,
+  readLaunch = readPonsLaunch,
+  now = Date.now,
+}) {
+  const snapshot = store.snapshot();
+  let updated = 0;
+  for (const address of snapshot.watchlist) {
+    const previous = snapshot.tokens[address.toLowerCase()];
+    if (!previous) throw new Error(`watchlist token state missing for ${address}`);
+    const record = await readLaunch(provider, address);
+    const phase = ["not_graduated", "swept", "pool_created", "rescued"][Number(record.phase)];
+    if (!phase) throw new Error(`unknown Pons phase ${record.phase}`);
+    if (phase === previous.protocolPhase) continue;
+    const event = {
+      kind: "reconcile",
+      eventId: `reconcile:${address.toLowerCase()}:${phase}`,
+      token: address,
+      args: {},
+    };
+    const nextToken = reducePonsEvent(previous, event, record, now());
+    const transitionType = phase === "rescued" ? "rescued" : phase === "pool_created" ? "graduated" : "phase_changed";
+    const notification = {
+      id: `${event.eventId}:${transitionType}`,
+      eventId: event.eventId,
+      transitionType,
+      token: address,
+      reason: `Factory getter 阶段为 ${phase}`,
+    };
+    notification.text = formatLifecycleNotification(notification);
+    store.commitTokenUpdate({ token: address, nextToken, notification });
+    updated += 1;
+  }
+  return { updated };
+}
+
+export async function classifyAuxiliaryCandidate(event, {
+  provider,
+  readLaunch = readPonsLaunch,
+}) {
+  let record;
+  try {
+    record = await readLaunch(provider, event.token);
+  } catch (cause) {
+    return { ...event, pad: "unknown", identity: "unknown", error: safeErrorMessage(cause) };
+  }
+  const classification = classifyPonsRecord(event.token, record);
+  if (classification.identity === "pons-v2") {
+    return { ...event, pad: "pons-v2", identity: "pons-v2", protocolPhase: classification.protocolPhase };
+  }
+  return {
+    ...event,
+    pad: isQuote(event.quote) ? "long" : "uniswap-native",
+    identity: "not_pons",
+    protocolPhase: "not_applicable",
+  };
+}
 
 async function drainQueue(queue, concurrency, handle) {
   let handled = 0;
@@ -182,6 +506,32 @@ export async function runWatchIteration(state, dependencies) {
   return { state, errors };
 }
 
+export async function runPonsWatchIteration(state, dependencies) {
+  const safeHead = (await dependencies.getBlockNumber()) - (dependencies.settings.ponsConfirmations ?? 0);
+  if (safeHead < 0) return { complete: true, events: [], transitions: [] };
+  if (state.lastBlock == null) {
+    const savedCursor = dependencies.store.getPonsCursor();
+    const boundary = await dependencies.findFirstBlockAtOrAfter(
+      dependencies.now() - dependencies.settings.lineAMaxAgeMinutes * 60_000,
+      safeHead
+    );
+    state.lastBlock = Math.min(safeHead, Math.max(savedCursor ?? -1, boundary - 1));
+  }
+  if (safeHead <= state.lastBlock) return { complete: true, events: [], transitions: [] };
+  const fromBlock = state.lastBlock + 1;
+  const result = await watchPonsRange({
+    provider: dependencies.provider,
+    store: dependencies.store,
+    fromBlock,
+    toBlock: safeHead,
+    now: dependencies.now,
+    scanRange: dependencies.scanRange,
+    readLaunch: dependencies.readLaunch,
+  });
+  state.lastBlock = safeHead;
+  return { ...result, complete: true };
+}
+
 export async function runReadOnlyCandidates(events, dependencies) {
   const queue = new CandidateQueue({
     maxSize: dependencies.maxQueueSize,
@@ -195,10 +545,17 @@ export async function runReadOnlyCandidates(events, dependencies) {
     return drainQueue(
       queue,
       dependencies.analysisConcurrency ?? DEFAULT_ANALYSIS_CONCURRENCY,
-      async (event) => {
-      try {
+       async (event) => {
+       try {
+        const classified = dependencies.classifyCandidate
+          ? await dependencies.classifyCandidate(event)
+          : event;
+        if (classified.identity === "pons-v2") return;
+        if (classified.identity === "unknown") {
+          throw new Error(`Pons identity unknown for ${event.token}: ${classified.error || "Factory read failed"}`);
+        }
         const report = await handleCandidate(
-          event,
+          classified,
           { persistSeen: false },
           {
             now: dependencies.now,
@@ -227,7 +584,8 @@ export async function runReadOnlyCandidates(events, dependencies) {
   if (failures.length) {
     throw new AggregateError(
       failures.map(({ error }) => error),
-      `candidate analysis failed: ${failures.map(({ event }) => event.token).join(", ")}`
+      `candidate analysis failed: ${failures.map(({ event, error }) =>
+        `${event.token}: ${safeErrorMessage(error)}`).join(", ")}`
     );
   }
   return reports;
@@ -239,6 +597,13 @@ async function watch() {
   process.once("exit", releaseOnExit);
   try {
     banner();
+    const provider = getProvider();
+    const store = getDefaultStore();
+    const pendingHandlers = createInspectionCheckHandlers({ provider, store });
+    if (SETTINGS.onchainScan) {
+      await verifyPonsDeployment(provider);
+      await reconcilePonsWatchlist({ provider, store });
+    }
     if (SETTINGS.telegramToken) {
       await sendTelegram(
         `🤖 Robinhood 扫链机器人已启动\n仅扫描和报警，不包含交易功能\n年龄 &lt; ${SETTINGS.maxAgeMinutes} 分钟 · 最低分 ${SETTINGS.minScore}`
@@ -246,6 +611,7 @@ async function watch() {
     }
 
     const state = { lastBlock: null, lastGecko: 0 };
+    const ponsState = { lastBlock: null };
     const claimed = new Set();
     const createSourceProcessor = () => {
       const inner = new CandidateQueue({
@@ -272,8 +638,13 @@ async function watch() {
         DEFAULT_ANALYSIS_CONCURRENCY,
         async (event) => {
           try {
+            const classified = await classifyAuxiliaryCandidate(event, { provider });
+            if (classified.identity === "pons-v2") return;
+            if (classified.identity === "unknown") {
+              throw new Error(`Pons identity unknown for ${event.token}: ${classified.error}`);
+            }
             await handleCandidate(
-              event,
+              classified,
               { persistSeen: true },
               {
                 now: Date.now,
@@ -304,6 +675,24 @@ async function watch() {
     };
     const loops = [];
     if (SETTINGS.onchainScan) {
+      loops.push((async () => {
+        while (true) {
+          const result = await runPonsWatchIteration(ponsState, {
+            provider,
+            store,
+            settings: SETTINGS,
+            getBlockNumber,
+            findFirstBlockAtOrAfter,
+            scanRange: scanPonsRange,
+            readLaunch: readPonsLaunch,
+            now: Date.now,
+          });
+          if (result.events.length) {
+            console.log(`pons ${result.events.length} lifecycle events; cursor=${ponsState.lastBlock}`);
+          }
+          await sleep(SETTINGS.pollMs);
+        }
+      })());
       const handleEvents = createSourceProcessor();
       loops.push((async () => {
         while (true) {
@@ -313,6 +702,33 @@ async function watch() {
             handleEvents,
           });
           await sleep(SETTINGS.pollMs);
+        }
+      })());
+    }
+    loops.push((async () => {
+      while (true) {
+        const result = await drainOutbox({
+          store,
+          send: (text) => sendTelegram(text),
+        });
+        if (result.failed) console.error(`outbox: ${result.failed} notifications exhausted retries`);
+        await sleep(SETTINGS.outboxPollMs);
+      }
+    })());
+    loops.push((async () => {
+      while (true) {
+        const result = await runPendingChecks({ store, handlers: pendingHandlers });
+        if (result.failed) console.error(`pending checks: ${result.failed} checks exhausted retries`);
+        await sleep(SETTINGS.outboxPollMs);
+      }
+    })());
+    if (SETTINGS.dexPaprikaScan) {
+      loops.push((async () => {
+        while (true) {
+          const heat = await refreshMarketHeat({ provider, store });
+          console.log(`market heat: ${heat.decision} level=${heat.level} launches24h=${heat.launches24h ?? "unknown"} cap=${heat.admissionCap}`);
+          const hour = Math.floor(Date.now() / 3_600_000);
+          await sleep(Math.max(1, (hour + 1) * 3_600_000 - Date.now()));
         }
       })());
     }
@@ -337,16 +753,23 @@ async function watch() {
   }
 }
 
-async function scanOnce(supplied = null) {
+async function scanOnceCore(supplied = null) {
   const dependencies = supplied || {
     settings: SETTINGS,
+    provider: getProvider(),
     getBlockNumber,
     findFirstBlockAtOrAfter,
     scanOnchain,
     geckoNewPools,
+    previewPonsRange,
+    verifyPonsDeployment,
     analyze,
+    classifyCandidate: (event) => classifyAuxiliaryCandidate(event, { provider: dependencies.provider }),
     consoleAlert: async (report) => {
       console.log(formatAlert(report).replace(/<[^>]+>/g, ""));
+    },
+    consolePons: async (report) => {
+      console.log(`Pons ${report.nextToken.protocolPhase} ${report.nextToken.token} ID ${report.eventId}`);
     },
     log: console.log,
   };
@@ -354,6 +777,28 @@ async function scanOnce(supplied = null) {
   banner();
   const sources = [];
   if (settings.onchainScan) {
+    if (dependencies.previewPonsRange) {
+      sources.push({
+        name: "pons",
+        run: async () => {
+          if (dependencies.verifyPonsDeployment) await dependencies.verifyPonsDeployment(dependencies.provider);
+          const latestHead = await dependencies.getBlockNumber();
+          const head = latestHead - (settings.ponsConfirmations ?? settings.confirmationBlocks ?? 0);
+          if (head < 0) return [];
+          const from = await dependencies.findFirstBlockAtOrAfter(
+            (dependencies.now || Date.now)() - settings.maxAgeMinutes * 60_000,
+            head
+          );
+          const preview = await dependencies.previewPonsRange({
+            provider: dependencies.provider,
+            fromBlock: from,
+            toBlock: head,
+            now: dependencies.now || Date.now,
+          });
+          return preview.transitions.map((transition) => ({ kind: "pons-lifecycle", ...transition }));
+        },
+      });
+    }
     sources.push({
       name: "onchain",
       run: async () => {
@@ -375,7 +820,7 @@ async function scanOnce(supplied = null) {
 
   const results = await Promise.allSettled(sources.map(({ run }) => run()));
   const sourceFailures = [];
-  const discovered = { onchain: [], gecko: [] };
+  const discovered = { pons: [], onchain: [], gecko: [] };
   results.forEach((result, index) => {
     const source = sources[index].name;
     if (result.status === "fulfilled") {
@@ -391,7 +836,9 @@ async function scanOnce(supplied = null) {
   });
   const onchain = discovered.onchain;
   const gecko = discovered.gecko;
-  dependencies.log(`candidates: onchain=${onchain.length} gecko=${gecko.length}`);
+  const pons = discovered.pons;
+  dependencies.log(`candidates: pons=${pons.length} onchain=${onchain.length} gecko=${gecko.length}`);
+  for (const report of pons) await (dependencies.consolePons || dependencies.consoleAlert)(report);
   let reports = [];
   let candidateFailure = null;
   try {
@@ -401,6 +848,7 @@ async function scanOnce(supplied = null) {
       minScore: settings.minScore,
       now: dependencies.now || Date.now,
       analyze: dependencies.analyze,
+      classifyCandidate: dependencies.classifyCandidate,
       consoleAlert: dependencies.consoleAlert,
       log: dependencies.log,
     });
@@ -416,28 +864,28 @@ async function scanOnce(supplied = null) {
       candidateFailure?.message,
     ].filter(Boolean).join("; "));
   }
-  return reports;
+  return [...pons, ...reports];
 }
 
-async function checkOne(token) {
-  if (!token) throw new Error("usage: node src/index.js check 0xToken");
-  const report = await analyze({
-    source: "manual",
-    venue: "unknown",
-    pool: null,
-    token,
-    quote: "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73",
-    createdAt: null,
+async function scanOnce(supplied = null) {
+  const timeoutMs = supplied?.timeoutMs ?? 120_000;
+  let timer;
+  const timeout = new Promise((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(`scan timed out after ${timeoutMs}ms`)), timeoutMs);
   });
-  const { formatAlert } = await import("./notify.js");
-  console.log(formatAlert(report).replace(/<[^>]+>/g, ""));
-  console.log(
-    JSON.stringify(
-      { score: report.score, verdict: report.verdict, red: report.red, facts: report.facts, meta: report.meta },
-      null,
-      2
-    )
-  );
+  try {
+    return await Promise.race([scanOnceCore(supplied), timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function checkOne(token, supplied = null) {
+  if (!token) throw new Error("usage: node src/index.js check 0xToken");
+  const dependencies = supplied || {};
+  const report = await inspectToken(token, dependencies, { timeoutMs: dependencies.timeoutMs ?? 90_000 });
+  (dependencies.log || console.log)(formatInspectionReport(report));
+  return report;
 }
 
 function banner() {

@@ -23,6 +23,20 @@ const ALLOWED_ENV = new Set([
   "MAX_TOP10_PCT",
   "MAX_TAX_BPS",
   "MAX_DEPLOYER_TOKENS",
+  "LINE_A_MAX_AGE_MINUTES",
+  "LINE_A_IGNORE_SECONDS",
+  "MIN_FLOW_TRADES",
+  "MIN_FLOW_UNIQUE_TRADERS",
+  "MAX_SINGLE_TRADER_PCT",
+  "MAX_DEPLOYER_LAUNCHES_24H",
+  "HIGH_HEAT_LAUNCHES_24H",
+  "WATCHLIST_CAP_NORMAL",
+  "WATCHLIST_CAP_HIGH_HEAT",
+  "CURVE_DEAD_GRACE_MS",
+  "PONS_CONFIRMATIONS",
+  "PONS_RECONCILE_INTERVAL_MS",
+  "OUTBOX_POLL_MS",
+  "DEXPAPRIKA_SCAN",
   "REQUIRE_SOCIAL",
   "POLL_MS",
   "GECKO_POLL_MS",
@@ -86,27 +100,51 @@ export const ADDR = {
   V4_QUOTER: getAddress("0x8Dc178eFB8111BB0973Dd9d722ebeFF267c98F94"),
   V4_POSM: getAddress("0x58daec3116aae6D93017bAAea7749052E8a04fA7"),
   UNIVERSAL_ROUTER: getAddress("0x53BF6B0684Ec7eF91e1387Da3D1a1769bC5A6F77"),
+  NVDA: getAddress("0xd0601ce157db5bdc3162bbac2a2c8af5320d9eec"),
+  PONS_FACTORY: getAddress("0x7eD598BcEf8bd9Edd8C97A195C6d13f40801EC7e"),
+  PONS_ROUTER: getAddress("0xe33E9E479dF8802cb0866d5d05258bEc4cF62948"),
+  PONS_HOOK: getAddress("0xE5e702641Ea86F4ae6cC3cDaeD2B886f976Be044"),
+  PONS_LOCKER: getAddress("0x267444D099b10fB5Ed7c3Cc7B7c767AdcA574952"),
+  PONS_EXECUTOR: getAddress("0xC7819B64A1dAECD7eC19856d026cb14EfBd89046"),
+  PONS_V1_FACTORY: getAddress("0xA5aAb3F0c6EeadF30Ef1D3Eb997108E976351feB"),
 };
 
-const QUOTE_SET = new Set(
+const QUOTE_INPUTS = new Set(
   env("QUOTE_TOKENS", "WETH,ETH,USDG")
     .split(",")
-    .map((s) => s.trim().toUpperCase())
+    .map((s) => s.trim())
     .filter(Boolean)
 );
-const UNKNOWN_QUOTES = [...QUOTE_SET].filter((name) => !["WETH", "ETH", "USDG"].includes(name));
-if (QUOTE_SET.size === 0 || UNKNOWN_QUOTES.length > 0) {
-  throw new Error("QUOTE_TOKENS must contain only WETH, ETH or USDG");
+if (QUOTE_INPUTS.size === 0) throw new Error("QUOTE_TOKENS must not be empty");
+
+const BUILTIN_QUOTES = {
+  WETH: [ADDR.WETH],
+  ETH: [ADDR.NATIVE, ADDR.ZERO],
+  USDG: [ADDR.USDG],
+};
+
+const resolvedQuotes = [];
+for (const input of QUOTE_INPUTS) {
+  const builtin = BUILTIN_QUOTES[input.toUpperCase()];
+  if (builtin) {
+    resolvedQuotes.push(...builtin);
+    continue;
+  }
+  if (!/^0x[0-9a-fA-F]{40}$/.test(input)) {
+    throw new Error(`QUOTE_TOKENS contains an unknown symbol: ${input}`);
+  }
+  resolvedQuotes.push(getAddress(input));
 }
 
-export const QUOTE_ADDRESSES = new Set(
-  [
-    QUOTE_SET.has("WETH") ? ADDR.WETH.toLowerCase() : null,
-    QUOTE_SET.has("USDG") ? ADDR.USDG.toLowerCase() : null,
-    QUOTE_SET.has("ETH") ? ADDR.NATIVE.toLowerCase() : null,
-    QUOTE_SET.has("ETH") ? ADDR.ZERO.toLowerCase() : null,
-  ].filter(Boolean)
-);
+export const QUOTE_ADDRESSES = new Set(resolvedQuotes.map((address) => address.toLowerCase()));
+
+export const QUOTE_LABELS = new Map([
+  [ADDR.WETH.toLowerCase(), "WETH"],
+  [ADDR.NATIVE.toLowerCase(), "ETH"],
+  [ADDR.ZERO.toLowerCase(), "ETH"],
+  [ADDR.USDG.toLowerCase(), "USDG"],
+  [ADDR.NVDA.toLowerCase(), "NVDA"],
+]);
 
 const onchainScan = envBool("ONCHAIN_SCAN", true);
 const geckoScan = envBool("GECKO_SCAN", true);
@@ -124,12 +162,41 @@ export const SETTINGS = {
   maxTop10Pct: validateRange("MAX_TOP10_PCT", envNum("MAX_TOP10_PCT", 55), 0, 100),
   maxTaxBps: validateRange("MAX_TAX_BPS", envNum("MAX_TAX_BPS", 500), 0, 10_000),
   maxDeployerTokens: validateNonNegativeInteger("MAX_DEPLOYER_TOKENS", envNum("MAX_DEPLOYER_TOKENS", 8)),
+  lineAMaxAgeMinutes: validatePositiveNumber("LINE_A_MAX_AGE_MINUTES", envNum("LINE_A_MAX_AGE_MINUTES", 20)),
+  lineAIgnoreSeconds: validateNonNegativeInteger("LINE_A_IGNORE_SECONDS", envNum("LINE_A_IGNORE_SECONDS", 10)),
+  minFlowTrades: validatePositiveInteger("MIN_FLOW_TRADES", envNum("MIN_FLOW_TRADES", 5)),
+  minFlowUniqueTraders: validatePositiveInteger(
+    "MIN_FLOW_UNIQUE_TRADERS",
+    envNum("MIN_FLOW_UNIQUE_TRADERS", 3)
+  ),
+  maxSingleTraderPct: validateRange("MAX_SINGLE_TRADER_PCT", envNum("MAX_SINGLE_TRADER_PCT", 80), 0, 100),
+  maxDeployerLaunches24h: validateNonNegativeInteger(
+    "MAX_DEPLOYER_LAUNCHES_24H",
+    envNum("MAX_DEPLOYER_LAUNCHES_24H", 20)
+  ),
+  highHeatLaunches24h: validateNonNegativeInteger(
+    "HIGH_HEAT_LAUNCHES_24H",
+    envNum("HIGH_HEAT_LAUNCHES_24H", 20_000)
+  ),
+  watchlistCapNormal: validatePositiveInteger("WATCHLIST_CAP_NORMAL", envNum("WATCHLIST_CAP_NORMAL", 3)),
+  watchlistCapHighHeat: validatePositiveInteger(
+    "WATCHLIST_CAP_HIGH_HEAT",
+    envNum("WATCHLIST_CAP_HIGH_HEAT", 1)
+  ),
+  curveDeadGraceMs: validatePositiveInteger("CURVE_DEAD_GRACE_MS", envNum("CURVE_DEAD_GRACE_MS", 14_400_000)),
   requireSocial: envBool("REQUIRE_SOCIAL", false),
   pollMs: validatePositiveInteger("POLL_MS", envNum("POLL_MS", 2500)),
   geckoPollMs: validatePositiveInteger("GECKO_POLL_MS", envNum("GECKO_POLL_MS", 15000)),
   onchainScan,
   geckoScan,
   confirmationBlocks: validateNonNegativeInteger("CONFIRMATION_BLOCKS", envNum("CONFIRMATION_BLOCKS", 2)),
+  ponsConfirmations: validateNonNegativeInteger("PONS_CONFIRMATIONS", envNum("PONS_CONFIRMATIONS", 2)),
+  ponsReconcileIntervalMs: validatePositiveInteger(
+    "PONS_RECONCILE_INTERVAL_MS",
+    envNum("PONS_RECONCILE_INTERVAL_MS", 60_000)
+  ),
+  outboxPollMs: validatePositiveInteger("OUTBOX_POLL_MS", envNum("OUTBOX_POLL_MS", 5_000)),
+  dexPaprikaScan: envBool("DEXPAPRIKA_SCAN", true),
   maxQueueSize: validatePositiveInteger("MAX_QUEUE_SIZE", envNum("MAX_QUEUE_SIZE", 500)),
   maxSeenEntries: validatePositiveInteger("MAX_SEEN_ENTRIES", envNum("MAX_SEEN_ENTRIES", 10_000)),
   seenTtlMs: validatePositiveInteger("SEEN_TTL_MS", envNum("SEEN_TTL_MS", 86_400_000)),

@@ -4,7 +4,7 @@ import { safeErrorMessage } from "./safety.js";
 
 export function assertSupportedCommand(command) {
   if (!["watch", "scan", "check"].includes(command)) {
-    throw new Error("commands: watch | scan | check <token>");
+    throw new Error("Transaction functionality is not included. commands: watch | scan | check <token>");
   }
   return command;
 }
@@ -18,8 +18,11 @@ export async function main() {
 
 const isMain = Boolean(process.argv[1]) && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 if (isMain) {
-  main().catch((error) => {
-    console.error(safeErrorMessage(error));
-    process.exitCode = 1;
-  });
+  main().then(
+    () => process.exit(0),
+    (error) => {
+      console.error(safeErrorMessage(error));
+      process.exit(1);
+    }
+  );
 }

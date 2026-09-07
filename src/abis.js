@@ -33,3 +33,23 @@ export const V4_PM_ABI = [
 export const V2_ROUTER_ABI = [
   "function getAmountsOut(uint256 amountIn, address[] path) view returns (uint256[] amounts)",
 ];
+
+export const PONS_FACTORY_ABI = [
+  "event TokenLaunched(address indexed token,address indexed curve,address indexed deployer,address pairToken,uint256 launchConfigId,uint256 graduationThreshold)",
+  "event LaunchSwept(address indexed token,uint256 quoteOut,uint256 tokenOut)",
+  "event PoolGraduated(address indexed token,uint256 positionId,uint256 tokenAmount,uint256 pairTokenAmount)",
+  "event GraduationTokensPermanentlyLocked(address indexed token,uint256 amount)",
+  "function memeHook() view returns (address)",
+  "function locker() view returns (address)",
+  "function graduationExecutor() view returns (address)",
+  "function getLaunchedToken(address token) view returns (tuple(address token,address curve,address deployer,address creatorFeeRecipient,address pairToken,uint256 graduationThreshold,uint24 poolFee,int24 tickSpacing,uint16 creatorTaxBps,bool buybackEnabled,uint8 phase,uint256 sweptQuote,uint256 sweptTokens,uint256 sweptAt,bool exists))",
+];
+
+export const PONS_CURVE_ABI = [
+  "event CurveBuy(address indexed buyer,address indexed recipient,uint256 quoteIn,uint256 tokensOut,uint256 fee,uint256 tax)",
+  "event CurveSell(address indexed seller,address indexed recipient,uint256 tokensIn,uint256 quoteOut,uint256 fee,uint256 tax)",
+];
+
+export const PONS_HOOK_ABI = [
+  "event PoolRegistered(bytes32 indexed poolId,address memecoin,address quoteToken,address creator)",
+];
