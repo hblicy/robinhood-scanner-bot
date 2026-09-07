@@ -5,6 +5,7 @@ import { PAIR_V2_ABI, V4_PM_ABI } from "../src/abis.js";
 import { ADDR } from "../src/config.js";
 import {
   attachBlockTimes,
+  bytecodeFlags,
   findFirstBlockAtOrAfter,
   getLogsChunked,
   readOwnerFromContract,
@@ -13,6 +14,24 @@ import {
   scanOnchain,
   withRetry,
 } from "../src/chain.js";
+
+describe("bytecodeFlags", () => {
+  it("reads token code at the supplied fixed block", async () => {
+    const calls = [];
+    const provider = {
+      async getCode(...args) {
+        calls.push(args);
+        return "0x1234";
+      },
+    };
+    const result = await bytecodeFlags("0x1111111111111111111111111111111111111111", {
+      provider,
+      blockTag: 77,
+    });
+    assert.equal(result.hasCode, true);
+    assert.deepEqual(calls, [["0x1111111111111111111111111111111111111111", 77]]);
+  });
+});
 
 describe("findFirstBlockAtOrAfter", () => {
   it("finds the first block inside the age window with logarithmic lookups", async () => {

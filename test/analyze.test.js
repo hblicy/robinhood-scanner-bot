@@ -138,6 +138,21 @@ describe("analyze data completeness", () => {
     });
   });
 
+  it("falls back to the event creation time when market data has no pair creation time", async () => {
+    let honeypotInput;
+    await analyze(
+      { ...event, createdAt: NOW - 9 * 60_000 },
+      dependencies({
+        dexScreener: async () => ({ marketBound: true, pairCreatedAt: null }),
+        honeypotCheck: async (value) => {
+          honeypotInput = value;
+          return { honeypot: null, complete: false, reason: "incomplete" };
+        },
+      })
+    );
+    assert.equal(honeypotInput.pairCreatedAt, NOW - 9 * 60_000);
+  });
+
   it("reports sellability facts and safely falls back for old honeypot mocks", async () => {
     const report = await analyze(event, dependencies({
       honeypotCheck: async () => ({ honeypot: null, complete: false, reason: "legacy inspector unavailable" }),

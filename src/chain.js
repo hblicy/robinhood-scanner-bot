@@ -374,8 +374,8 @@ export async function readV2Pool(pool) {
   return readV2PoolFromContract(new Contract(pool, PAIR_V2_ABI, getProvider()));
 }
 
-export async function bytecodeFlags(token) {
-  const code = await withRetry(() => getProvider().getCode(token));
+export async function bytecodeFlags(token, { provider = getProvider(), blockTag = null } = {}) {
+  const code = await withRetry(() => blockTag == null ? provider.getCode(token) : provider.getCode(token, blockTag));
   const hex = (code || "0x").toLowerCase();
   const has = (sel) => hex.includes(sel.toLowerCase().replace(/^0x/, ""));
   return {
