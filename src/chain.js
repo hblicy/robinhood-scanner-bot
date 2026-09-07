@@ -168,7 +168,7 @@ export async function getLogsChunked({
   topics,
   fromBlock,
   toBlock,
-  chunk = 2000,
+  chunk = 10,
   maxLogs = Infinity,
   provider = getProvider(),
   retry = (fn) => withRetry(fn),
@@ -197,9 +197,9 @@ export async function getLogsChunked({
       );
       append(logs);
     } catch (err) {
-      if (end - start + 1 > 40 && isLogRangeLimitError(err)) {
+      if (end - start + 1 > 1 && isLogRangeLimitError(err)) {
         const mid = Math.floor((start + end) / 2);
-        const nextChunk = Math.max(40, Math.floor((end - start + 1) / 2));
+        const nextChunk = Math.max(1, Math.floor((end - start + 1) / 2));
         const remaining = maxLogs - out.length;
         const left = await getLogsChunked({ address, topics, fromBlock: start, toBlock: mid, chunk: nextChunk, maxLogs: remaining, provider, retry });
         append(left);

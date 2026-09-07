@@ -88,13 +88,13 @@ describe("getLogsChunked", () => {
     assert.equal(logs.length, 4);
   });
 
-  it("uses a 2000-block default chunk", async () => {
+  it("uses Alchemy Free-compatible ten-block default chunks", async () => {
     const ranges = [];
     await getLogsChunked({
       address: ADDR.V2_FACTORY,
       topics: [],
       fromBlock: 1,
-      toBlock: 2000,
+      toBlock: 23,
       provider: {
         getLogs: async ({ fromBlock, toBlock }) => {
           ranges.push([fromBlock, toBlock]);
@@ -102,7 +102,7 @@ describe("getLogsChunked", () => {
         },
       },
     });
-    assert.deepEqual(ranges, [[1, 2000]]);
+    assert.deepEqual(ranges, [[1, 10], [11, 20], [21, 23]]);
   });
 
   it("splits a rejected large range without losing blocks", async () => {
@@ -121,6 +121,28 @@ describe("getLogsChunked", () => {
     });
     assert.equal(logs.length, 2000);
     assert.equal(new Set(logs.map(({ blockNumber }) => blockNumber)).size, 2000);
+  });
+
+  it("splits provider range errors below forty blocks", async () => {
+    const ranges = [];
+    const logs = await getLogsChunked({
+      address: ADDR.V2_FACTORY,
+      topics: [],
+      fromBlock: 1,
+      toBlock: 12,
+      chunk: 12,
+      provider: {
+        getLogs: async ({ fromBlock, toBlock }) => {
+          ranges.push([fromBlock, toBlock]);
+          if (toBlock > fromBlock) throw new Error("range too large");
+          return [{ blockNumber: fromBlock }];
+        },
+      },
+      retry: async (fn) => fn(),
+    });
+    assert.equal(logs.length, 12);
+    assert.equal(new Set(logs.map(({ blockNumber }) => blockNumber)).size, 12);
+    assert.ok(ranges.some(([fromBlock, toBlock]) => fromBlock === toBlock));
   });
 
   it("enforces one maxLogs budget across ordinary chunks", async () => {
@@ -147,6 +169,7 @@ describe("getLogsChunked", () => {
         topics: [],
         fromBlock: 1,
         toBlock: 80,
+        chunk: 80,
         maxLogs: 3,
         provider: {
           getLogs: async ({ fromBlock, toBlock }) => {
