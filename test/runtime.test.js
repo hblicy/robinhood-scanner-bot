@@ -126,6 +126,33 @@ describe("scanner runtime", () => {
     assert.equal(alerted, 0);
   });
 
+  it("alerts confirmed sellability at the score floor", async () => {
+    let alerted = 0;
+    await handleCandidate(
+      { venue: "uniswap-v2", pool: "0xA", token: "0x1", createdAt: null, source: "test" },
+      { persistSeen: false },
+      {
+        now: () => 1,
+        maxAgeMinutes: 30,
+        minScore: 55,
+        analyze: async () => ({
+          verdict: "skip",
+          score: 55,
+          venue: "uniswap-v2",
+          pool: "0xA",
+          token: "0x1",
+          meta: { symbol: "CONFIRMED" },
+          honeypot: {},
+          sellability: { status: "confirmed", reason: "sellable" },
+        }),
+        markSeen: () => {},
+        alertReport: async () => { alerted += 1; },
+        log: () => {},
+      }
+    );
+    assert.equal(alerted, 1);
+  });
+
   it("alerts confirmed sellability at review threshold", async () => {
     let alerted = 0;
     await handleCandidate(
