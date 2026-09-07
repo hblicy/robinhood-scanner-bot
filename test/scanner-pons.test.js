@@ -245,6 +245,31 @@ test("startup reconcile applies an authoritative rescued phase without reviving 
   assert.equal(state.tokens[TOKEN.toLowerCase()].protocolPhase, "rescued");
   assert.equal(state.tokens[TOKEN.toLowerCase()].monitorState, "killed");
   assert.equal(state.tokens[TOKEN.toLowerCase()].watchlist, false);
+  assert.ok(state.outbox[`reconcile:${TOKEN.toLowerCase()}:rescued:rescued`]);
+});
+
+test("startup reconcile updates graduation state without Telegram", async () => {
+  const store = tempStore();
+  await watchPonsRange(dependencies(store));
+  store.commitTokenUpdate({
+    token: TOKEN,
+    nextToken: {
+      ...store.snapshot().tokens[TOKEN.toLowerCase()],
+      watchlist: true,
+      monitorState: "watchlisted",
+    },
+  });
+
+  await reconcilePonsWatchlist({
+    provider: {},
+    store,
+    readLaunch: async () => launchRecord(2),
+    now: () => 20_000,
+  });
+
+  const state = store.snapshot();
+  assert.equal(state.tokens[TOKEN.toLowerCase()].protocolPhase, "pool_created");
+  assert.equal(Object.keys(state.outbox).length, 0);
 });
 
 test("a Pons watch iteration scans only finalized blocks and advances its own cursor", async () => {
@@ -334,7 +359,7 @@ test("LONG classification uses quote addresses and ignores display symbols", asy
   assert.equal(result.pad, "uniswap-native");
 });
 
-test("market heat is persisted and only enqueues a notification when its decision changes", async () => {
+test("market heat is persisted without Telegram notifications", async () => {
   const store = tempStore();
   const base = {
     provider: {},
@@ -355,7 +380,7 @@ test("market heat is persisted and only enqueues a notification when its decisio
   assert.equal(first.decision, "打");
   assert.equal(second.decision, "打");
   assert.equal(state.heat.admissionCap, 3);
-  assert.equal(Object.values(state.outbox).filter((entry) => entry.transitionType === "heat_change").length, 1);
+  assert.equal(Object.keys(state.outbox).length, 0);
 });
 
 test("market heat becomes conservatively no-trade when a required source fails", async () => {

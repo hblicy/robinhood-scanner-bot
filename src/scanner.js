@@ -245,20 +245,7 @@ export async function refreshMarketHeat({
     highHeatCap: settings.watchlistCapHighHeat,
   });
   heat.errors = errors;
-  const previous = store.getHeat();
-  let notification = null;
-  if (previous?.decision !== heat.decision) {
-    const hour = Math.floor(at / 3_600_000);
-    notification = {
-      id: `heat:${hour}:${heat.decision === "打" ? "go" : "no"}`,
-      eventId: null,
-      transitionType: "heat_change",
-      token: "market",
-      reason: `决策=${heat.decision}，24h 发射=${heat.launches24h ?? "unknown"}，新准入上限=${heat.admissionCap}`,
-    };
-    notification.text = formatLifecycleNotification(notification);
-  }
-  store.commitHeat({ heat, notification });
+  store.commitHeat({ heat });
   return heat;
 }
 
@@ -284,15 +271,17 @@ export async function reconcilePonsWatchlist({
       args: {},
     };
     const nextToken = reducePonsEvent(previous, event, record, now());
-    const transitionType = phase === "rescued" ? "rescued" : phase === "pool_created" ? "graduated" : "phase_changed";
-    const notification = {
-      id: `${event.eventId}:${transitionType}`,
-      eventId: event.eventId,
-      transitionType,
-      token: address,
-      reason: `Factory getter 阶段为 ${phase}`,
-    };
-    notification.text = formatLifecycleNotification(notification);
+    let notification = null;
+    if (phase === "rescued") {
+      notification = {
+        id: `${event.eventId}:rescued`,
+        eventId: event.eventId,
+        transitionType: "rescued",
+        token: address,
+        reason: `Factory getter 阶段为 ${phase}`,
+      };
+      notification.text = formatLifecycleNotification(notification);
+    }
     store.commitTokenUpdate({ token: address, nextToken, notification });
     updated += 1;
   }
