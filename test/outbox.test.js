@@ -12,7 +12,7 @@ test("uses bounded retry delays", () => {
 test("delivers due notifications and marks them after send", async () => {
   const order = [];
   const store = {
-    listDueOutbox: () => [{ id: "notice-1", text: "hello", attempts: 0 }],
+    listDueOutbox: () => [{ id: "notice-1", text: "hello", transitionType: "hard_kill", attempts: 0 }],
     markOutboxDelivered: (id, at) => order.push(["delivered", id, at]),
     rescheduleOutbox: () => { throw new Error("unexpected retry"); },
   };
@@ -25,13 +25,44 @@ test("delivers due notifications and marks them after send", async () => {
     ["send", "hello", "notice-1"],
     ["delivered", "notice-1", 1_000],
   ]);
-  assert.deepEqual(result, { delivered: 1, retried: 0, failed: 0 });
+  assert.deepEqual(result, { delivered: 1, suppressed: 0, retried: 0, failed: 0 });
+});
+
+test("delivers only allowed lifecycle types and suppresses legacy noise", async () => {
+  const allowed = ["hard_kill", "rescued", "green", "market_ready"];
+  const blocked = ["new_launch", "swept", "graduated", "heat_change", "phase_changed", undefined];
+  const entries = [...allowed, ...blocked].map((transitionType, index) => ({
+    id: `notice-${index}`,
+    text: `message-${index}`,
+    transitionType,
+    attempts: 0,
+  }));
+  const sent = [];
+  const delivered = [];
+  const suppressed = [];
+  const store = {
+    listDueOutbox: () => entries,
+    markOutboxDelivered: (id) => delivered.push(id),
+    markOutboxSuppressed: (id, at) => suppressed.push([id, at]),
+    rescheduleOutbox: () => { throw new Error("unexpected retry"); },
+  };
+
+  const result = await drainOutbox({
+    store,
+    send: async (_text, entry) => sent.push(entry.transitionType),
+    now: () => 1_000,
+  });
+
+  assert.deepEqual(sent, allowed);
+  assert.equal(delivered.length, allowed.length);
+  assert.equal(suppressed.length, blocked.length);
+  assert.deepEqual(result, { delivered: 4, suppressed: 6, retried: 0, failed: 0 });
 });
 
 test("reschedules failed notifications without throwing into the chain loop", async () => {
   const retries = [];
   const store = {
-    listDueOutbox: () => [{ id: "notice-1", text: "hello", attempts: 0 }],
+    listDueOutbox: () => [{ id: "notice-1", text: "hello", transitionType: "hard_kill", attempts: 0 }],
     markOutboxDelivered: () => { throw new Error("unexpected delivery"); },
     rescheduleOutbox: (id, retry) => retries.push([id, retry]),
   };
@@ -50,7 +81,7 @@ test("reschedules failed notifications without throwing into the chain loop", as
 test("moves exhausted notifications to a visible failed state", async () => {
   const retries = [];
   const store = {
-    listDueOutbox: () => [{ id: "notice-1", text: "hello", attempts: 4 }],
+    listDueOutbox: () => [{ id: "notice-1", text: "hello", transitionType: "hard_kill", attempts: 4 }],
     markOutboxDelivered: () => {},
     rescheduleOutbox: (_id, retry) => retries.push(retry),
   };
