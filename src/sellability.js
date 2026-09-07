@@ -37,27 +37,26 @@ export function evaluateLedgerBalance({ ledgerBalance, reportedBalance, oneToken
   };
 }
 
-function ladderValue(entry) {
-  if (entry && typeof entry === "object") {
-    const values = Object.values(entry);
-    if (values.length > 0) return values[0];
-  }
-  return null;
-}
-
 export function evaluateTransferLadder(results) {
+  const ladder = [...results].sort((left, right) => {
+    const leftPercent = typeof left?.percent === "number" ? left.percent : 0;
+    const rightPercent = typeof right?.percent === "number" ? right.percent : 0;
+    return leftPercent - rightPercent;
+  });
   let sawUnknown = false;
+  let sawPassingSmallerStep = false;
 
-  for (let index = 0; index < results.length; index += 1) {
-    const value = ladderValue(results[index]);
-    if (value === false) {
+  for (const step of ladder) {
+    if (step?.ok === false) {
       return {
         blocked: true,
-        reason: index === 0 ? "sell-transfer-blocked" : "sell-size-limited",
+        reason: sawPassingSmallerStep ? "sell-size-limited" : "sell-transfer-blocked",
       };
     }
-    if (value == null) {
+    if (step?.ok == null) {
       sawUnknown = true;
+    } else if (step.ok === true) {
+      sawPassingSmallerStep = true;
     }
   }
 

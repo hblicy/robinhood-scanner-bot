@@ -92,7 +92,24 @@ describe("sellability core", () => {
 
   it("blocks a ladder when the first sell attempt fails", () => {
     assert.deepEqual(
-      evaluateTransferLadder([{ 1: false }, { 10: true }, { 50: true }]),
+      evaluateTransferLadder([
+        { percent: 1, ok: false },
+        { percent: 10, ok: true },
+        { percent: 50, ok: true },
+      ]),
+      {
+        blocked: true,
+        reason: "sell-transfer-blocked",
+      }
+    );
+  });
+
+  it("treats a null lower ladder and later false as transfer blocked", () => {
+    assert.deepEqual(
+      evaluateTransferLadder([
+        { percent: 1, ok: null },
+        { percent: 10, ok: false },
+      ]),
       {
         blocked: true,
         reason: "sell-transfer-blocked",
@@ -102,7 +119,12 @@ describe("sellability core", () => {
 
   it("blocks a ladder when a later sell attempt fails after earlier success", () => {
     assert.deepEqual(
-      evaluateTransferLadder([{ 1: true }, { 10: true }, { 50: false }, { 100: false }]),
+      evaluateTransferLadder([
+        { percent: 1, ok: true },
+        { percent: 10, ok: true },
+        { percent: 50, ok: false },
+        { percent: 100, ok: false },
+      ]),
       {
         blocked: true,
         reason: "sell-size-limited",
@@ -112,7 +134,11 @@ describe("sellability core", () => {
 
   it("reports ladder evidence unavailable when the ladder has no false result", () => {
     assert.deepEqual(
-      evaluateTransferLadder([{ 1: true }, { 10: null }, { 50: true }]),
+      evaluateTransferLadder([
+        { percent: 1, ok: true },
+        { percent: 10, ok: null },
+        { percent: 50, ok: true },
+      ]),
       {
         blocked: false,
         reason: "evidence-unavailable",
@@ -122,7 +148,11 @@ describe("sellability core", () => {
 
   it("keeps a fully passing ladder unblocked", () => {
     assert.deepEqual(
-      evaluateTransferLadder([{ 1: true }, { 10: true }, { 50: true }]),
+      evaluateTransferLadder([
+        { percent: 1, ok: true },
+        { percent: 10, ok: true },
+        { percent: 50, ok: true },
+      ]),
       {
         blocked: false,
         reason: null,
