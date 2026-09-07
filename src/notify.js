@@ -67,7 +67,11 @@ export function formatAlert(report) {
     lines.push(`${c.ok ? "✓" : "·"} ${esc(c.key)} ${esc(c.detail)} ${c.pts ? `(+${c.pts})` : ""}`);
   }
   lines.push("");
-  lines.push(`<a href="${links.dex}">DexScreener</a> · <a href="${links.explorer}">Blockscout</a> · <a href="${links.gmgn}">GMGN</a>`);
+  lines.push([
+    safeHttpLink("DexScreener", links.dex),
+    safeHttpLink("Blockscout", links.explorer),
+    safeHttpLink("GMGN", links.gmgn),
+  ].join(" · "));
   lines.push("");
   lines.push("<i>本程序只扫描报警，不包含模拟或实盘交易功能。</i>");
   return lines.join("\n");
@@ -158,6 +162,23 @@ function esc(s) {
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
+}
+
+function safeHttpLink(label, value) {
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(String(value));
+  } catch {
+    return esc(label);
+  }
+  if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") return esc(label);
+  return `<a href="${escAttribute(parsedUrl.href)}">${esc(label)}</a>`;
+}
+
+function escAttribute(value) {
+  return esc(value)
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 function sellabilityLabel(status) {

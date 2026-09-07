@@ -80,8 +80,50 @@ describe("formatAlert", () => {
     assert.match(text, /原因 confirmed real sells/);
     assert.match(text, /买家样本 12  额度样本 4  真实卖家 3/);
     assert.match(text, /风险 未发现阻断/);
-    assert.match(text, /DexScreener/);
+    assert.match(text, /<a href="https:\/\/dexscreener\.com\/robinhood\/0x1">DexScreener<\/a>/);
+    assert.match(text, /<a href="https:\/\/robinhoodchain\.blockscout\.com\/token\/0x1">Blockscout<\/a>/);
+    assert.match(text, /<a href="https:\/\/gmgn\.ai\/robinhood\/token\/0x1">GMGN<\/a>/);
     assert.match(text, /不包含模拟或实盘交易功能/);
+  });
+
+  it("renders unsafe or malformed link protocols as plain labels", () => {
+    const text = formatAlert(makeReport({
+      links: {
+        dex: "JaVaScRiPt:alert(1)",
+        explorer: "data:text/html,<script>alert(1)</script>",
+        gmgn: "https://",
+      },
+    }));
+    assert.match(text, /DexScreener · Blockscout · GMGN/);
+    assert.doesNotMatch(text, /<a\b|href=|javascript:|data:text/i);
+  });
+
+  it("escapes every HTML attribute delimiter in an allowed URL", () => {
+    const text = formatAlert(makeReport({
+      links: {
+        dex: `https://example.test/?double="&single='&lt=<&gt=>`,
+        explorer: "javascript:blocked",
+        gmgn: "data:text/plain,blocked",
+      },
+    }));
+    assert.match(
+      text,
+      /<a href="https:\/\/example\.test\/\?double=%22&amp;single=%27&amp;lt=%3C&amp;gt=%3E">DexScreener<\/a>/
+    );
+    assert.match(text, /<\/a> · Blockscout · GMGN/);
+    assert.doesNotMatch(text, /double="|single='|lt=<|gt=>/);
+  });
+
+  it("renders the parsed canonical HTTP URL instead of the untrusted source spelling", () => {
+    const text = formatAlert(makeReport({
+      links: {
+        dex: String.raw`http:example.test\path?x=1&y=2`,
+        explorer: "javascript:blocked",
+        gmgn: "data:text/plain,blocked",
+      },
+    }));
+    assert.match(text, /<a href="http:\/\/example\.test\/path\?x=1&amp;y=2">DexScreener<\/a>/);
+    assert.doesNotMatch(text, /http:example\.test\\path/);
   });
 
   it("renders unknown safety facts without claiming they passed", () => {

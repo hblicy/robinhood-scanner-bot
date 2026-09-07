@@ -45,19 +45,28 @@ blocked    发现隐藏余额、额度限卖、明确 revert/false 或卖出报�
 
 未知不能转成通过；一个钱包成功或一次粉尘卖出不能转成通过。
 
+## 固定快照与 V2 池绑定
+
+普通候选仅支持地址有效且非零的 `uniswap-v2` 池。其他 venue 或缺失 pool 在调用 provider、字节码、报价及证据采集前直接得到 `unknown / unsupported-venue`，保持静默。
+
+支持的 V2 分析只读取一次 `analysisBlock`。目标 token 字节码、Router `getAmountsOut`、Transfer 日志的 `toBlock`、`balanceOf`、只读 `transfer`、Factory/Pair `eth_call` 及 EOA `getCode` 都绑定该区块。池创建起点不得晚于 `analysisBlock`，否则返回 `unknown / evidence-unavailable`。
+
+读取任何 Transfer 证据前，必须在同一快照完成池身份绑定：原生币或零地址 quote 先规范化为 WETH；V2 Factory `getPair(token, quote)` 必须等于候选 pool；pool 的 `token0/token1` 必须恰好由目标 token 和规范化 quote 组成，并记录目标 token 的方向。成功解码后的地址不匹配返回 `unknown / pool-binding-mismatch`；RPC 或 ABI 解码失败返回 `unknown / evidence-unavailable`。
+
 ## Transfer 账本一致性
 
 对普通候选从池创建区块扫描到分析时的安全区块，读取目标 token 的 Transfer 日志。区块起点优先使用发现事件自带的 `blockNumber`；Gecko 候选使用 DexScreener 的 `pairCreatedAt` 通过现有区块时间二分逻辑定位。起点无法确定时结论为 `unknown`。
 
-从 `pool → wallet` 的买入 Transfer 中选择最多 5 个近期不同钱包，排除 pool、Router、零地址、销毁地址和合约地址。对每个样本在同一区间计算：
+从 `pool → wallet` 的买入 Transfer 中选择最多 5 个近期不同钱包，排除 pool、Router、零地址、销毁地址、低地址/precompile 和合约地址。所有 EOA code 查询都绑定 `analysisBlock`。对每个样本计算：
 
 ```text
-ledgerBalance = Σ incoming Transfer - Σ outgoing Transfer
-missing = ledgerBalance - balanceOf(wallet)
-missingRatio = missing / ledgerBalance
+openingBalance = start == 0 ? 0 : balanceOf(wallet, start - 1)
+expectedBalance = openingBalance + Σ interval incoming Transfer - Σ interval outgoing Transfer
+missing = expectedBalance - balanceOf(wallet, analysisBlock)
+missingRatio = missing / expectedBalance
 ```
 
-仅在 `ledgerBalance >= 1 whole token` 时执行差异判定。若 `missing > 0` 且 `missingRatio > 1%`，立即得到 `blocked / hidden-balance-mutation`。反射、重基或其他无 Transfer 的余额变化也会被保守过滤，这是已确认的产品取舍。
+仅在 `expectedBalance >= 1 whole token` 时执行差异判定。若 `missing > 0` 且 `missingRatio > 1%`，立即得到 `blocked / hidden-balance-mutation`。历史 opening balance 读取失败得到 `unknown / evidence-unavailable`。反射、重基或其他无 Transfer 的余额变化也会被保守过滤，这是已确认的产品取舍。
 
 账本计算使用整数，不把大整数转换为 JavaScript `Number`。查询错误或样本不足得到 `unknown`，不得吞错后宣称通过。
 
@@ -74,14 +83,17 @@ missingRatio = missing / ledgerBalance
 
 ## 真实卖出证据
 
-从目标 token 的 `wallet → pool` Transfer 中提取候选卖出，按交易哈希读取成功 receipt。一次卖出只有同时满足以下条件才算“有效卖出”：
+从目标 token 的 `wallet → pool` Transfer 中提取候选卖出。候选 Transfer 自身必须先达到 `max(1 whole token, pool token balance / 10000)`，然后按交易哈希汇总候选来源集合；粉尘、已确认卖家、协议/低地址及经 code 判定为合约的来源不会消耗 receipt 预算。每个哈希只读取一次成功 receipt，且 `receipt.from` 必须属于该哈希的候选来源集合。
 
-- 卖方不是 pool、Router、零地址、销毁地址或合约地址。
-- token 输入不少于分析时 pool token 余额的 `0.01%`，且不少于 1 whole token。
-- 同一 receipt 中存在从 pool 流出的非零报价币 Transfer；原生币路径允许使用 WETH 从 pool 流向 Router 后销毁/解包的证据。
-- receipt 状态成功。
+receipt 日志按 `logIndex/index` 排序，并以 exact pool 的相邻 `Swap` 事件切分。对每个当前 Swap，其 segment 是上一个 exact-pool Swap 之后到当前 Swap 为止的日志。一次卖出只有同时满足以下条件才算“有效卖出”：
 
-至少 3 个不同钱包各有一笔有效卖出，且账本一致性和多档检查均未发现阻断，才得到 `confirmed`。receipt 查询限制在为证明 3 个不同卖方所需的最少数量，并设置硬上限；达到上限仍不足时为 `unknown / insufficient-meaningful-sells`。
+- receipt `status=1`、`from` 存在，且卖方不是 pool、Router、零地址、销毁地址、低地址/precompile 或合约地址。
+- 当前 segment 内，目标 token 必须由 `receipt.from` 直接转入 exact pool，累计值达到 meaningful threshold。
+- 当前 exact-pool 标准 V2 `Swap` 的目标 token `amountIn` 达到同一 threshold，quote `amountOut > 0`，方向必须与已绑定的 `token0/token1` 一致。
+- 卖方在该 segment 的 token Transfer 输入不得小于 Swap 的 token 实际输入，允许 fee-on-transfer 日志值大于池实际输入，但不允许他方供资。
+- 当前 segment 内 quote token 相对 exact pool 的净流出必须大于零；同时整笔 receipt 的 quote token 对该池最终净流出也必须大于零。卖出后等额回流或同交易反向买回不能形成有效卖出。
+
+同一 receipt 最多为一个卖家计数，卖家按 `receipt.from` 去重。至少 3 个不同绑定 EOA 各有一笔有效卖出，且账本一致性和多档检查均未发现阻断，才得到 `confirmed`。达到 receipt 上限仍不足时为 `unknown / insufficient-meaningful-sells`。
 
 该规则降低白名单钱包伪造卖出证据的风险，但不能保证识别所有选择性黑名单、延时开关或未来状态变化。
 
@@ -92,6 +104,8 @@ missingRatio = missing / ledgerBalance
 - `blocked` → `honeypot=true`、`complete=true`，加入“蜜罐 / 无法卖出”红旗，最终 verdict 必须为 `skip`。
 - `confirmed` → `honeypot=false`、`complete=true`，之后才能获得现有安全加分并参与 `green/review` 判定。
 - `unknown` → `honeypot=null`、`complete=false`，不宣称安全。
+
+`analyze`、`runtime` 和 `notify` 共用 `normalizeSellabilityEvidence`，不存在各自的宽松状态解释。`blocked` 始终优先保留；只有 `buyerSamples`、`ladderSamples`、`meaningfulSellers` 都是非负整数，前两者大于零、真实卖家至少 3 个，并且 legacy `honeypot === false` 时，输入的 `confirmed` 才能保持确认。其他畸形、残缺或冲突输入一律规范化为 `unknown`，不能获得安全分或触发普通候选通知。
 
 `handleCandidate` 的 Telegram 门槛改为：
 
@@ -110,12 +124,14 @@ unknown:
 
 Telegram 报告增加明确一行：卖出安全状态、原因及样本数。不得在 `unknown` 时使用“通过”“可小仓”文案。
 
+报告内 DexScreener、Blockscout、GMGN 等动态链接统一经 URL 解析，只允许 `http:` 和 `https:`。不支持的协议或畸形 URL 只显示安全纯文本标签，不生成 `<a>`；允许的 URL 在写入 `href` 前转义 `& < > " '`，显示文本继续使用 HTML 文本转义。
+
 ## 错误处理与资源边界
 
 - RPC 日志、receipt、code 或 balance 查询发生预期外失败时，保留错误上下文并返回 `unknown / evidence-unavailable`。
 - 数据不足是明确的 `unknown`，不伪装成系统错误，也不生成红色误报。
-- 每枚候选最多检查 5 个买家、3 个额度样本，并限制 receipt 查询数量。
-- 日志使用现有分块与退避读取；不得用一个无限区块范围查询。
+- 每枚候选最多检查 5 个买家、3 个额度样本、30 个 receipt，并按地址去重限制 50 次 EOA code 查询。
+- Transfer 日志使用现有 2000 区块分块与退避读取，总预算为 10000 条；普通分块和递归 range split 共用剩余预算，超限返回 `unknown / evidence-unavailable`，不得截断后确认。
 - 本次不新增普通候选的持久化重试队列。证据不足或数据异常的候选可能被静默并错过，安全优先于覆盖率。
 - 关键日志输出 token、pool、状态、原因码和样本计数，不输出 RPC 凭据。
 
@@ -133,7 +149,9 @@ Telegram 报告增加明确一行：卖出安全状态、原因及样本数。�
 8. `unknown` 即使 100 分也不调用 Telegram；`blocked` 发送红色风险报告；`confirmed` 仍按 `MIN_SCORE` 推送完整报告。
 9. V3、V4 与无法定位地址的池返回 `unsupported-venue` 并静默。
 10. Pons 关键生命周期通知和启动提示不受影响。
-11. `npm test`、`git diff --check` 和无交易能力静态扫描通过。
+11. 残缺、负数、非整数计数及 legacy honeypot 冲突不能伪造 confirmed；blocked 冲突仍保持 blocked。
+12. 动态链接只允许可解析的 HTTP(S)，危险协议、畸形 URL 和 HTML 属性分隔符无法突破 `href`。
+13. `npm test`、`git diff --check` 和无交易能力静态扫描通过。
 
 ## 非目标
 

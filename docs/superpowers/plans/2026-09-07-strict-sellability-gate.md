@@ -10,6 +10,44 @@
 
 ---
 
+## 最终实现记录（2026-09-07）
+
+本节记录完成 A-D 阶段后的实际实现，是验收和维护时的权威说明。下方 Task 1-6 保留为最初批准的 TDD 执行记录，其中示例代码描述的是当时计划，不再代表最终安全边界。
+
+### 池身份与固定快照
+
+- 仅支持有效非零地址的 `uniswap-v2`；其他 venue 或缺失 pool 在 provider、bytecode、quote、collector 调用前返回 `unknown / unsupported-venue`。
+- 每次支持的 V2 分析只取得一次 `analysisBlock`。token code、Router 报价、Transfer 日志 `toBlock`、余额、transfer `eth_call`、Factory/Pair 读取和 EOA code 查询全部绑定该区块。
+- quote 的原生币/零地址表示先规范化为 WETH；Factory `getPair(token, quote)` 必须等于候选 pool，pool `token0/token1` 必须恰好是目标 token 与 quote，并据此固定 Swap 方向。
+- 成功解码后的 Factory/Pair 不匹配返回 `pool-binding-mismatch`；RPC、ABI 解码失败或创建起点晚于快照返回 `evidence-unavailable`。所有这些结论都是静默 `unknown`。
+
+### 账本、额度与真实卖出
+
+- 买家账本使用 `openingBalance(start - 1) + intervalNet` 与 head 的 `balanceOf` 比较；`start == 0` 时 opening balance 为零。历史状态不可读时 fail closed 为 `evidence-unavailable`。
+- 最多取 5 个 EOA 买家和其中 3 个足量钱包，检查 1%、10%、50%、100% 的只读 token `transfer`；隐藏余额、额度限制或明确 transfer 失败保持 `blocked`。
+- meaningful threshold 为 `max(1 whole token, pool token balance / 10000)`。候选 token Transfer 自身未达门槛时不会读取 receipt。
+- 候选按交易哈希保存来源集合；协议地址、低地址/precompile、合约地址及已计数卖家在 receipt 前过滤。每个哈希只读一次 receipt，且 `receipt.from` 必须属于该哈希来源集合，卖家按 `receipt.from` 去重。
+- receipt 内日志按 index 排序，以 exact-pool Swap 切分 segment。合格 segment 必须同时具备：`receipt.from -> pool` 的足量 token 输入、方向正确且足量的标准 V2 Swap token `amountIn`、正数 quote `amountOut`、卖方输入不少于 Swap 输入，以及该 segment 的 quote 对池净流出为正。
+- 扫描完整 receipt 后还要求 quote token 对 exact pool 的整笔最终净流出为正。因此卖出后等额回流、同交易反向买回、无关池 Swap 或无关位置的 quote 流出均不能确认卖出。
+- 三个不同绑定 EOA 的合格卖出，加上正数 buyer/ladder 样本，才可生成原始 `confirmed`。
+
+### 资源上限与错误语义
+
+- Transfer 日志预算为 10000；普通分块和递归 range split 共用剩余预算，超限不截断，返回 `unknown / evidence-unavailable`。
+- receipt 最多读取 30 个；EOA `getCode` 最多按地址去重读取 50 次；买家与 ladder 上限分别为 5 和 3。
+- 所有 state/code/log/quote 读取保持同一分析快照。预期外 RPC 失败保留可识别上下文并降级为 `evidence-unavailable`，不得转成 confirmed 或红色误报。
+
+### 统一状态门与 Telegram HTML
+
+- `analyze`、`runtime`、`notify` 只使用 `normalizeSellabilityEvidence`：`blocked` 优先；`confirmed` 仅在三项计数均为非负整数、buyer/ladder 大于零、meaningful sellers 至少 3 且 legacy honeypot 严格等于 `false` 时保留；其余输入全部为 `unknown`。
+- `analyze` 在评分和安全字段写入前规范化；`runtime` 在通知判定前规范化；`notify` 用同一结果渲染，残缺/畸形 confirmed 静默，blocked 继续推送红色风险。
+- Telegram 报告中的动态链接统一用 `URL` 解析并只接受 `http:`/`https:`。危险协议或畸形 URL 只显示纯文本标签；合法 URL 的 `href` 属性转义 `& < > " '`，显示文本仍走普通 HTML 转义。
+
+### 最终验证范围
+
+- 定向测试覆盖 exact pool/factory/token 顺序、固定区块、opening balance、分段 Swap、整笔 quote 净流出、预算投毒、共享 normalizer 及动态链接协议/属性注入。
+- 全量验收继续使用 `npm test`、`git diff --check`、工作树检查和 push-only 静态检查；未新增真实交易能力。
+
 ## File map
 
 - Create `src/sellability.js`: Transfer 日志解析、账本一致性、多档只读转账、真实卖出收据判定与最终状态聚合。
