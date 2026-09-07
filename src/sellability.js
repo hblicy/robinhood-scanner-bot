@@ -45,8 +45,8 @@ function encodeBalanceOf(address) {
   return transferInterface.encodeFunctionData("balanceOf", [address]);
 }
 
-async function readBalance(provider, token, address, head) {
-  const data = await provider.call({ to: token, data: encodeBalanceOf(address), blockTag: head });
+async function readBalance(provider, token, address, head, retry) {
+  const data = await retry(() => provider.call({ to: token, data: encodeBalanceOf(address), blockTag: head }));
   return BigInt(transferInterface.decodeFunctionResult("balanceOf", data)[0]);
 }
 
@@ -230,7 +230,7 @@ export async function inspectSellability(context, dependencies = {}) {
         if (sameAddress(transfer.to, wallet)) ledgerBalance += transfer.value;
         if (sameAddress(transfer.from, wallet)) ledgerBalance -= transfer.value;
       }
-      const reportedBalance = await readBalance(provider, context.token, wallet, head);
+      const reportedBalance = await readBalance(provider, context.token, wallet, head, retry);
       balances.set(wallet.toLowerCase(), reportedBalance);
       if (evaluateLedgerBalance({ ledgerBalance, reportedBalance, oneToken }).blocked) {
         return sellabilityResult(SELLABILITY.BLOCKED, "hidden-balance-mutation", {
@@ -248,12 +248,13 @@ export async function inspectSellability(context, dependencies = {}) {
       const steps = [];
       for (const percent of [1, 10, 50, 100]) {
         try {
-          const data = await provider.call({
+          const amount = (balance * BigInt(percent)) / 100n || 1n;
+          const data = await retry(() => provider.call({
             from: wallet,
             to: context.token,
-            data: transferInterface.encodeFunctionData("transfer", [context.pool, (balance * BigInt(percent)) / 100n]),
+            data: transferInterface.encodeFunctionData("transfer", [context.pool, amount]),
             blockTag: head,
-          });
+          }));
           steps.push({ percent, ok: decodeTransferCall(data) });
         } catch (error) {
           if (!isContractCallRevert(error)) throw error;
@@ -265,7 +266,7 @@ export async function inspectSellability(context, dependencies = {}) {
       if (ladder.reason === "evidence-unavailable") return unavailable("transfer simulation returned empty data", { buyerSamples, ladderSamples });
     }
 
-    const poolBalance = await readBalance(provider, context.token, context.pool, head);
+    const poolBalance = await readBalance(provider, context.token, context.pool, head, retry);
     const meaningfulThreshold = poolBalance / 10000n > oneToken ? poolBalance / 10000n : oneToken;
     const sellers = new Set();
     const receiptHashes = new Set();

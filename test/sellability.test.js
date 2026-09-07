@@ -403,6 +403,49 @@ describe("V2 sellability evidence", () => {
     assert.equal((await inspectSellability(context(), { provider })).reason, "sell-transfer-blocked");
   });
 
+  it("runs every balance and transfer call through the injected retry wrapper", async () => {
+    const calls = [];
+    const provider = fakeProvider({
+      logs: [transferLog({ from: POOL, to: BUYERS[0], value: 100n })],
+      balances: new Map([[BUYERS[0].toLowerCase(), 100n]]),
+      calls,
+    });
+    let retryDepth = 0;
+    let callsInsideRetry = 0;
+    const originalCall = provider.call;
+    provider.call = async (request) => {
+      if (retryDepth > 0) callsInsideRetry++;
+      return originalCall(request);
+    };
+    const retry = async (operation) => {
+      retryDepth++;
+      try {
+        return await operation();
+      } finally {
+        retryDepth--;
+      }
+    };
+
+    await inspectSellability(context(), { provider, retry });
+    assert.equal(callsInsideRetry, calls.length);
+    assert.equal(calls.filter((request) => request.data.startsWith(iface.getFunction("transfer").selector)).length, 4);
+  });
+
+  it("uses a nonzero amount for every transfer ladder step with one whole token", async () => {
+    const calls = [];
+    const provider = fakeProvider({
+      logs: [transferLog({ from: POOL, to: BUYERS[0], value: 1n })],
+      balances: new Map([[BUYERS[0].toLowerCase(), 1n]]),
+      calls,
+    });
+
+    await inspectSellability(context({ decimals: 0 }), { provider });
+    const amounts = calls
+      .filter((request) => request.data.startsWith(iface.getFunction("transfer").selector))
+      .map((request) => iface.parseTransaction({ data: request.data }).args[1]);
+    assert.deepEqual(amounts, [1n, 1n, 1n, 1n]);
+  });
+
   it("requires three distinct non-dust successful sales with quote transfers", async () => {
     const sales = BUYERS.slice(0, 3).flatMap((seller, i) => {
       const hash = `0x0${i + 1}`;
