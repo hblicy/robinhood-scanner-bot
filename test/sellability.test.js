@@ -117,13 +117,25 @@ describe("sellability core", () => {
     );
   });
 
-  it("blocks a ladder when a later sell attempt fails after earlier success", () => {
+  it("treats equal percent success and failure as transfer blocked", () => {
     assert.deepEqual(
       evaluateTransferLadder([
-        { percent: 1, ok: true },
         { percent: 10, ok: true },
+        { percent: 10, ok: false },
+      ]),
+      {
+        blocked: true,
+        reason: "sell-transfer-blocked",
+      }
+    );
+  });
+
+  it("blocks a later larger sell attempt even when inputs are out of order", () => {
+    assert.deepEqual(
+      evaluateTransferLadder([
         { percent: 50, ok: false },
-        { percent: 100, ok: false },
+        { percent: 10, ok: true },
+        { percent: 1, ok: true },
       ]),
       {
         blocked: true,
@@ -160,34 +172,64 @@ describe("sellability core", () => {
     );
   });
 
-  it("returns unknown when buyer or ladder evidence is missing", () => {
+  it("returns unknown when buyer or ladder sample counts are not positive integers", () => {
+    for (const input of [
+      { buyerSamples: 0, ladderSamples: 2 },
+      { buyerSamples: 2, ladderSamples: 0 },
+      { buyerSamples: -1, ladderSamples: 2 },
+      { buyerSamples: 2, ladderSamples: -1 },
+      { buyerSamples: 2.5, ladderSamples: 2 },
+      { buyerSamples: 2, ladderSamples: 2.5 },
+      { buyerSamples: NaN, ladderSamples: 2 },
+      { buyerSamples: 2, ladderSamples: NaN },
+      { buyerSamples: null, ladderSamples: 2 },
+      { buyerSamples: 2, ladderSamples: null },
+    ]) {
+      assert.deepEqual(
+        finalizeSellability({
+          ...input,
+          sellers: new Set(["a", "b", "c"]),
+        }),
+        {
+          status: "unknown",
+          reason: "evidence-unavailable",
+          buyerSamples: input.buyerSamples,
+          ladderSamples: input.ladderSamples,
+          meaningfulSellers: 3,
+          details: [],
+        }
+      );
+    }
+  });
+
+  it("returns unknown when sellers is not a Set", () => {
     assert.deepEqual(
       finalizeSellability({
-        buyerSamples: 0,
+        buyerSamples: 2,
         ladderSamples: 2,
         sellers: ["a", "b", "c"],
       }),
       {
         status: "unknown",
         reason: "evidence-unavailable",
-        buyerSamples: 0,
+        buyerSamples: 2,
         ladderSamples: 2,
-        meaningfulSellers: 3,
+        meaningfulSellers: 0,
         details: [],
       }
     );
     assert.deepEqual(
       finalizeSellability({
         buyerSamples: 2,
-        ladderSamples: 0,
-        sellers: ["a", "b", "c"],
+        ladderSamples: 2,
+        sellers: 3,
       }),
       {
         status: "unknown",
         reason: "evidence-unavailable",
         buyerSamples: 2,
-        ladderSamples: 0,
-        meaningfulSellers: 3,
+        ladderSamples: 2,
+        meaningfulSellers: 0,
         details: [],
       }
     );
@@ -198,7 +240,7 @@ describe("sellability core", () => {
       finalizeSellability({
         buyerSamples: 2,
         ladderSamples: 1,
-        sellers: ["a", "a", "b"],
+        sellers: new Set(["a", "a", "b"]),
         details: ["only two sellers"],
       }),
       {
@@ -212,12 +254,31 @@ describe("sellability core", () => {
     );
   });
 
+  it("ignores invalid Set members when counting meaningful sellers", () => {
+    assert.deepEqual(
+      finalizeSellability({
+        buyerSamples: 3,
+        ladderSamples: 3,
+        sellers: new Set([null, "", " ", "a", "b"]),
+        details: ["invalid members present"],
+      }),
+      {
+        status: "unknown",
+        reason: "insufficient-meaningful-sells",
+        buyerSamples: 3,
+        ladderSamples: 3,
+        meaningfulSellers: 2,
+        details: ["invalid members present"],
+      }
+    );
+  });
+
   it("confirms only after three meaningful sellers and positive evidence", () => {
     assert.deepEqual(
       finalizeSellability({
         buyerSamples: 4,
         ladderSamples: 3,
-        sellers: ["a", "b", "c", "c"],
+        sellers: new Set(["a", "b", "c", "c"]),
         details: ["ledger ok", "ladder ok"],
       }),
       {

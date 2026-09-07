@@ -38,26 +38,33 @@ export function evaluateLedgerBalance({ ledgerBalance, reportedBalance, oneToken
 }
 
 export function evaluateTransferLadder(results) {
-  const ladder = [...results].sort((left, right) => {
-    const leftPercent = typeof left?.percent === "number" ? left.percent : 0;
-    const rightPercent = typeof right?.percent === "number" ? right.percent : 0;
-    return leftPercent - rightPercent;
-  });
+  const successfulPercents = [];
+  const failedPercents = [];
   let sawUnknown = false;
-  let sawPassingSmallerStep = false;
 
-  for (const step of ladder) {
+  for (const step of results) {
+    if (step?.ok === true) {
+      successfulPercents.push(step.percent);
+      continue;
+    }
     if (step?.ok === false) {
-      return {
-        blocked: true,
-        reason: sawPassingSmallerStep ? "sell-size-limited" : "sell-transfer-blocked",
-      };
+      failedPercents.push(step.percent);
+      continue;
     }
     if (step?.ok == null) {
       sawUnknown = true;
-    } else if (step.ok === true) {
-      sawPassingSmallerStep = true;
     }
+  }
+
+  if (failedPercents.length > 0) {
+    const hasStrictlySmallerSuccess = failedPercents.some((failedPercent) =>
+      successfulPercents.some((successPercent) => successPercent < failedPercent)
+    );
+
+    return {
+      blocked: true,
+      reason: hasStrictlySmallerSuccess ? "sell-size-limited" : "sell-transfer-blocked",
+    };
   }
 
   return {
@@ -67,22 +74,30 @@ export function evaluateTransferLadder(results) {
 }
 
 function countMeaningfulSellers(sellers) {
-  if (Array.isArray(sellers)) {
-    return new Set(sellers.filter((seller) => seller != null)).size;
+  if (!(sellers instanceof Set)) {
+    return { valid: false, count: 0 };
   }
-  if (sellers instanceof Set) {
-    return sellers.size;
+
+  const meaningful = new Set();
+  for (const seller of sellers) {
+    if (typeof seller !== "string") continue;
+    const normalized = seller.trim();
+    if (!normalized) continue;
+    meaningful.add(normalized);
   }
-  if (typeof sellers === "number" && Number.isFinite(sellers)) {
-    return sellers;
-  }
-  return 0;
+
+  return { valid: true, count: meaningful.size };
+}
+
+function isPositiveInteger(value) {
+  return Number.isInteger(value) && value > 0;
 }
 
 export function finalizeSellability({ buyerSamples, ladderSamples, sellers, details = [] }) {
-  const meaningfulSellers = countMeaningfulSellers(sellers);
+  const sellerEvidence = countMeaningfulSellers(sellers);
+  const meaningfulSellers = sellerEvidence.count;
 
-  if (buyerSamples === 0 || ladderSamples === 0) {
+  if (!isPositiveInteger(buyerSamples) || !isPositiveInteger(ladderSamples) || !sellerEvidence.valid) {
     return sellabilityResult(SELLABILITY.UNKNOWN, "evidence-unavailable", {
       buyerSamples,
       ladderSamples,
