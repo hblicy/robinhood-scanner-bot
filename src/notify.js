@@ -10,6 +10,7 @@ const VERDICT = {
 
 export function formatAlert(report) {
   const { meta, facts, score, verdict, red, checks, links, token, venue, creator } = report;
+  const sellability = normalizeSellability(report.sellability);
   const lines = [];
   lines.push(`${VERDICT[verdict] || verdict}  <b>${esc(meta.symbol)}</b>  ${score}/100`);
   lines.push(`${esc(meta.name || "")}`);
@@ -36,6 +37,9 @@ export function formatAlert(report) {
   lines.push(
     `<b>创建者</b> ${creator ? `<code>${short(creator)}</code>` : "?"} 持仓 ${facts.creatorPct?.toFixed(1) ?? "?"}%  · 历史发币 ${facts.deployerTokens ?? "未知"}`
   );
+  lines.push(
+    `<b>卖出安全</b> ${sellabilityLabel(sellability.status)}  原因 ${formatSellabilityReason(sellability.reason)}  买家样本 ${sellability.buyerSamples}  额度样本 ${sellability.ladderSamples}  真实卖家 ${sellability.meaningfulSellers}`
+  );
   const buyTax = Number.isFinite(facts.buyTaxBps) ? facts.buyTaxBps : "未知";
   const sellTax = Number.isFinite(facts.sellTaxBps) ? facts.sellTaxBps : "未知";
   const lpStatus = facts.lpUnknown
@@ -44,7 +48,7 @@ export function formatAlert(report) {
       ? `已烧 ${facts.lpBurnedPct.toFixed(0)}%`
       : "未验证";
   lines.push(
-    `<b>安全</b> 蜜罐 ${facts.honeypot === false ? "通过" : facts.honeypot === true ? "失败" : "未完成"}  税 ${buyTax}/${sellTax}bps  LP ${lpStatus}`
+    `<b>安全</b> ${honeypotRiskLabel(facts.honeypot, sellability.status)}  税 ${buyTax}/${sellTax}bps  LP ${lpStatus}`
   );
   if (report.errorSources?.length) {
     const sources = [...new Set(report.errorSources.map(({ source }) => String(source)))];
@@ -152,6 +156,47 @@ function esc(s) {
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
+}
+
+function normalizeSellability(sellability) {
+  if (!sellability || typeof sellability !== "object") {
+    return {
+      status: "unknown",
+      reason: "evidence-unavailable",
+      buyerSamples: 0,
+      ladderSamples: 0,
+      meaningfulSellers: 0,
+    };
+  }
+
+  return {
+    status: sellability.status === "confirmed" || sellability.status === "blocked" ? sellability.status : "unknown",
+    reason: sellability.reason,
+    buyerSamples: cleanCount(sellability.buyerSamples),
+    ladderSamples: cleanCount(sellability.ladderSamples),
+    meaningfulSellers: cleanCount(sellability.meaningfulSellers),
+  };
+}
+
+function sellabilityLabel(status) {
+  if (status === "confirmed") return "已确认";
+  if (status === "blocked") return "已阻断";
+  return "未确认";
+}
+
+function formatSellabilityReason(reason) {
+  if (reason == null || reason === "") return "无";
+  return esc(reason);
+}
+
+function cleanCount(value) {
+  return Number.isInteger(value) && value >= 0 ? value : 0;
+}
+
+function honeypotRiskLabel(honeypot, sellabilityStatus) {
+  if (sellabilityStatus === "blocked" || honeypot === true) return "风险 已阻断";
+  if (sellabilityStatus === "confirmed" || honeypot === false) return "风险 未发现阻断";
+  return "风险 未确认";
 }
 
 function short(addr) {
