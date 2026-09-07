@@ -135,6 +135,7 @@ describe("scanner orchestration", () => {
           meta: { symbol: event.token },
           red: [],
           honeypot: {},
+          sellability: { status: "confirmed", reason: "sellable" },
         }),
         consoleAlert: async (report) => { alerted.push(report.token); },
         log: () => {},
@@ -159,7 +160,15 @@ describe("scanner orchestration", () => {
           : { ...event, identity: "not_pons", pad: "long" },
         analyze: async (event) => {
           analyzed.push(event.token);
-          return { ...event, score: 90, verdict: "green", meta: { symbol: event.token }, red: [], honeypot: {} };
+          return {
+            ...event,
+            score: 90,
+            verdict: "green",
+            meta: { symbol: event.token },
+            red: [],
+            honeypot: {},
+            sellability: { status: "confirmed", reason: "sellable" },
+          };
         },
         consoleAlert: async () => {},
         log: () => {},
@@ -209,6 +218,7 @@ describe("scanner orchestration", () => {
         meta: { symbol: "SAFE" },
         red: [],
         honeypot: {},
+        sellability: { status: "confirmed", reason: "sellable" },
       }),
       consoleAlert: async () => { calls.console += 1; },
       markSeen: () => { calls.seen += 1; },
@@ -288,6 +298,7 @@ describe("scanner orchestration", () => {
               meta: { symbol: candidate.token },
               red: [],
               honeypot: {},
+              sellability: { status: "confirmed", reason: "sellable" },
             };
           },
           consoleAlert: async (report) => { alerted.push(report.token); },
@@ -383,6 +394,7 @@ describe("scanner orchestration", () => {
           meta: { symbol: "GECKO" },
           red: [],
           honeypot: {},
+          sellability: { status: "confirmed", reason: "sellable" },
         }),
         consoleAlert: async (report) => { alerted.push(report.token); },
         log: () => {},

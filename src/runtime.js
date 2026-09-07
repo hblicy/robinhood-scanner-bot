@@ -19,16 +19,22 @@ export async function handleCandidate(event, options, dependencies) {
 
   dependencies.log(`analyzing ${event.token} via ${event.source}/${event.venue}`);
   const report = await dependencies.analyze(event);
+  const sellabilityStatus = report.sellability?.status || "unknown";
+  const sellabilityReason = report.sellability?.reason || "none";
   const shouldAlert =
-    report.verdict === "green" ||
-    report.verdict === "review" ||
-    report.honeypot?.honeypot === true ||
-    report.score >= dependencies.minScore;
+    sellabilityStatus === "blocked" ||
+    (sellabilityStatus === "confirmed" && (
+      report.verdict === "green" ||
+      report.verdict === "review" ||
+      report.score >= dependencies.minScore
+    ));
   if (shouldAlert) await dependencies.alertReport(report);
   else {
     const errorSources = [...new Set((report.errorSources || []).map(({ source }) => source))];
     const suffix = errorSources.length ? ` data-errors=${errorSources.join(",")}` : "";
-    dependencies.log(`quiet skip ${report.meta.symbol} ${report.score}/100 ${report.verdict}${suffix}`);
+    dependencies.log(
+      `quiet skip ${report.meta.symbol} ${report.score}/100 ${report.verdict}${suffix} sellability=${sellabilityStatus}:${sellabilityReason}`
+    );
   }
   if (options.persistSeen !== false) {
     dependencies.markSeen(key, {

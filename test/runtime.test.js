@@ -17,15 +17,17 @@ describe("scanner runtime", () => {
     );
   });
 
-  it("keeps one-shot scan processing read-only", async () => {
+  it("keeps unknown sellability silent even at score 100", async () => {
     let seen = 0;
+    let alerted = 0;
     const report = {
       verdict: "green",
-      score: 90,
+      score: 100,
       venue: "uniswap-v2",
       token: "0x1",
       meta: { symbol: "SAFE" },
       honeypot: { honeypot: false },
+      sellability: { status: "unknown", reason: "evidence-unavailable" },
     };
     await handleCandidate(
       { venue: "uniswap-v2", pool: "0xA", token: "0x1", createdAt: null, source: "test" },
@@ -36,11 +38,119 @@ describe("scanner runtime", () => {
         minScore: 55,
         analyze: async () => report,
         markSeen: () => { seen += 1; },
-        alertReport: async () => {},
+        alertReport: async () => { alerted += 1; },
         log: () => {},
       }
     );
     assert.equal(seen, 0);
+    assert.equal(alerted, 0);
+  });
+
+  it("keeps missing sellability fields silent", async () => {
+    let alerted = 0;
+    await handleCandidate(
+      { venue: "uniswap-v2", pool: "0xA", token: "0x1", createdAt: null, source: "test" },
+      { persistSeen: false },
+      {
+        now: () => 1,
+        maxAgeMinutes: 30,
+        minScore: 55,
+        analyze: async () => ({
+          verdict: "review",
+          score: 100,
+          venue: "uniswap-v2",
+          pool: "0xA",
+          token: "0x1",
+          meta: { symbol: "MISSING" },
+          honeypot: {},
+        }),
+        markSeen: () => {},
+        alertReport: async () => { alerted += 1; },
+        log: () => {},
+      }
+    );
+    assert.equal(alerted, 0);
+  });
+
+  it("alerts blocked sellability candidates even when they otherwise skip", async () => {
+    let alerted = 0;
+    await handleCandidate(
+      { venue: "uniswap-v2", pool: "0xA", token: "0x1", createdAt: null, source: "test" },
+      { persistSeen: false },
+      {
+        now: () => 1,
+        maxAgeMinutes: 30,
+        minScore: 55,
+        analyze: async () => ({
+          verdict: "skip",
+          score: 0,
+          venue: "uniswap-v2",
+          pool: "0xA",
+          token: "0x1",
+          meta: { symbol: "BLOCKED" },
+          honeypot: {},
+          sellability: { status: "blocked", reason: "hidden-balance-mutation" },
+        }),
+        markSeen: () => {},
+        alertReport: async () => { alerted += 1; },
+        log: () => {},
+      }
+    );
+    assert.equal(alerted, 1);
+  });
+
+  it("keeps confirmed sellability quiet below the score floor", async () => {
+    let alerted = 0;
+    await handleCandidate(
+      { venue: "uniswap-v2", pool: "0xA", token: "0x1", createdAt: null, source: "test" },
+      { persistSeen: false },
+      {
+        now: () => 1,
+        maxAgeMinutes: 30,
+        minScore: 55,
+        analyze: async () => ({
+          verdict: "skip",
+          score: 54,
+          venue: "uniswap-v2",
+          pool: "0xA",
+          token: "0x1",
+          meta: { symbol: "CONFIRMED" },
+          honeypot: {},
+          sellability: { status: "confirmed", reason: "sellable" },
+        }),
+        markSeen: () => {},
+        alertReport: async () => { alerted += 1; },
+        log: () => {},
+      }
+    );
+    assert.equal(alerted, 0);
+  });
+
+  it("alerts confirmed sellability at review threshold", async () => {
+    let alerted = 0;
+    await handleCandidate(
+      { venue: "uniswap-v2", pool: "0xA", token: "0x1", createdAt: null, source: "test" },
+      { persistSeen: false },
+      {
+        now: () => 1,
+        maxAgeMinutes: 30,
+        minScore: 55,
+        analyze: async () => ({
+          verdict: "review",
+          score: 55,
+          venue: "uniswap-v2",
+          pool: "0xA",
+          token: "0x1",
+          meta: { symbol: "CONFIRMED" },
+          honeypot: {},
+          sellability: { status: "confirmed", reason: "sellable" },
+        }),
+        markSeen: () => {},
+        alertReport: async () => { alerted += 1; },
+        log: () => {},
+      }
+    );
+    assert.equal(alerted, 1);
   });
 
   it("does not mark a candidate seen when its alert ultimately fails", async () => {
@@ -54,18 +164,19 @@ describe("scanner runtime", () => {
           maxAgeMinutes: 30,
           minScore: 55,
           analyze: async () => ({
-            verdict: "green",
-            score: 90,
-            venue: "uniswap-v2",
-            pool: "0xA",
-            token: "0x1",
-            meta: { symbol: "SAFE" },
-            honeypot: {},
-          }),
-          markSeen: () => { seen += 1; },
-          alertReport: async () => { throw new Error("telegram unavailable"); },
-          log: () => {},
-        }
+          verdict: "green",
+          score: 90,
+          venue: "uniswap-v2",
+          pool: "0xA",
+          token: "0x1",
+          meta: { symbol: "SAFE" },
+          honeypot: {},
+          sellability: { status: "confirmed", reason: "sellable" },
+        }),
+        markSeen: () => { seen += 1; },
+        alertReport: async () => { throw new Error("telegram unavailable"); },
+        log: () => {},
+      }
       ),
       /telegram unavailable/
     );
@@ -89,6 +200,7 @@ describe("scanner runtime", () => {
           token: "0x1",
           meta: { symbol: "SAFE" },
           honeypot: {},
+          sellability: { status: "confirmed", reason: "sellable" },
         }),
         markSeen: () => { order.push("seen"); },
         alertReport: async () => { order.push("alert"); },
@@ -169,7 +281,7 @@ describe("scanner runtime", () => {
     assert.equal(analyzed, 1);
   });
 
-  it("includes auxiliary error sources in quiet skip logs", async () => {
+  it("includes sellability status and reason in quiet skip logs", async () => {
     const logs = [];
     await handleCandidate(
       { venue: "uniswap-v2", pool: "0xA", token: "0x1", createdAt: null, source: "test" },
@@ -185,6 +297,11 @@ describe("scanner runtime", () => {
           meta: { symbol: "QUIET" },
           honeypot: {},
           errorSources: [{ source: "Blockscout holders" }],
+          sellability: {
+            status: "unknown",
+            reason: "legacy inspector unavailable",
+            details: ["secret router path"],
+          },
         }),
         markSeen: () => {},
         alertReport: async () => {},
@@ -192,5 +309,7 @@ describe("scanner runtime", () => {
       }
     );
     assert.match(logs.join("\n"), /Blockscout holders/);
+    assert.match(logs.join("\n"), /sellability=unknown:legacy inspector unavailable/);
+    assert.doesNotMatch(logs.join("\n"), /secret router path/);
   });
 });
