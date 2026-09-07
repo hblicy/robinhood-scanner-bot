@@ -87,7 +87,13 @@ function fakeProvider({
     codeRequests,
     stats,
     async getBlockNumber() { stats.headReads++; if (errors.head) throw errors.head; return 100; },
-    async getLogs(request) { logRequests.push(request); if (errors.logs) throw errors.logs; return logs; },
+    async getLogs(request) {
+      logRequests.push(request);
+      if (errors.logs) throw errors.logs;
+      return logs.filter(({ blockNumber }) =>
+        blockNumber >= request.fromBlock && blockNumber <= request.toBlock
+      );
+    },
     async getCode(address, blockTag) {
       codeRequests.push({ address, blockTag });
       if (errors.code) throw errors.code;
@@ -535,7 +541,8 @@ describe("V2 sellability evidence", () => {
     assert.equal(result.status, "unknown");
     assert.equal(provider.stats.headReads, 0);
     assert.ok(provider.logRequests.length > 0);
-    assert.ok(provider.logRequests.every(({ toBlock }) => toBlock === 77));
+    assert.ok(provider.logRequests.every(({ toBlock }) => toBlock <= 77));
+    assert.equal(Math.max(...provider.logRequests.map(({ toBlock }) => toBlock)), 77);
     assert.ok(provider.calls.length > 0);
     assert.ok(provider.calls.every(({ blockTag }) => blockTag === 77));
     assert.ok(provider.codeRequests.length > 0);
