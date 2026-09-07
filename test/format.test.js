@@ -223,10 +223,154 @@ describe("formatAlert", () => {
         meaningfulSellers: 3,
       },
     }));
-    assert.match(text, /卖出安全<\/b> 已确认/);
+    assert.match(text, /卖出安全<\/b> 未确认/);
     assert.match(text, /风险 未确认/);
-    assert.doesNotMatch(text, /风险 未发现阻断/);
+    assert.doesNotMatch(text, /风险 未发现阻断|风险 已阻断/);
   });
+
+  const sellabilityCases = [
+    {
+      name: "confirmed缺计数",
+      sellability: {
+        status: "confirmed",
+        reason: "confirmed real sells",
+        buyerSamples: undefined,
+        ladderSamples: 4,
+        meaningfulSellers: 3,
+      },
+      facts: { honeypot: false, buyTaxBps: 0, sellTaxBps: 0, lpUnknown: false, lpBurnedPct: 100 },
+      sellabilityText: "卖出安全</b> 未确认",
+      riskText: "风险 未确认",
+    },
+    {
+      name: "buyer0",
+      sellability: {
+        status: "confirmed",
+        reason: "confirmed real sells",
+        buyerSamples: 0,
+        ladderSamples: 4,
+        meaningfulSellers: 3,
+      },
+      facts: { honeypot: false, buyTaxBps: 0, sellTaxBps: 0, lpUnknown: false, lpBurnedPct: 100 },
+      sellabilityText: "卖出安全</b> 未确认",
+      riskText: "风险 未确认",
+    },
+    {
+      name: "ladder0",
+      sellability: {
+        status: "confirmed",
+        reason: "confirmed real sells",
+        buyerSamples: 12,
+        ladderSamples: 0,
+        meaningfulSellers: 3,
+      },
+      facts: { honeypot: false, buyTaxBps: 0, sellTaxBps: 0, lpUnknown: false, lpBurnedPct: 100 },
+      sellabilityText: "卖出安全</b> 未确认",
+      riskText: "风险 未确认",
+    },
+    {
+      name: "sellers2",
+      sellability: {
+        status: "confirmed",
+        reason: "confirmed real sells",
+        buyerSamples: 12,
+        ladderSamples: 4,
+        meaningfulSellers: 2,
+      },
+      facts: { honeypot: false, buyTaxBps: 0, sellTaxBps: 0, lpUnknown: false, lpBurnedPct: 100 },
+      sellabilityText: "卖出安全</b> 未确认",
+      riskText: "风险 未确认",
+    },
+    {
+      name: "confirmed+honeypot true",
+      sellability: {
+        status: "confirmed",
+        reason: "confirmed real sells",
+        buyerSamples: 12,
+        ladderSamples: 4,
+        meaningfulSellers: 3,
+      },
+      facts: { honeypot: true, buyTaxBps: 0, sellTaxBps: 0, lpUnknown: false, lpBurnedPct: 100 },
+      sellabilityText: "卖出安全</b> 未确认",
+      riskText: "风险 未确认",
+    },
+    {
+      name: "confirmed+honeypot null",
+      sellability: {
+        status: "confirmed",
+        reason: "confirmed real sells",
+        buyerSamples: 12,
+        ladderSamples: 4,
+        meaningfulSellers: 3,
+      },
+      facts: { honeypot: null, buyTaxBps: 0, sellTaxBps: 0, lpUnknown: false, lpBurnedPct: 100 },
+      sellabilityText: "卖出安全</b> 未确认",
+      riskText: "风险 未确认",
+    },
+    {
+      name: "unknown+true",
+      sellability: {
+        status: "unknown",
+        reason: "insufficient-meaningful-sells",
+        buyerSamples: 12,
+        ladderSamples: 4,
+        meaningfulSellers: 3,
+      },
+      facts: { honeypot: true, buyTaxBps: 0, sellTaxBps: 0, lpUnknown: false, lpBurnedPct: 100 },
+      sellabilityText: "卖出安全</b> 未确认",
+      riskText: "风险 未确认",
+    },
+    {
+      name: "unknown+false",
+      sellability: {
+        status: "unknown",
+        reason: "insufficient-meaningful-sells",
+        buyerSamples: 12,
+        ladderSamples: 4,
+        meaningfulSellers: 3,
+      },
+      facts: { honeypot: false, buyTaxBps: 0, sellTaxBps: 0, lpUnknown: false, lpBurnedPct: 100 },
+      sellabilityText: "卖出安全</b> 未确认",
+      riskText: "风险 未确认",
+    },
+    {
+      name: "blocked+false",
+      sellability: {
+        status: "blocked",
+        reason: "hidden-balance-mutation",
+        buyerSamples: 12,
+        ladderSamples: 4,
+        meaningfulSellers: 3,
+      },
+      facts: { honeypot: false, buyTaxBps: 0, sellTaxBps: 0, lpUnknown: false, lpBurnedPct: 100 },
+      sellabilityText: "卖出安全</b> 已阻断",
+      riskText: "风险 已阻断",
+    },
+  ];
+
+  for (const testCase of sellabilityCases) {
+    it(`normalizes sellability before rendering the risk lines: ${testCase.name}`, () => {
+      const text = formatAlert(makeReport({
+        verdict: "review",
+        facts: testCase.facts,
+        sellability: testCase.sellability,
+      }));
+      assert.match(text, new RegExp(testCase.sellabilityText));
+      assert.match(text, new RegExp(testCase.riskText));
+      if (testCase.sellabilityText.includes("未确认")) {
+        assert.doesNotMatch(text, /卖出安全<\/b> 已确认|卖出安全<\/b> 已阻断/);
+      }
+      if (testCase.riskText.includes("未确认")) {
+        assert.doesNotMatch(text, /风险 已确认|风险 已阻断/);
+      }
+      if (testCase.riskText.includes("已阻断")) {
+        assert.doesNotMatch(text, /风险 未发现阻断|风险 未确认/);
+      }
+      if (testCase.riskText.includes("未发现阻断")) {
+        assert.doesNotMatch(text, /风险 已阻断|风险 未确认/);
+      }
+    });
+  }
 
   it("treats illegal sellability data as unconfirmed and escapes the reason", () => {
     const text = formatAlert(makeReport({
