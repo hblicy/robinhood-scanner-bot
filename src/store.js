@@ -371,12 +371,70 @@ export function createStore({
         return entry;
       });
     },
+
+    applyCheckResult(id, { token, nextToken, completedAt = now() }) {
+      const key = String(token || "").toLowerCase();
+      if (!key || !nextToken || typeof nextToken !== "object") {
+        throw new Error(`pending check ${id} requires token state`);
+      }
+      return commit((draft) => {
+        const entry = requireEntry(draft.pendingChecks, id, "pending check");
+        draft.tokens[key] = structuredClone(nextToken);
+        const watchlist = new Set(draft.watchlist.map((value) => String(value).toLowerCase()));
+        if (nextToken.watchlist) watchlist.add(key);
+        else watchlist.delete(key);
+        draft.watchlist = [...watchlist];
+        entry.status = "completed";
+        entry.completedAt = completedAt;
+        entry.lastError = null;
+        return entry;
+      });
+    },
+
+    commitTokenUpdate({ token, nextToken, notification = null, check = null }) {
+      const key = String(token || "").toLowerCase();
+      if (!key || !nextToken || typeof nextToken !== "object") {
+        throw new Error("token update requires token state");
+      }
+      return commit((draft) => {
+        draft.tokens[key] = structuredClone(nextToken);
+        const watchlist = new Set(draft.watchlist.map((value) => String(value).toLowerCase()));
+        if (nextToken.watchlist) watchlist.add(key);
+        else watchlist.delete(key);
+        draft.watchlist = [...watchlist];
+        if (notification?.id && !draft.outbox[notification.id]) {
+          draft.outbox[notification.id] = {
+            ...structuredClone(notification),
+            eventId: notification.eventId ?? null,
+            status: "pending",
+            attempts: 0,
+            nextAttemptAt: now(),
+            createdAt: now(),
+            deliveredAt: null,
+            lastError: null,
+          };
+        }
+        if (check?.id && !draft.pendingChecks[check.id]) {
+          draft.pendingChecks[check.id] = {
+            ...structuredClone(check),
+            eventId: check.eventId ?? null,
+            status: "pending",
+            attempts: 0,
+            nextAttemptAt: check.dueAt ?? now(),
+            createdAt: now(),
+            completedAt: null,
+            lastError: null,
+          };
+        }
+        return draft.tokens[key];
+      });
+    },
   };
 }
 
 let defaultStore;
 
-function getDefaultStore() {
+export function getDefaultStore() {
   if (!defaultStore) {
     defaultStore = createStore({
       dataDir: DATA_DIR,

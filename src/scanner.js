@@ -1,6 +1,6 @@
 import { SETTINGS, CHAIN, DATA_DIR } from "./config.js";
-import { getOnchainCursor, hasSeen, markSeen, setOnchainCursor } from "./store.js";
-import { findFirstBlockAtOrAfter, getBlockNumber, scanOnchain, sleep } from "./chain.js";
+import { getDefaultStore, getOnchainCursor, hasSeen, markSeen, setOnchainCursor } from "./store.js";
+import { findFirstBlockAtOrAfter, getBlockNumber, getProvider, scanOnchain, sleep } from "./chain.js";
 import { geckoNewPools } from "./market.js";
 import { analyze } from "./analyze.js";
 import { alertReport, formatAlert, sendTelegram } from "./notify.js";
@@ -8,6 +8,9 @@ import { CandidateQueue } from "./queue.js";
 import { candidateKey, handleCandidate } from "./runtime.js";
 import { safeErrorMessage, sanitizeRpcUrl } from "./safety.js";
 import { acquireInstanceLock } from "./instance-lock.js";
+import { createPonsTokenState, reducePonsEvent } from "./lifecycle.js";
+import { readPonsLaunch, scanPonsRange, verifyPonsDeployment } from "./pons.js";
+import { drainOutbox, nextRetryAt } from "./outbox.js";
 
 const DEFAULT_ANALYSIS_CONCURRENCY = 2;
 const candidates = new CandidateQueue({
@@ -16,6 +19,169 @@ const candidates = new CandidateQueue({
   keyOf: candidateKey,
 });
 let draining = false;
+
+function lifecycleNotification(event, state) {
+  const transitionType = {
+    token_launched: "new_launch",
+    launch_swept: "swept",
+    pool_graduated: "graduated",
+  }[event.kind];
+  if (!transitionType) return null;
+  const label = {
+    new_launch: "Pons V2 新币",
+    swept: "Pons V2 已 Sweep，正式池未确认",
+    graduated: "Pons V2 已链上毕业",
+  }[transitionType];
+  const id = `${event.eventId}:${transitionType}`;
+  return {
+    id,
+    eventId: event.eventId,
+    transitionType,
+    token: state.token,
+    text: `${label}\nCA ${state.token}\nID ${id}`,
+  };
+}
+
+function lifecycleChecks(event, state, now) {
+  const types = event.kind === "token_launched"
+    ? ["curve_flow", "holders", "deployer_24h", "line_a"]
+    : event.kind === "pool_graduated"
+      ? ["market", "line_c"]
+      : [];
+  return types.map((type) => ({
+    id: `${event.eventId}:${type}`,
+    eventId: event.eventId,
+    type,
+    token: state.token,
+    dueAt: now,
+  }));
+}
+
+async function buildPonsTransitions(events, {
+  provider,
+  readLaunch,
+  now,
+  initialTokens = {},
+}) {
+  const working = structuredClone(initialTokens);
+  const transitions = [];
+  for (const event of events) {
+    const record = await readLaunch(provider, event.token);
+    const key = event.token.toLowerCase();
+    const previous = working[key] || null;
+    const nextToken = previous
+      ? reducePonsEvent(previous, event, record, now())
+      : createPonsTokenState(event, record, now());
+    working[key] = nextToken;
+    const notification = lifecycleNotification(event, nextToken);
+    transitions.push({
+      eventId: event.eventId,
+      blockNumber: event.blockNumber,
+      token: event.token,
+      nextToken,
+      notifications: notification ? [notification] : [],
+      checks: lifecycleChecks(event, nextToken, now()),
+    });
+  }
+  return transitions;
+}
+
+export async function previewPonsRange({
+  provider,
+  fromBlock,
+  toBlock,
+  now = Date.now,
+  scanRange = scanPonsRange,
+  readLaunch = readPonsLaunch,
+  initialTokens = {},
+}) {
+  const events = await scanRange(provider, fromBlock, toBlock);
+  const transitions = await buildPonsTransitions(events, {
+    provider,
+    readLaunch,
+    now,
+    initialTokens,
+  });
+  return { events, transitions };
+}
+
+export async function watchPonsRange(options) {
+  const snapshot = options.store.snapshot();
+  const result = await previewPonsRange({ ...options, initialTokens: snapshot.tokens });
+  options.store.commitPonsRange({ toBlock: options.toBlock, transitions: result.transitions });
+  return result;
+}
+
+export async function runPendingChecks({
+  store,
+  handlers,
+  now = Date.now,
+  limit = 20,
+  maxAttempts = 5,
+}) {
+  const result = { completed: 0, retried: 0, failed: 0 };
+  for (const check of store.listDueChecks(now(), limit)) {
+    try {
+      const handler = handlers?.[check.type];
+      if (typeof handler !== "function") throw new Error(`no pending-check handler for ${check.type}`);
+      const update = await handler(check);
+      if (update?.nextToken && update?.token) {
+        store.applyCheckResult(check.id, { ...update, completedAt: now() });
+      } else {
+        store.completeCheck(check.id, now());
+      }
+      result.completed += 1;
+    } catch (cause) {
+      const attempts = Number(check.attempts || 0) + 1;
+      const exhausted = attempts >= maxAttempts;
+      store.rescheduleCheck(check.id, {
+        status: exhausted ? "failed" : "pending",
+        attempts,
+        nextAttemptAt: nextRetryAt(now(), attempts),
+        lastError: safeErrorMessage(cause),
+      });
+      if (exhausted) result.failed += 1;
+      else result.retried += 1;
+    }
+  }
+  return result;
+}
+
+export async function reconcilePonsWatchlist({
+  provider,
+  store,
+  readLaunch = readPonsLaunch,
+  now = Date.now,
+}) {
+  const snapshot = store.snapshot();
+  let updated = 0;
+  for (const address of snapshot.watchlist) {
+    const previous = snapshot.tokens[address.toLowerCase()];
+    if (!previous) throw new Error(`watchlist token state missing for ${address}`);
+    const record = await readLaunch(provider, address);
+    const phase = ["not_graduated", "swept", "pool_created", "rescued"][Number(record.phase)];
+    if (!phase) throw new Error(`unknown Pons phase ${record.phase}`);
+    if (phase === previous.protocolPhase) continue;
+    const event = {
+      kind: "reconcile",
+      eventId: `reconcile:${address.toLowerCase()}:${phase}`,
+      token: address,
+      args: {},
+    };
+    const nextToken = reducePonsEvent(previous, event, record, now());
+    const transitionType = phase === "rescued" ? "rescued" : phase === "pool_created" ? "graduated" : "phase_changed";
+    const notification = {
+      id: `${event.eventId}:${transitionType}`,
+      eventId: event.eventId,
+      transitionType,
+      token: address,
+      text: `Pons V2 ${phase}\nCA ${address}\nID ${event.eventId}`,
+    };
+    store.commitTokenUpdate({ token: address, nextToken, notification });
+    updated += 1;
+  }
+  return { updated };
+}
 
 async function drainQueue(queue, concurrency, handle) {
   let handled = 0;
@@ -182,6 +348,32 @@ export async function runWatchIteration(state, dependencies) {
   return { state, errors };
 }
 
+export async function runPonsWatchIteration(state, dependencies) {
+  const safeHead = (await dependencies.getBlockNumber()) - (dependencies.settings.ponsConfirmations ?? 0);
+  if (safeHead < 0) return { complete: true, events: [], transitions: [] };
+  if (state.lastBlock == null) {
+    const savedCursor = dependencies.store.getPonsCursor();
+    const boundary = await dependencies.findFirstBlockAtOrAfter(
+      dependencies.now() - dependencies.settings.lineAMaxAgeMinutes * 60_000,
+      safeHead
+    );
+    state.lastBlock = Math.min(safeHead, Math.max(savedCursor ?? -1, boundary - 1));
+  }
+  if (safeHead <= state.lastBlock) return { complete: true, events: [], transitions: [] };
+  const fromBlock = state.lastBlock + 1;
+  const result = await watchPonsRange({
+    provider: dependencies.provider,
+    store: dependencies.store,
+    fromBlock,
+    toBlock: safeHead,
+    now: dependencies.now,
+    scanRange: dependencies.scanRange,
+    readLaunch: dependencies.readLaunch,
+  });
+  state.lastBlock = safeHead;
+  return { ...result, complete: true };
+}
+
 export async function runReadOnlyCandidates(events, dependencies) {
   const queue = new CandidateQueue({
     maxSize: dependencies.maxQueueSize,
@@ -239,6 +431,12 @@ async function watch() {
   process.once("exit", releaseOnExit);
   try {
     banner();
+    const provider = getProvider();
+    const store = getDefaultStore();
+    if (SETTINGS.onchainScan) {
+      await verifyPonsDeployment(provider);
+      await reconcilePonsWatchlist({ provider, store });
+    }
     if (SETTINGS.telegramToken) {
       await sendTelegram(
         `🤖 Robinhood 扫链机器人已启动\n仅扫描和报警，不包含交易功能\n年龄 &lt; ${SETTINGS.maxAgeMinutes} 分钟 · 最低分 ${SETTINGS.minScore}`
@@ -246,6 +444,7 @@ async function watch() {
     }
 
     const state = { lastBlock: null, lastGecko: 0 };
+    const ponsState = { lastBlock: null };
     const claimed = new Set();
     const createSourceProcessor = () => {
       const inner = new CandidateQueue({
@@ -304,6 +503,24 @@ async function watch() {
     };
     const loops = [];
     if (SETTINGS.onchainScan) {
+      loops.push((async () => {
+        while (true) {
+          const result = await runPonsWatchIteration(ponsState, {
+            provider,
+            store,
+            settings: SETTINGS,
+            getBlockNumber,
+            findFirstBlockAtOrAfter,
+            scanRange: scanPonsRange,
+            readLaunch: readPonsLaunch,
+            now: Date.now,
+          });
+          if (result.events.length) {
+            console.log(`pons ${result.events.length} lifecycle events; cursor=${ponsState.lastBlock}`);
+          }
+          await sleep(SETTINGS.pollMs);
+        }
+      })());
       const handleEvents = createSourceProcessor();
       loops.push((async () => {
         while (true) {
@@ -316,6 +533,16 @@ async function watch() {
         }
       })());
     }
+    loops.push((async () => {
+      while (true) {
+        const result = await drainOutbox({
+          store,
+          send: (text) => sendTelegram(text),
+        });
+        if (result.failed) console.error(`outbox: ${result.failed} notifications exhausted retries`);
+        await sleep(SETTINGS.outboxPollMs);
+      }
+    })());
     if (SETTINGS.geckoScan) {
       const handleEvents = createSourceProcessor();
       loops.push((async () => {

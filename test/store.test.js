@@ -332,4 +332,38 @@ describe("createStore", () => {
     store.commitPonsRange({ toBlock: 121, transitions: [] });
     assert.ok(store.snapshot().appliedEvents[EVENT_ID]);
   });
+
+  it("atomically applies a pending-check result to its token", () => {
+    const store = openStore(tempDir());
+    store.commitPonsRange({
+      toBlock: 120,
+      transitions: [{
+        eventId: EVENT_ID,
+        token: TOKEN,
+        nextToken: tokenState(),
+        checks: [{ id: `${EVENT_ID}:holders`, type: "holders", dueAt: 1000 }],
+      }],
+    });
+    store.applyCheckResult(`${EVENT_ID}:holders`, {
+      token: TOKEN,
+      nextToken: tokenState({ facts: { holderCount: 9 } }),
+      completedAt: 1200,
+    });
+    const state = store.snapshot();
+    assert.equal(state.tokens[TOKEN.toLowerCase()].facts.holderCount, 9);
+    assert.equal(state.pendingChecks[`${EVENT_ID}:holders`].status, "completed");
+    assert.equal(state.pendingChecks[`${EVENT_ID}:holders`].completedAt, 1200);
+  });
+
+  it("atomically updates a reconciled token and its notification", () => {
+    const store = openStore(tempDir());
+    store.commitTokenUpdate({
+      token: TOKEN,
+      nextToken: tokenState({ protocolPhase: "rescued", monitorState: "killed", watchlist: false }),
+      notification: { id: `reconcile:${TOKEN}:rescued`, text: "rescued", transitionType: "rescued" },
+    });
+    const state = store.snapshot();
+    assert.equal(state.tokens[TOKEN.toLowerCase()].protocolPhase, "rescued");
+    assert.ok(state.outbox[`reconcile:${TOKEN}:rescued`]);
+  });
 });
