@@ -12,6 +12,14 @@ const V4_GECKO_VENUES = new Set([
   "uniswap-v4-robinhood",
   "uniswap-pools-trade",
 ]);
+const GECKO_VENUE_ALIASES = new Map([
+  ["uniswap-v2-robinhood", "uniswap-v2"],
+]);
+
+function normalizeGeckoVenue(value) {
+  const venue = String(value || "unknown");
+  return GECKO_VENUE_ALIASES.get(venue.toLowerCase()) || venue;
+}
 
 async function getJson(url, { fetchImpl = fetch, timeoutMs = 12000 } = {}) {
   const ctrl = new AbortController();
@@ -65,7 +73,7 @@ export async function geckoNewPools(
       const picked = resolvePair(tokenRaw, quoteRaw);
       if (!picked) continue;
       const { token, quote } = picked;
-      const venue = rel.dex?.data?.id || "unknown";
+      const venue = normalizeGeckoVenue(rel.dex?.data?.id);
       const poolAddress = isEthAddress(a.address) ? getAddress(a.address) : null;
       const validPoolId = /^0x[0-9a-fA-F]{64}$/.test(String(a.address || ""));
       const supportedV4Venue = V4_GECKO_VENUES.has(String(venue).toLowerCase());
