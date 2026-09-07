@@ -51,6 +51,10 @@ function makeReport(overrides = {}) {
     ...rest,
   };
 
+  if (!Object.hasOwn(report, "honeypot")) {
+    report.honeypot = { honeypot: report.facts.honeypot };
+  }
+
   if (sellabilityOverride === null) {
     delete report.sellability;
   } else {
@@ -248,6 +252,32 @@ describe("formatAlert", () => {
         status: "confirmed",
         reason: "confirmed real sells",
         buyerSamples: 0,
+        ladderSamples: 4,
+        meaningfulSellers: 3,
+      },
+      facts: { honeypot: false, buyTaxBps: 0, sellTaxBps: 0, lpUnknown: false, lpBurnedPct: 100 },
+      sellabilityText: "卖出安全</b> 未确认",
+      riskText: "风险 未确认",
+    },
+    {
+      name: "confirmed负计数",
+      sellability: {
+        status: "confirmed",
+        reason: "confirmed real sells",
+        buyerSamples: 12,
+        ladderSamples: 4,
+        meaningfulSellers: -1,
+      },
+      facts: { honeypot: false, buyTaxBps: 0, sellTaxBps: 0, lpUnknown: false, lpBurnedPct: 100 },
+      sellabilityText: "卖出安全</b> 未确认",
+      riskText: "风险 未确认",
+    },
+    {
+      name: "confirmed非整数计数",
+      sellability: {
+        status: "confirmed",
+        reason: "confirmed real sells",
+        buyerSamples: 1.5,
         ladderSamples: 4,
         meaningfulSellers: 3,
       },

@@ -10,6 +10,7 @@ import {
   evaluateTransferLadder,
   finalizeSellability,
   inspectSellability,
+  normalizeSellabilityEvidence,
   resolveStartBlock,
   sellabilityResult,
 } from "../src/sellability.js";
@@ -177,6 +178,42 @@ function threeSellerEvidence({
   ]);
   return { logs, receipts, balances };
 }
+
+describe("sellability evidence normalization", () => {
+  const confirmed = {
+    status: SELLABILITY.CONFIRMED,
+    reason: "sellable",
+    buyerSamples: 1,
+    ladderSamples: 1,
+    meaningfulSellers: 3,
+    details: ["bound evidence"],
+  };
+
+  it("confirms only complete non-negative integer evidence with legacy false", () => {
+    assert.deepEqual(normalizeSellabilityEvidence(confirmed, false), confirmed);
+    assert.equal(normalizeSellabilityEvidence(confirmed, true).status, SELLABILITY.UNKNOWN);
+    assert.equal(normalizeSellabilityEvidence(confirmed, null).status, SELLABILITY.UNKNOWN);
+  });
+
+  for (const [field, value] of [
+    ["buyerSamples", -1],
+    ["ladderSamples", 1.5],
+    ["meaningfulSellers", undefined],
+  ]) {
+    it(`rejects confirmed evidence with an invalid ${field}`, () => {
+      const result = normalizeSellabilityEvidence({ ...confirmed, [field]: value }, false);
+      assert.equal(result.status, SELLABILITY.UNKNOWN);
+      assert.equal(result.reason, "sellable");
+      assert.equal(result[field], 0);
+    });
+  }
+
+  it("keeps blocked evidence authoritative across legacy conflicts", () => {
+    const blocked = { ...confirmed, status: SELLABILITY.BLOCKED, reason: "hidden-balance-mutation" };
+    assert.equal(normalizeSellabilityEvidence(blocked, false).status, SELLABILITY.BLOCKED);
+    assert.equal(normalizeSellabilityEvidence(blocked, true).status, SELLABILITY.BLOCKED);
+  });
+});
 
 describe("sellability core", () => {
   it("freezes the public status enum", () => {

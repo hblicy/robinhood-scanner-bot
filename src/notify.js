@@ -1,5 +1,6 @@
 import { SETTINGS } from "./config.js";
 import { safeErrorMessage } from "./safety.js";
+import { normalizeSellabilityEvidence } from "./sellability.js";
 
 const VERDICT = {
   green: "🟢 可小仓试",
@@ -10,7 +11,7 @@ const VERDICT = {
 
 export function formatAlert(report) {
   const { meta, facts, score, verdict, red, checks, links, token, venue, creator } = report;
-  const sellability = normalizeSellability(report.sellability, facts?.honeypot);
+  const sellability = normalizeSellabilityEvidence(report.sellability, report.honeypot?.honeypot);
   const sellabilityReason = formatSellabilityReason(sellability.status, sellability.reason);
   const lines = [];
   lines.push(`${VERDICT[verdict] || verdict}  <b>${esc(meta.symbol)}</b>  ${score}/100`);
@@ -159,57 +160,6 @@ function esc(s) {
     .replace(/>/g, "&gt;");
 }
 
-function normalizeSellability(sellability, honeypot) {
-  const buyerSamples = cleanCount(sellability?.buyerSamples);
-  const ladderSamples = cleanCount(sellability?.ladderSamples);
-  const meaningfulSellers = cleanCount(sellability?.meaningfulSellers);
-  const reason = normalizeSellabilityReason(sellability?.reason);
-
-  if (!sellability || typeof sellability !== "object") {
-    return {
-      status: "unknown",
-      reason: "evidence-unavailable",
-      buyerSamples,
-      ladderSamples,
-      meaningfulSellers,
-    };
-  }
-
-  if (sellability.status === "blocked") {
-    return {
-      status: "blocked",
-      reason,
-      buyerSamples,
-      ladderSamples,
-      meaningfulSellers,
-    };
-  }
-
-  if (
-    sellability.status === "confirmed" &&
-    buyerSamples > 0 &&
-    ladderSamples > 0 &&
-    meaningfulSellers >= 3 &&
-    honeypot === false
-  ) {
-    return {
-      status: "confirmed",
-      reason,
-      buyerSamples,
-      ladderSamples,
-      meaningfulSellers,
-    };
-  }
-
-  return {
-    status: "unknown",
-    reason,
-    buyerSamples,
-    ladderSamples,
-    meaningfulSellers,
-  };
-}
-
 function sellabilityLabel(status) {
   if (status === "confirmed") return "已确认";
   if (status === "blocked") return "已阻断";
@@ -221,14 +171,6 @@ function formatSellabilityReason(status, reason) {
     return status === "confirmed" ? "无" : "evidence-unavailable";
   }
   return esc(reason);
-}
-
-function normalizeSellabilityReason(reason) {
-  return reason == null || reason === "" ? null : reason;
-}
-
-function cleanCount(value) {
-  return Number.isInteger(value) && value >= 0 ? value : 0;
 }
 
 function honeypotRiskLabel(sellabilityStatus) {

@@ -193,6 +193,75 @@ describe("analyze data completeness", () => {
     assert.doesNotMatch(honeypotCheck.detail, /买税/);
   });
 
+  for (const [name, sellability, legacyHoneypot] of [
+    ["missing counts", { status: "confirmed", reason: "sellable" }, false],
+    ["negative counts", {
+      status: "confirmed",
+      reason: "sellable",
+      buyerSamples: 1,
+      ladderSamples: 1,
+      meaningfulSellers: -1,
+    }, false],
+    ["non-integer counts", {
+      status: "confirmed",
+      reason: "sellable",
+      buyerSamples: 1.5,
+      ladderSamples: 1,
+      meaningfulSellers: 3,
+    }, false],
+    ["legacy honeypot conflict", {
+      status: "confirmed",
+      reason: "sellable",
+      buyerSamples: 1,
+      ladderSamples: 1,
+      meaningfulSellers: 3,
+    }, true],
+  ]) {
+    it(`normalizes malformed confirmed evidence before scoring: ${name}`, async () => {
+      const report = await analyze(event, dependencies({
+        honeypotCheck: async () => ({
+          honeypot: legacyHoneypot,
+          complete: true,
+          sellOk: true,
+          reason: "legacy result",
+          sellability,
+        }),
+      }));
+      const honeypotCheck = report.checks.find((check) => check.key === "honeypot");
+      assert.equal(report.sellability.status, "unknown");
+      assert.equal(report.honeypot.honeypot, null);
+      assert.equal(report.honeypot.complete, false);
+      assert.equal(report.honeypot.sellOk, null);
+      assert.equal(report.honeypot.reason, report.sellability.reason);
+      assert.equal(report.facts.sellabilityStatus, "unknown");
+      assert.equal(honeypotCheck.pts, 0);
+    });
+  }
+
+  it("keeps blocked evidence blocked despite a legacy false conflict", async () => {
+    const report = await analyze(event, dependencies({
+      honeypotCheck: async () => ({
+        honeypot: false,
+        complete: true,
+        sellOk: true,
+        reason: "legacy conflict",
+        sellability: {
+          status: "blocked",
+          reason: "hidden-balance-mutation",
+          buyerSamples: 1,
+          ladderSamples: 1,
+          meaningfulSellers: 3,
+          details: [],
+        },
+      }),
+    }));
+    assert.equal(report.sellability.status, "blocked");
+    assert.equal(report.honeypot.honeypot, true);
+    assert.equal(report.honeypot.complete, true);
+    assert.equal(report.honeypot.sellOk, false);
+    assert.equal(report.verdict, "skip");
+  });
+
   it("skips a token when sellability is blocked", async () => {
     const report = await analyze(event, dependencies({
       honeypotCheck: async () => ({

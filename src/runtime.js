@@ -1,3 +1,5 @@
+import { normalizeSellabilityEvidence } from "./sellability.js";
+
 export function candidateKey(event) {
   return [event?.venue || "unknown", event?.poolId || event?.pool || "no-pool", event?.token || "no-token"]
     .map((value) => String(value).toLowerCase())
@@ -25,8 +27,12 @@ export async function handleCandidate(event, options, dependencies) {
 
   dependencies.log(`analyzing ${event.token} via ${event.source}/${event.venue}`);
   const report = await dependencies.analyze(event);
-  const sellabilityStatus = report.sellability?.status || "unknown";
-  const sellabilityReason = normalizeSellabilityReason(report.sellability?.reason);
+  const sellability = normalizeSellabilityEvidence(report.sellability, report.honeypot?.honeypot);
+  const normalizedReport = { ...report, sellability };
+  const sellabilityStatus = sellability.status;
+  const sellabilityReason = normalizeSellabilityReason(
+    sellability.reason || (sellabilityStatus === "confirmed" ? null : "evidence-unavailable")
+  );
   const shouldAlert =
     sellabilityStatus === "blocked" ||
     (sellabilityStatus === "confirmed" && (
@@ -34,7 +40,7 @@ export async function handleCandidate(event, options, dependencies) {
       report.verdict === "review" ||
       report.score >= dependencies.minScore
     ));
-  if (shouldAlert) await dependencies.alertReport(report);
+  if (shouldAlert) await dependencies.alertReport(normalizedReport);
   else {
     const errorSources = [...new Set((report.errorSources || []).map(({ source }) => source))];
     const suffix = errorSources.length ? ` data-errors=${errorSources.join(",")}` : "";
@@ -53,5 +59,5 @@ export async function handleCandidate(event, options, dependencies) {
       venue: report.venue,
     });
   }
-  return report;
+  return normalizedReport;
 }

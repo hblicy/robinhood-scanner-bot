@@ -18,7 +18,12 @@ import {
   dexScreener,
 } from "./market.js";
 import { safeErrorMessage } from "./safety.js";
-import { inspectSellability, sellabilityResult, SELLABILITY } from "./sellability.js";
+import {
+  inspectSellability,
+  normalizeSellabilityEvidence,
+  sellabilityResult,
+  SELLABILITY,
+} from "./sellability.js";
 
 const BUY_ETH = parseEther("0.001");
 
@@ -40,12 +45,22 @@ async function settled(promise) {
   }
 }
 
-function normalizeHoneypotSellability(result, sellability) {
-  const normalized = { ...result, sellability };
-  if (sellability.status === SELLABILITY.CONFIRMED) {
+function normalizeHoneypotSellability(result, sellability, legacyHoneypot = result?.honeypot) {
+  let normalizedSellability = normalizeSellabilityEvidence(sellability, legacyHoneypot);
+  if (
+    normalizedSellability.status !== SELLABILITY.CONFIRMED &&
+    (normalizedSellability.reason == null || normalizedSellability.reason === "")
+  ) {
+    normalizedSellability = { ...normalizedSellability, reason: "evidence-unavailable" };
+  }
+  const reason = normalizedSellability.status === SELLABILITY.CONFIRMED
+    ? (result?.reason || normalizedSellability.reason)
+    : normalizedSellability.reason;
+  const normalized = { ...result, reason, sellability: normalizedSellability };
+  if (normalizedSellability.status === SELLABILITY.CONFIRMED) {
     return { ...normalized, honeypot: false, complete: true, sellOk: true };
   }
-  if (sellability.status === SELLABILITY.BLOCKED) {
+  if (normalizedSellability.status === SELLABILITY.BLOCKED) {
     return { ...normalized, honeypot: true, complete: true, sellOk: false };
   }
   return { ...normalized, honeypot: null, complete: false, sellOk: null };
@@ -355,11 +370,12 @@ export async function analyze(event, overrides = {}) {
     buyTaxBps: null,
     sellTaxBps: null,
   };
-  const sellability = hpRaw.sellability || sellabilityResult(
+  const rawSellability = hpRaw.sellability || sellabilityResult(
     SELLABILITY.UNKNOWN,
     hpRaw.reason || "evidence-unavailable"
   );
-  const hp = normalizeHoneypotSellability(hpRaw, sellability);
+  const hp = normalizeHoneypotSellability(hpRaw, rawSellability);
+  const sellability = hp.sellability;
 
   const mkt = event.market || {};
   const holdersKnown = holdersResult.ok && supply > 0n && holders.length > 0;
@@ -492,7 +508,7 @@ export async function honeypotCheck(
   const quoteAddr = isQuote(quote) && quoteValue !== ADDR.NATIVE.toLowerCase() && quoteValue !== ADDR.ZERO.toLowerCase()
     ? quote
     : ADDR.WETH;
-  const sellability = await inspect({
+  const inspectedSellability = await inspect({
     token,
     quote: quoteAddr,
     venue,
@@ -502,6 +518,7 @@ export async function honeypotCheck(
     decimals,
     analysisBlock,
   }, { provider });
+  const sellability = normalizeSellabilityEvidence(inspectedSellability, false);
   const result = {
     honeypot: null,
     complete: false,
@@ -544,6 +561,7 @@ export async function honeypotCheck(
     return blocked("sell-quote-zero", sim.reason || "无法报价卖出（蜜罐）");
   }
 
+  result.honeypot = false;
   result.reason = result.reason || sellability.reason || "已确认真实卖出证据";
   return normalizeHoneypotSellability(result, sellability);
 }

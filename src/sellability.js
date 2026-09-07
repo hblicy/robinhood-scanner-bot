@@ -205,6 +205,39 @@ export function sellabilityResult(status, reason, evidence = {}) {
   };
 }
 
+export function normalizeSellabilityEvidence(sellability, legacyHoneypot = null) {
+  const evidence = sellability && typeof sellability === "object" ? sellability : {};
+  const countFields = ["buyerSamples", "ladderSamples", "meaningfulSellers"];
+  const validCounts = countFields.every((field) => Number.isInteger(evidence[field]) && evidence[field] >= 0);
+  const normalized = sellabilityResult(SELLABILITY.UNKNOWN, evidence.reason ?? null, {
+    buyerSamples: Number.isInteger(evidence.buyerSamples) && evidence.buyerSamples >= 0
+      ? evidence.buyerSamples
+      : 0,
+    ladderSamples: Number.isInteger(evidence.ladderSamples) && evidence.ladderSamples >= 0
+      ? evidence.ladderSamples
+      : 0,
+    meaningfulSellers: Number.isInteger(evidence.meaningfulSellers) && evidence.meaningfulSellers >= 0
+      ? evidence.meaningfulSellers
+      : 0,
+    details: evidence.details,
+  });
+
+  if (evidence.status === SELLABILITY.BLOCKED) {
+    normalized.status = SELLABILITY.BLOCKED;
+  } else if (
+    evidence.status === SELLABILITY.CONFIRMED &&
+    validCounts &&
+    normalized.buyerSamples > 0 &&
+    normalized.ladderSamples > 0 &&
+    normalized.meaningfulSellers >= 3 &&
+    legacyHoneypot === false
+  ) {
+    normalized.status = SELLABILITY.CONFIRMED;
+  }
+
+  return normalized;
+}
+
 export function evaluateLedgerBalance({ ledgerBalance, reportedBalance, oneToken }) {
   const missing = ledgerBalance - reportedBalance;
   if (ledgerBalance >= oneToken && missing > 0n && missing * 100n > ledgerBalance) {

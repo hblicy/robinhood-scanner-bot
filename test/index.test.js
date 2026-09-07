@@ -10,6 +10,14 @@ import {
 } from "../src/scanner.js";
 import { CandidateQueue } from "../src/queue.js";
 
+const CONFIRMED_SELLABILITY = {
+  status: "confirmed",
+  reason: "sellable",
+  buyerSamples: 1,
+  ladderSamples: 1,
+  meaningfulSellers: 3,
+};
+
 describe("scanner orchestration", () => {
   it("starts at the newer of the saved cursor and age-window boundary", async () => {
     const findFirstBlockAtOrAfter = async () => 40;
@@ -134,8 +142,8 @@ describe("scanner orchestration", () => {
           verdict: "green",
           meta: { symbol: event.token },
           red: [],
-          honeypot: {},
-          sellability: { status: "confirmed", reason: "sellable" },
+          honeypot: { honeypot: false },
+          sellability: CONFIRMED_SELLABILITY,
         }),
         consoleAlert: async (report) => { alerted.push(report.token); },
         log: () => {},
@@ -166,8 +174,8 @@ describe("scanner orchestration", () => {
             verdict: "green",
             meta: { symbol: event.token },
             red: [],
-            honeypot: {},
-            sellability: { status: "confirmed", reason: "sellable" },
+            honeypot: { honeypot: false },
+            sellability: CONFIRMED_SELLABILITY,
           };
         },
         consoleAlert: async () => {},
@@ -217,8 +225,8 @@ describe("scanner orchestration", () => {
         verdict: "green",
         meta: { symbol: "SAFE" },
         red: [],
-        honeypot: {},
-        sellability: { status: "confirmed", reason: "sellable" },
+        honeypot: { honeypot: false },
+        sellability: CONFIRMED_SELLABILITY,
       }),
       consoleAlert: async () => { calls.console += 1; },
       markSeen: () => { calls.seen += 1; },
@@ -297,8 +305,8 @@ describe("scanner orchestration", () => {
               verdict: "green",
               meta: { symbol: candidate.token },
               red: [],
-              honeypot: {},
-              sellability: { status: "confirmed", reason: "sellable" },
+              honeypot: { honeypot: false },
+              sellability: CONFIRMED_SELLABILITY,
             };
           },
           consoleAlert: async (report) => { alerted.push(report.token); },
@@ -393,8 +401,8 @@ describe("scanner orchestration", () => {
           verdict: "green",
           meta: { symbol: "GECKO" },
           red: [],
-          honeypot: {},
-          sellability: { status: "confirmed", reason: "sellable" },
+          honeypot: { honeypot: false },
+          sellability: CONFIRMED_SELLABILITY,
         }),
         consoleAlert: async (report) => { alerted.push(report.token); },
         log: () => {},
