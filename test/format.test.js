@@ -372,6 +372,30 @@ describe("formatAlert", () => {
     });
   }
 
+  it("shows a null confirmed reason as 无 instead of inventing evidence-unavailable", () => {
+    const text = formatAlert(makeReport({
+      verdict: "review",
+      facts: {
+        honeypot: false,
+        buyTaxBps: 0,
+        sellTaxBps: 0,
+        lpUnknown: false,
+        lpBurnedPct: 100,
+      },
+      sellability: {
+        status: "confirmed",
+        reason: null,
+        buyerSamples: 3,
+        ladderSamples: 2,
+        meaningfulSellers: 3,
+      },
+    }));
+    assert.match(text, /卖出安全<\/b> 已确认/);
+    assert.match(text, /原因 无/);
+    assert.doesNotMatch(text, /evidence-unavailable/);
+    assert.match(text, /风险 未发现阻断/);
+  });
+
   it("treats illegal sellability data as unconfirmed and escapes the reason", () => {
     const text = formatAlert(makeReport({
       verdict: "review",

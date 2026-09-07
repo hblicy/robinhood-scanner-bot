@@ -11,6 +11,7 @@ const VERDICT = {
 export function formatAlert(report) {
   const { meta, facts, score, verdict, red, checks, links, token, venue, creator } = report;
   const sellability = normalizeSellability(report.sellability, facts?.honeypot);
+  const sellabilityReason = formatSellabilityReason(sellability.status, sellability.reason);
   const lines = [];
   lines.push(`${VERDICT[verdict] || verdict}  <b>${esc(meta.symbol)}</b>  ${score}/100`);
   lines.push(`${esc(meta.name || "")}`);
@@ -38,7 +39,7 @@ export function formatAlert(report) {
     `<b>创建者</b> ${creator ? `<code>${short(creator)}</code>` : "?"} 持仓 ${facts.creatorPct?.toFixed(1) ?? "?"}%  · 历史发币 ${facts.deployerTokens ?? "未知"}`
   );
   lines.push(
-    `<b>卖出安全</b> ${sellabilityLabel(sellability.status)}  原因 ${formatSellabilityReason(sellability.reason)}  买家样本 ${sellability.buyerSamples}  额度样本 ${sellability.ladderSamples}  真实卖家 ${sellability.meaningfulSellers}`
+    `<b>卖出安全</b> ${sellabilityLabel(sellability.status)}  原因 ${sellabilityReason}  买家样本 ${sellability.buyerSamples}  额度样本 ${sellability.ladderSamples}  真实卖家 ${sellability.meaningfulSellers}`
   );
   const buyTax = Number.isFinite(facts.buyTaxBps) ? facts.buyTaxBps : "未知";
   const sellTax = Number.isFinite(facts.sellTaxBps) ? facts.sellTaxBps : "未知";
@@ -215,14 +216,15 @@ function sellabilityLabel(status) {
   return "未确认";
 }
 
-function formatSellabilityReason(reason) {
-  if (reason == null || reason === "") return "无";
+function formatSellabilityReason(status, reason) {
+  if (reason == null || reason === "") {
+    return status === "confirmed" ? "无" : "evidence-unavailable";
+  }
   return esc(reason);
 }
 
 function normalizeSellabilityReason(reason) {
-  if (reason == null || reason === "") return "evidence-unavailable";
-  return reason;
+  return reason == null || reason === "" ? null : reason;
 }
 
 function cleanCount(value) {
