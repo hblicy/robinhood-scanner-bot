@@ -1,12 +1,62 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { Interface } from "ethers";
+import { ADDR } from "../src/config.js";
+import { ERC20_ABI } from "../src/abis.js";
 import {
   SELLABILITY,
+  decodeTransferCall,
   evaluateLedgerBalance,
   evaluateTransferLadder,
   finalizeSellability,
+  inspectSellability,
+  resolveStartBlock,
   sellabilityResult,
 } from "../src/sellability.js";
+
+const TOKEN = "0x0000000000000000000000000000000000000011";
+const QUOTE = "0x0000000000000000000000000000000000000022";
+const POOL = "0x0000000000000000000000000000000000000033";
+const BUYERS = [
+  "0x0000000000000000000000000000000000000041",
+  "0x0000000000000000000000000000000000000042",
+  "0x0000000000000000000000000000000000000043",
+  "0x0000000000000000000000000000000000000044",
+  "0x0000000000000000000000000000000000000045",
+  "0x0000000000000000000000000000000000000046",
+];
+const iface = new Interface(ERC20_ABI);
+
+function transferLog({ token = TOKEN, from, to, value, blockNumber = 10, index = 0, transactionHash = "0x01" }) {
+  const encoded = iface.encodeEventLog(iface.getEvent("Transfer"), [from, to, value]);
+  return { address: token, ...encoded, blockNumber, index, transactionHash };
+}
+
+function receipt({ status = 1, logs = [] } = {}) {
+  return { status, logs };
+}
+
+function fakeProvider({ logs = [], balances = new Map(), codes = new Map(), calls = [], receipts = new Map(), errors = {} } = {}) {
+  return {
+    calls,
+    async getBlockNumber() { if (errors.head) throw errors.head; return 100; },
+    async getLogs() { if (errors.logs) throw errors.logs; return logs; },
+    async getCode(address) { if (errors.code) throw errors.code; return codes.get(address.toLowerCase()) ?? "0x"; },
+    async call(request) {
+      calls.push(request);
+      if (errors.balance && request.data.startsWith(iface.getFunction("balanceOf").selector)) throw errors.balance;
+      const parsed = iface.parseTransaction({ data: request.data });
+      if (parsed.name === "balanceOf") return iface.encodeFunctionResult("balanceOf", [balances.get(parsed.args[0].toLowerCase()) ?? 0n]);
+      if (errors.call) throw errors.call;
+      return calls.transferResults?.shift() ?? iface.encodeFunctionResult("transfer", [true]);
+    },
+    async getTransactionReceipt(hash) { if (errors.receipt) throw errors.receipt; return receipts.get(hash) ?? null; },
+  };
+}
+
+function context(extra = {}) {
+  return { token: TOKEN, quote: QUOTE, pool: POOL, venue: "uniswap-v2", decimals: 0, blockNumber: 5, ...extra };
+}
 
 describe("sellability core", () => {
   it("freezes the public status enum", () => {
@@ -290,5 +340,142 @@ describe("sellability core", () => {
         details: ["ledger ok", "ladder ok"],
       }
     );
+  });
+});
+
+describe("V2 sellability evidence", () => {
+  it("does not touch a provider for unsupported venues or missing pools", async () => {
+    let calls = 0;
+    const provider = { getBlockNumber: async () => { calls++; return 1; } };
+    for (const input of [context({ venue: "uniswap-v3" }), context({ pool: null })]) {
+      const result = await inspectSellability(input, { provider });
+      assert.deepEqual(result.status, "unknown");
+      assert.equal(result.reason, "unsupported-venue");
+    }
+    assert.equal(calls, 0);
+  });
+
+  it("resolves creation block from event, timestamp fallback, or no evidence", async () => {
+    let asked = null;
+    assert.equal(await resolveStartBlock({ blockNumber: 7, pairCreatedAt: 1 }, 9, async () => { throw new Error("unused"); }), 7);
+    assert.equal(await resolveStartBlock({ pairCreatedAt: 123 }, 9, async (at, head) => { asked = [at, head]; return 6; }), 6);
+    assert.deepEqual(asked, [123, 9]);
+    assert.equal(await resolveStartBlock({}, 9), null);
+    const result = await inspectSellability(context({ blockNumber: null, pairCreatedAt: null }), { provider: fakeProvider() });
+    assert.equal(result.reason, "evidence-unavailable");
+    assert.match(result.details[0], /pool creation block unavailable/);
+  });
+
+  it("decodes ERC20 transfer booleans and empty returns", () => {
+    assert.equal(decodeTransferCall(iface.encodeFunctionResult("transfer", [true])), true);
+    assert.equal(decodeTransferCall(iface.encodeFunctionResult("transfer", [false])), false);
+    assert.equal(decodeTransferCall("0x"), null);
+    assert.equal(decodeTransferCall(""), null);
+  });
+
+  it("blocks the SNOWBALL hidden balance mutation with exact buyer evidence", async () => {
+    const provider = fakeProvider({
+      logs: [transferLog({ from: POOL, to: BUYERS[0], value: 328585691549515n })],
+      balances: new Map([[BUYERS[0].toLowerCase(), 50n]]),
+    });
+    const result = await inspectSellability(context({ decimals: 9 }), { provider });
+    assert.equal(result.status, "blocked");
+    assert.equal(result.reason, "hidden-balance-mutation");
+    assert.equal(result.buyerSamples, 1);
+    assert.match(result.details.join(" "), new RegExp(BUYERS[0], "i"));
+    assert.match(result.details.join(" "), /328585691549515/);
+    assert.match(result.details.join(" "), /reported=50/);
+  });
+
+  it("classifies false, revert, empty, and limited transfer ladder results", async () => {
+    const logs = [transferLog({ from: POOL, to: BUYERS[0], value: 100n })];
+    for (const [transferResults, expected] of [
+      [[iface.encodeFunctionResult("transfer", [false])], "sell-transfer-blocked"],
+      [["0x"], "evidence-unavailable"],
+      [[iface.encodeFunctionResult("transfer", [true]), iface.encodeFunctionResult("transfer", [false])], "sell-size-limited"],
+    ]) {
+      const provider = fakeProvider({ logs, balances: new Map([[BUYERS[0].toLowerCase(), 100n]]) });
+      provider.calls.transferResults = [...transferResults];
+      const result = await inspectSellability(context(), { provider });
+      assert.equal(result.reason, expected);
+    }
+    const provider = fakeProvider({ logs, balances: new Map([[BUYERS[0].toLowerCase(), 100n]]), errors: { call: Object.assign(new Error("execution reverted"), { code: "CALL_EXCEPTION" }) } });
+    assert.equal((await inspectSellability(context(), { provider })).reason, "sell-transfer-blocked");
+  });
+
+  it("requires three distinct non-dust successful sales with quote transfers", async () => {
+    const sales = BUYERS.slice(0, 3).flatMap((seller, i) => {
+      const hash = `0x0${i + 1}`;
+      return [transferLog({ from: POOL, to: seller, value: 100n, transactionHash: `0xa${i}` }), transferLog({ from: seller, to: POOL, value: 2n, blockNumber: 20 + i, transactionHash: hash })];
+    });
+    const receipts = new Map(BUYERS.slice(0, 3).map((seller, i) => [
+      `0x0${i + 1}`,
+      receipt({ logs: [
+        ...(i === 0 ? [{ address: QUOTE, topics: ["0xdeadbeef"], data: "0x" }] : []),
+        transferLog({ token: QUOTE, from: POOL, to: ADDR.V2_ROUTER, value: 5n, transactionHash: `0x0${i + 1}` }),
+      ] }),
+    ]));
+    const provider = fakeProvider({ logs: sales, balances: new Map(BUYERS.slice(0, 3).map((b) => [b.toLowerCase(), 98n])), receipts });
+    const result = await inspectSellability(context(), { provider });
+    assert.equal(result.status, "confirmed");
+    assert.equal(result.meaningfulSellers, 3);
+    assert.equal(result.buyerSamples, 3);
+    assert.equal(result.ladderSamples, 3);
+  });
+
+  it("does not confirm dust, failed receipts, missing quote output, or repeated sellers", async () => {
+    const base = [transferLog({ from: POOL, to: BUYERS[0], value: 100n })];
+    const variants = [
+      { value: 0n, rec: receipt({ logs: [transferLog({ token: QUOTE, from: POOL, to: ADDR.V2_ROUTER, value: 1n })] }) },
+      { value: 2n, rec: receipt({ status: 0, logs: [transferLog({ token: QUOTE, from: POOL, to: ADDR.V2_ROUTER, value: 1n })] }) },
+      { value: 2n, rec: receipt({ logs: [] }) },
+    ];
+    for (const { value, rec } of variants) {
+      const hash = "0xf1";
+      const provider = fakeProvider({ logs: [...base, transferLog({ from: BUYERS[0], to: POOL, value, transactionHash: hash })], balances: new Map([[BUYERS[0].toLowerCase(), 100n - value]]), receipts: new Map([[hash, rec]]) });
+      assert.equal((await inspectSellability(context(), { provider })).status, "unknown");
+    }
+    const repeated = [0, 1, 2].map((i) => transferLog({ from: BUYERS[0], to: POOL, value: 2n, transactionHash: `0xb${i}` }));
+    const provider = fakeProvider({ logs: [...base, ...repeated], balances: new Map([[BUYERS[0].toLowerCase(), 94n]]), receipts: new Map(repeated.map((l) => [l.transactionHash, receipt({ logs: [transferLog({ token: QUOTE, from: POOL, to: ADDR.V2_ROUTER, value: 1n, transactionHash: l.transactionHash })] })])) });
+    assert.equal((await inspectSellability(context(), { provider })).reason, "insufficient-meaningful-sells");
+  });
+
+  it("caps buyers, ladder wallets, and receipt reads", async () => {
+    const logs = [
+      ...BUYERS.flatMap((buyer, i) => [transferLog({ from: POOL, to: buyer, value: 100n, blockNumber: i + 1, transactionHash: `0xc${i}` })]),
+      ...Array.from({ length: 31 }, (_, i) => transferLog({
+        from: `0x${(100 + i).toString(16).padStart(40, "0")}`,
+        to: POOL,
+        value: 2n,
+        blockNumber: 30 + i,
+        transactionHash: `0xd${i}`,
+      })),
+    ];
+    const calls = [];
+    let receiptCount = 0;
+    const provider = fakeProvider({ logs, balances: new Map(BUYERS.map((b) => [b.toLowerCase(), 100n])), calls, receipts: new Map() });
+    const original = provider.getTransactionReceipt;
+    provider.getTransactionReceipt = async (hash) => { receiptCount++; return original(hash); };
+    const result = await inspectSellability(context(), { provider });
+    assert.equal(result.buyerSamples, 5);
+    assert.equal(result.ladderSamples, 3);
+    assert.equal(receiptCount, 30);
+    const transferCalls = calls.filter((request) => request.data.startsWith(iface.getFunction("transfer").selector));
+    assert.equal(transferCalls.length, 12);
+  });
+
+  it("converts RPC failures into sanitized unavailable evidence", async () => {
+    for (const [key, makeProvider] of [
+      ["logs", () => fakeProvider({ errors: { logs: new Error("logs https://secret.example/key") } })],
+      ["code", () => fakeProvider({ logs: [transferLog({ from: POOL, to: BUYERS[0], value: 100n })], errors: { code: new Error("code https://secret.example/key") } })],
+      ["balance", () => fakeProvider({ logs: [transferLog({ from: POOL, to: BUYERS[0], value: 100n })], errors: { balance: new Error("balance https://secret.example/key") } })],
+      ["receipt", () => fakeProvider({ logs: [transferLog({ from: POOL, to: BUYERS[0], value: 100n }), transferLog({ from: BUYERS[0], to: POOL, value: 2n, transactionHash: "0xee" })], balances: new Map([[BUYERS[0].toLowerCase(), 100n]]), errors: { receipt: new Error("receipt https://secret.example/key") } })],
+    ]) {
+      const result = await inspectSellability(context(), { provider: makeProvider() });
+      assert.equal(result.status, "unknown", key);
+      assert.equal(result.reason, "evidence-unavailable", key);
+      assert.match(result.details.join(" "), new RegExp(key), key);
+      assert.doesNotMatch(result.details.join(" "), /secret\.example/, key);
+    }
   });
 });
