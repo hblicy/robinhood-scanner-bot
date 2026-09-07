@@ -6,12 +6,14 @@ import path from "node:path";
 import { ZeroAddress, getAddress } from "ethers";
 import { createStore } from "../src/store.js";
 import {
+  classifyAuxiliaryCandidate,
   previewPonsRange,
   reconcilePonsWatchlist,
   runPendingChecks,
   runPonsWatchIteration,
   watchPonsRange,
 } from "../src/scanner.js";
+import { ADDR } from "../src/config.js";
 import { drainOutbox } from "../src/outbox.js";
 
 const dirs = [];
@@ -200,4 +202,44 @@ test("a Pons watch iteration scans only finalized blocks and advances its own cu
   assert.equal(result.complete, true);
   assert.equal(runtime.lastBlock, 123);
   assert.equal(store.snapshot().cursors.ponsV2, 123);
+});
+
+test("auxiliary discovery classifies LONG only after an explicit non-Pons factory result", async () => {
+  const event = {
+    token: TOKEN,
+    quote: ADDR.WETH,
+    venue: "uniswap-v4",
+    poolId: `0x${"aa".repeat(32)}`,
+  };
+  const long = await classifyAuxiliaryCandidate(event, {
+    provider: {},
+    readLaunch: async () => ({ ...launchRecord(), exists: false }),
+  });
+  assert.equal(long.pad, "long");
+
+  const pons = await classifyAuxiliaryCandidate(event, {
+    provider: {},
+    readLaunch: async () => launchRecord(),
+  });
+  assert.equal(pons.pad, "pons-v2");
+
+  const unknown = await classifyAuxiliaryCandidate(event, {
+    provider: {},
+    readLaunch: async () => { throw new Error("RPC timeout"); },
+  });
+  assert.equal(unknown.pad, "unknown");
+  assert.match(unknown.error, /RPC timeout/);
+});
+
+test("LONG classification uses quote addresses and ignores display symbols", async () => {
+  const result = await classifyAuxiliaryCandidate({
+    token: TOKEN,
+    quote: "0x6666666666666666666666666666666666666666",
+    quoteSymbol: "NVDA",
+    venue: "uniswap-v4",
+  }, {
+    provider: {},
+    readLaunch: async () => ({ ...launchRecord(), exists: false }),
+  });
+  assert.equal(result.pad, "uniswap-native");
 });

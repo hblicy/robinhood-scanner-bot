@@ -1,4 +1,4 @@
-import { SETTINGS, CHAIN, DATA_DIR } from "./config.js";
+import { SETTINGS, CHAIN, DATA_DIR, isQuote } from "./config.js";
 import { getDefaultStore, getOnchainCursor, hasSeen, markSeen, setOnchainCursor } from "./store.js";
 import { findFirstBlockAtOrAfter, getBlockNumber, getProvider, scanOnchain, sleep } from "./chain.js";
 import { geckoNewPools } from "./market.js";
@@ -9,7 +9,7 @@ import { candidateKey, handleCandidate } from "./runtime.js";
 import { safeErrorMessage, sanitizeRpcUrl } from "./safety.js";
 import { acquireInstanceLock } from "./instance-lock.js";
 import { createPonsTokenState, reducePonsEvent } from "./lifecycle.js";
-import { readPonsLaunch, scanPonsRange, verifyPonsDeployment } from "./pons.js";
+import { classifyPonsRecord, readPonsLaunch, scanPonsRange, verifyPonsDeployment } from "./pons.js";
 import { drainOutbox, nextRetryAt } from "./outbox.js";
 
 const DEFAULT_ANALYSIS_CONCURRENCY = 2;
@@ -181,6 +181,28 @@ export async function reconcilePonsWatchlist({
     updated += 1;
   }
   return { updated };
+}
+
+export async function classifyAuxiliaryCandidate(event, {
+  provider,
+  readLaunch = readPonsLaunch,
+}) {
+  let record;
+  try {
+    record = await readLaunch(provider, event.token);
+  } catch (cause) {
+    return { ...event, pad: "unknown", identity: "unknown", error: safeErrorMessage(cause) };
+  }
+  const classification = classifyPonsRecord(event.token, record);
+  if (classification.identity === "pons-v2") {
+    return { ...event, pad: "pons-v2", identity: "pons-v2", protocolPhase: classification.protocolPhase };
+  }
+  return {
+    ...event,
+    pad: isQuote(event.quote) ? "long" : "uniswap-native",
+    identity: "not_pons",
+    protocolPhase: "not_applicable",
+  };
 }
 
 async function drainQueue(queue, concurrency, handle) {

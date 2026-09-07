@@ -366,4 +366,11 @@ describe("createStore", () => {
     assert.equal(state.tokens[TOKEN.toLowerCase()].protocolPhase, "rescued");
     assert.ok(state.outbox[`reconcile:${TOKEN}:rescued`]);
   });
+
+  it("persists a heat snapshot independently of lifecycle cursors", () => {
+    const store = openStore(tempDir());
+    store.setHeat({ decision: "打", admissionCap: 3, calculatedAt: 1000 });
+    assert.deepEqual(store.getHeat(), { decision: "打", admissionCap: 3, calculatedAt: 1000 });
+    assert.equal(store.getPonsCursor(), null);
+  });
 });

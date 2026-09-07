@@ -250,6 +250,20 @@ export function createStore({
       return state.cursors.ponsV2 ?? null;
     },
 
+    getHeat() {
+      return structuredClone(state.heat);
+    },
+
+    setHeat(heat) {
+      if (!heat || typeof heat !== "object" || Array.isArray(heat)) {
+        throw new Error("heat snapshot must contain an object");
+      }
+      return commit((draft) => {
+        draft.heat = structuredClone(heat);
+        return draft.heat;
+      });
+    },
+
     commitPonsRange({ toBlock, transitions }) {
       if (!Number.isInteger(toBlock) || toBlock < 0) {
         throw new Error("Pons V2 cursor must be a non-negative integer");
