@@ -67,7 +67,10 @@ export async function geckoNewPools(
       const { token, quote } = picked;
       const venue = rel.dex?.data?.id || "unknown";
       const poolAddress = isEthAddress(a.address) ? getAddress(a.address) : null;
-      const poolId = V4_GECKO_VENUES.has(String(venue).toLowerCase()) && /^0x[0-9a-fA-F]{64}$/.test(String(a.address || ""))
+      const validPoolId = /^0x[0-9a-fA-F]{64}$/.test(String(a.address || ""));
+      const supportedV4Venue = V4_GECKO_VENUES.has(String(venue).toLowerCase());
+      if (!poolAddress && validPoolId && !supportedV4Venue) continue;
+      const poolId = supportedV4Venue && validPoolId
         ? String(a.address).toLowerCase()
         : null;
       if (!poolAddress && !poolId) {

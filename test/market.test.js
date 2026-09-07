@@ -178,7 +178,7 @@ describe("geckoNewPools", () => {
     assert.equal(events[0].poolId, poolId);
   });
 
-  it("accepts pools.trade V4 ids and rejects bytes32 ids from unknown venues", async () => {
+  it("accepts pools.trade V4 ids and skips bytes32 ids from unsupported venues", async () => {
     const row = geckoRow(new Date(NOW).toISOString());
     const poolId = `0x${"cd".repeat(32)}`;
     row.attributes.address = poolId;
@@ -192,11 +192,22 @@ describe("geckoNewPools", () => {
     assert.equal(events[0].poolId, poolId);
 
     row.relationships.dex.data.id = "mystery-dex";
-    await assert.rejects(() => geckoNewPools(1, {
+    const following = geckoRow(new Date(NOW).toISOString());
+    following.attributes.address = WRONG_POOL;
+    const filtered = await geckoNewPools(1, {
       fetchImpl: async () => jsonResponse({ data: [row] }),
       now: () => NOW,
       maxAgeMinutes: 30,
-    }), /pool address invalid/);
+    });
+    assert.deepEqual(filtered, []);
+
+    const continued = await geckoNewPools(1, {
+      fetchImpl: async () => jsonResponse({ data: [row, following] }),
+      now: () => NOW,
+      maxAgeMinutes: 30,
+    });
+    assert.equal(continued.length, 1);
+    assert.equal(continued[0].pool.toLowerCase(), WRONG_POOL.toLowerCase());
   });
 });
 
