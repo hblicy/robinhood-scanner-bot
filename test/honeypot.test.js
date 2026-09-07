@@ -20,6 +20,7 @@ const boundPool = {
   quote: input.quote,
   pool: input.pool,
   tokenIsToken0: true,
+  analysisBlock: 77,
 };
 
 function withBoundPool(overrides = {}) {
@@ -167,6 +168,7 @@ describe("honeypotCheck", () => {
       quote: input.quote,
       pool: input.pool,
       tokenIsToken0: true,
+      analysisBlock: 77,
     });
     assert.deepEqual(optionSamples, [
       { provider, blockTag: 77 },

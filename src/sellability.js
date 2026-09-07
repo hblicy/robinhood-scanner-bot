@@ -117,14 +117,21 @@ async function bindV2Pool(context, provider, head, retry) {
   const tokenIsToken1 = sameAddress(token1, token) && sameAddress(token0, quote);
   if (!tokenIsToken0 && !tokenIsToken1) return null;
 
-  return { token, quote, pool, tokenIsToken0 };
+  return { token, quote, pool, tokenIsToken0, analysisBlock: head };
 }
 
-function matchesBindingContext(context, binding) {
-  return typeof binding?.tokenIsToken0 === "boolean" &&
-    sameAddress(binding.token, context?.token) &&
-    sameAddress(binding.quote, normalizedQuote(context?.quote)) &&
-    sameAddress(binding.pool, context?.pool);
+function matchesBindingContext(context, binding, head) {
+  if (!Number.isInteger(binding?.analysisBlock) || binding.analysisBlock < 0 || binding.analysisBlock !== head) {
+    return false;
+  }
+  if (typeof binding.tokenIsToken0 !== "boolean") return false;
+  try {
+    return sameAddress(getAddress(binding.token), getAddress(context?.token)) &&
+      sameAddress(getAddress(binding.quote), getAddress(normalizedQuote(context?.quote))) &&
+      sameAddress(getAddress(binding.pool), getAddress(context?.pool));
+  } catch {
+    return false;
+  }
 }
 
 export async function validateV2PoolBinding(context, dependencies = {}) {
@@ -384,7 +391,7 @@ export async function inspectSellability(context, dependencies = {}) {
       ? context.analysisBlock
       : await retry(() => provider.getBlockNumber());
     if (!Number.isInteger(head) || head < 0) throw new Error("analysis block unavailable");
-    const bindingEvidence = matchesBindingContext(context, dependencies.poolBinding)
+    const bindingEvidence = matchesBindingContext(context, dependencies.poolBinding, head)
       ? { ok: true, binding: dependencies.poolBinding }
       : await validateV2PoolBinding({ ...context, analysisBlock: head }, { provider, retry });
     if (!bindingEvidence.ok) {

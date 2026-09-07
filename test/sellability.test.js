@@ -566,6 +566,7 @@ describe("V2 sellability evidence", () => {
     const provider = fakeProvider();
     const bindingEvidence = await validateV2PoolBinding(context({ analysisBlock: 77 }), { provider });
     assert.equal(bindingEvidence.ok, true);
+    assert.equal(bindingEvidence.binding.analysisBlock, 77);
     assert.equal(provider.calls.length, 3);
 
     const result = await inspectSellability(context({ analysisBlock: 77 }), {
@@ -577,6 +578,24 @@ describe("V2 sellability evidence", () => {
       sameAddressForTest(to, ADDR.V2_FACTORY) || sameAddressForTest(to, POOL)
     );
     assert.equal(bindingTargets.length, 3);
+  });
+
+  it("revalidates a prevalidated pool binding from a different analysis block", async () => {
+    const provider = fakeProvider();
+    const oldBinding = await validateV2PoolBinding(context({ analysisBlock: 77 }), { provider });
+    assert.equal(oldBinding.ok, true);
+    assert.equal(provider.calls.length, 3);
+
+    const result = await inspectSellability(context({ analysisBlock: 78 }), {
+      provider,
+      poolBinding: oldBinding.binding,
+    });
+    assert.equal(result.status, "unknown");
+    const bindingCalls = provider.calls.filter(({ to }) =>
+      sameAddressForTest(to, ADDR.V2_FACTORY) || sameAddressForTest(to, POOL)
+    );
+    assert.equal(bindingCalls.length, 6);
+    assert.ok(bindingCalls.slice(3).every(({ blockTag }) => blockTag === 78));
   });
 
   it("treats malformed factory and pair address results as unavailable evidence", async () => {
