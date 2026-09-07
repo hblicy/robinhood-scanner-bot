@@ -903,6 +903,60 @@ describe("V2 sellability evidence", () => {
     assert.equal(receiptReads, 3);
   });
 
+  it("does not let 30 newer sells from one counted seller hide earlier distinct sellers", async () => {
+    const evidence = threeSellerEvidence();
+    for (let index = 0; index < 30; index++) {
+      const hash = `0xrepeat${index}`;
+      evidence.logs.push(transferLog({
+        from: BUYERS[3],
+        to: POOL,
+        value: 2n,
+        blockNumber: 30 + index,
+        transactionHash: hash,
+      }));
+      evidence.receipts.set(hash, receipt({
+        from: BUYERS[3],
+        logs: [
+          transferLog({ from: BUYERS[3], to: POOL, value: 2n, index: 1, transactionHash: hash }),
+          transferLog({ token: QUOTE, from: POOL, to: ADDR.V2_ROUTER, value: 5n, index: 2, transactionHash: hash }),
+          swapLog({ amount0In: 2n, amount1Out: 5n, index: 3, transactionHash: hash }),
+        ],
+      }));
+    }
+    const provider = fakeProvider(evidence);
+    let receiptReads = 0;
+    const originalReceipt = provider.getTransactionReceipt;
+    provider.getTransactionReceipt = async (hash) => { receiptReads++; return originalReceipt(hash); };
+    const result = await inspectSellability(context(), { provider });
+    assert.equal(result.status, "confirmed");
+    assert.equal(result.meaningfulSellers, 3);
+    assert.equal(receiptReads, 3);
+  });
+
+  it("filters repeated contract sources before they consume the receipt budget", async () => {
+    const contract = "0x0000000000000000000000000000000000010050";
+    const evidence = threeSellerEvidence();
+    evidence.logs.push(...Array.from({ length: 30 }, (_, index) => transferLog({
+      from: contract,
+      to: POOL,
+      value: 2n,
+      blockNumber: 30 + index,
+      transactionHash: `0xcontract${index}`,
+    })));
+    const provider = fakeProvider({
+      ...evidence,
+      codes: new Map([[contract.toLowerCase(), "0x1234"]]),
+    });
+    let receiptReads = 0;
+    const originalReceipt = provider.getTransactionReceipt;
+    provider.getTransactionReceipt = async (hash) => { receiptReads++; return originalReceipt(hash); };
+    const result = await inspectSellability(context(), { provider });
+    assert.equal(result.status, "confirmed");
+    assert.equal(result.meaningfulSellers, 3);
+    assert.equal(receiptReads, 3);
+    assert.equal(provider.codeRequests.filter(({ address }) => sameAddressForTest(address, contract)).length, 1);
+  });
+
   it("does not count a receipt with missing or mismatched from", async () => {
     for (const receiptFrom of [
       () => null,

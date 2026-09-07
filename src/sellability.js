@@ -421,23 +421,32 @@ export async function inspectSellability(context, dependencies = {}) {
     const poolBalance = await readBalance(provider, context.token, context.pool, head, retry);
     const meaningfulThreshold = poolBalance / 10000n > oneToken ? poolBalance / 10000n : oneToken;
     const sellers = new Set();
-    const receiptHashes = [];
-    const seenReceiptHashes = new Set();
+    const receiptCandidates = new Map();
     for (const { log, transfer } of [...logs].reverse()) {
       if (!sameAddress(transfer.to, binding.pool) || transfer.value < meaningfulThreshold) continue;
       const hash = log.transactionHash;
-      if (!hash || seenReceiptHashes.has(hash)) continue;
-      seenReceiptHashes.add(hash);
-      receiptHashes.push(hash);
+      if (!hash) continue;
+      const sources = receiptCandidates.get(hash) ?? new Set();
+      sources.add(transfer.from.toLowerCase());
+      receiptCandidates.set(hash, sources);
     }
     let receiptReads = 0;
-    for (const hash of receiptHashes) {
+    for (const [hash, sources] of receiptCandidates) {
+      let hasEligibleSource = false;
+      for (const source of sources) {
+        if (sellers.has(source) || excludedAddress(source, binding.pool)) continue;
+        if (await isEoa(source)) {
+          hasEligibleSource = true;
+          break;
+        }
+      }
+      if (!hasEligibleSource) continue;
       if (receiptReads >= MAX_RECEIPTS) break;
       receiptReads++;
       const receipt = await retry(() => provider.getTransactionReceipt(hash));
       if (Number(receipt?.status) !== 1 || typeof receipt?.from !== "string") continue;
       const seller = receipt.from.toLowerCase();
-      if (sellers.has(seller) || excludedAddress(receipt.from, binding.pool) || !(await isEoa(receipt.from))) continue;
+      if (!sources.has(seller) || sellers.has(seller) || excludedAddress(receipt.from, binding.pool) || !(await isEoa(receipt.from))) continue;
       if (hasMeaningfulSellSegment(receipt, binding, meaningfulThreshold)) sellers.add(seller);
       if (sellers.size >= 3 || receiptReads === MAX_RECEIPTS) break;
     }
