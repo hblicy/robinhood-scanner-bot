@@ -504,6 +504,23 @@ export async function runPonsWatchIteration(state, dependencies) {
   return { ...result, complete: true };
 }
 
+export async function runPonsWatchLoop(state, dependencies) {
+  const wait = dependencies.sleep ?? sleep;
+  const log = dependencies.log ?? console.log;
+  const logError = dependencies.logError ?? console.error;
+  while (true) {
+    try {
+      const result = await runPonsWatchIteration(state, dependencies);
+      if (result.events.length) {
+        log(`pons ${result.events.length} lifecycle events; cursor=${state.lastBlock}`);
+      }
+    } catch (cause) {
+      logError(`pons watch failed: ${safeErrorMessage(cause)}`);
+    }
+    await wait(dependencies.settings.pollMs);
+  }
+}
+
 export async function runReadOnlyCandidates(events, dependencies) {
   const queue = new CandidateQueue({
     maxSize: dependencies.maxQueueSize,
@@ -647,24 +664,19 @@ async function watch() {
     };
     const loops = [];
     if (SETTINGS.onchainScan) {
-      loops.push((async () => {
-        while (true) {
-          const result = await runPonsWatchIteration(ponsState, {
-            provider,
-            store,
-            settings: SETTINGS,
-            getBlockNumber,
-            findFirstBlockAtOrAfter,
-            scanRange: scanPonsRange,
-            readLaunch: readPonsLaunch,
-            now: Date.now,
-          });
-          if (result.events.length) {
-            console.log(`pons ${result.events.length} lifecycle events; cursor=${ponsState.lastBlock}`);
-          }
-          await sleep(SETTINGS.pollMs);
-        }
-      })());
+      loops.push(runPonsWatchLoop(ponsState, {
+        provider,
+        store,
+        settings: SETTINGS,
+        getBlockNumber,
+        findFirstBlockAtOrAfter,
+        scanRange: scanPonsRange,
+        readLaunch: readPonsLaunch,
+        now: Date.now,
+        sleep,
+        log: console.log,
+        logError: console.error,
+      }));
       const handleEvents = createSourceProcessor();
       loops.push((async () => {
         while (true) {

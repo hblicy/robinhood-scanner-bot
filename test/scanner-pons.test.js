@@ -319,6 +319,54 @@ test("a saved Pons cursor schedules realtime checks without raw launch notificat
   assert.ok(state.pendingChecks[`${EVENT_ID}:line_a`]);
 });
 
+test("the Pons watch loop retries the same range after a transient launch read failure", async () => {
+  const { runPonsWatchLoop } = await import("../src/scanner.js");
+  assert.equal(typeof runPonsWatchLoop, "function");
+
+  const store = tempStore();
+  const runtime = { lastBlock: null };
+  const errors = [];
+  const ranges = [];
+  const stop = new Error("stop test loop");
+  let reads = 0;
+  let sleeps = 0;
+
+  await assert.rejects(
+    () => runPonsWatchLoop(runtime, {
+      provider: {},
+      store,
+      settings: { ponsConfirmations: 2, lineAMaxAgeMinutes: 20, pollMs: 123 },
+      getBlockNumber: async () => 125,
+      findFirstBlockAtOrAfter: async () => 120,
+      scanRange: async (_provider, fromBlock, toBlock) => {
+        ranges.push([fromBlock, toBlock]);
+        return [launchEvent()];
+      },
+      readLaunch: async () => {
+        reads += 1;
+        if (reads === 1) throw new Error("Pons launch read failed: exceeded maximum retry limit");
+        return launchRecord();
+      },
+      now: () => 10_000,
+      sleep: async (milliseconds) => {
+        sleeps += 1;
+        assert.equal(milliseconds, 123);
+        if (sleeps === 2) throw stop;
+      },
+      log: () => {},
+      logError: (message) => errors.push(message),
+    }),
+    (error) => error === stop
+  );
+
+  assert.equal(reads, 2);
+  assert.deepEqual(ranges, [[120, 123], [120, 123]]);
+  assert.equal(store.getPonsCursor(), 123);
+  assert.equal(runtime.lastBlock, 123);
+  assert.equal(errors.length, 1);
+  assert.match(errors[0], /pons watch failed:.*exceeded maximum retry limit/);
+});
+
 test("auxiliary discovery classifies LONG only after an explicit non-Pons factory result", async () => {
   const event = {
     token: TOKEN,
