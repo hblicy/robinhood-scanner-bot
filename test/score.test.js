@@ -29,6 +29,8 @@ function base(over = {}) {
     deployerHistoryKnown: true,
     marketBound: true,
     securityComplete: true,
+    walletSignalsStatus: "known",
+    walletSignalCount: 0,
     ...over,
   };
 }
@@ -83,5 +85,45 @@ describe("scoreFromFacts", () => {
   it("does not mark an unbound market green", () => {
     const r = scoreFromFacts(base({ marketBound: false, securityComplete: false }));
     assert.notEqual(r.verdict, "green");
+  });
+
+  it("adds five points for one labeled buyer and caps two or more at eight", () => {
+    const lowBase = {
+      narrativeHits: [],
+      top10Pct: 40,
+      creatorKnown: false,
+      honeypot: null,
+      lpUnknown: true,
+      privilegesKnown: false,
+      deployerHistoryKnown: false,
+      securityComplete: false,
+    };
+    const none = scoreFromFacts(base(lowBase));
+    const one = scoreFromFacts(base({ ...lowBase, walletSignalCount: 1 }));
+    const two = scoreFromFacts(base({ ...lowBase, walletSignalCount: 2 }));
+    const many = scoreFromFacts(base({ ...lowBase, walletSignalCount: 10 }));
+    assert.equal(one.score - none.score, 5);
+    assert.equal(two.score - none.score, 8);
+    assert.equal(many.score, two.score);
+  });
+
+  it("does not reward unconfigured wallet signals", () => {
+    const lowBase = {
+      narrativeHits: [],
+      top10Pct: 40,
+      creatorKnown: false,
+      honeypot: null,
+      lpUnknown: true,
+      privilegesKnown: false,
+      deployerHistoryKnown: false,
+      securityComplete: false,
+    };
+    const none = scoreFromFacts(base(lowBase));
+    const unconfigured = scoreFromFacts(base({
+      ...lowBase,
+      walletSignalsStatus: "unconfigured",
+      walletSignalCount: 2,
+    }));
+    assert.equal(unconfigured.score, none.score);
   });
 });

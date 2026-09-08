@@ -3,6 +3,7 @@ import { ERC20_ABI, PAIR_V2_ABI, V2_FACTORY_ABI } from "./abis.js";
 import { getProvider, getLogsChunked, findFirstBlockAtOrAfter, isContractCallRevert, withRetry } from "./chain.js";
 import { ADDR } from "./config.js";
 import { safeErrorMessage } from "./safety.js";
+import { normalizeWalletSignals } from "./wallet-labels.js";
 
 export const SELLABILITY = Object.freeze({
   CONFIRMED: "confirmed",
@@ -246,6 +247,7 @@ export function sellabilityResult(status, reason, evidence = {}) {
     ladderSamples = 0,
     meaningfulSellers = 0,
     details = [],
+    walletSignals,
   } = evidence;
 
   return {
@@ -255,6 +257,7 @@ export function sellabilityResult(status, reason, evidence = {}) {
     ladderSamples,
     meaningfulSellers,
     details: Array.isArray(details) ? [...details] : [],
+    walletSignals: normalizeWalletSignals(walletSignals),
   };
 }
 
@@ -273,6 +276,7 @@ export function normalizeSellabilityEvidence(sellability, legacyHoneypot = null)
       ? evidence.meaningfulSellers
       : 0,
     details: evidence.details,
+    walletSignals: evidence.walletSignals,
   });
 
   if (evidence.status === SELLABILITY.BLOCKED) {
@@ -362,7 +366,7 @@ function isPositiveInteger(value) {
   return Number.isInteger(value) && value > 0;
 }
 
-export function finalizeSellability({ buyerSamples, ladderSamples, sellers, details = [] }) {
+export function finalizeSellability({ buyerSamples, ladderSamples, sellers, details = [], walletSignals }) {
   const sellerEvidence = countMeaningfulSellers(sellers);
   const meaningfulSellers = sellerEvidence.count;
 
@@ -372,6 +376,7 @@ export function finalizeSellability({ buyerSamples, ladderSamples, sellers, deta
       ladderSamples,
       meaningfulSellers,
       details,
+      walletSignals,
     });
   }
 
@@ -381,6 +386,7 @@ export function finalizeSellability({ buyerSamples, ladderSamples, sellers, deta
       ladderSamples,
       meaningfulSellers,
       details,
+      walletSignals,
     });
   }
 
@@ -389,12 +395,31 @@ export function finalizeSellability({ buyerSamples, ladderSamples, sellers, deta
     ladderSamples,
     meaningfulSellers,
     details,
+    walletSignals,
   });
 }
 
 export async function inspectSellability(context, dependencies = {}) {
+  const walletCatalog = dependencies.walletCatalog?.status === "known"
+    && dependencies.walletCatalog.labels instanceof Map
+    ? dependencies.walletCatalog
+    : { status: "unconfigured", labels: new Map() };
+  let walletSignals = normalizeWalletSignals({
+    status: walletCatalog.status,
+    count: 0,
+    matches: [],
+  });
+  const result = (status, reason, evidence = {}) => sellabilityResult(status, reason, {
+    ...evidence,
+    walletSignals: evidence.walletSignals ?? walletSignals,
+  });
+  const unavailableResult = (error, evidence = {}) => unavailable(error, {
+    ...evidence,
+    walletSignals: evidence.walletSignals ?? walletSignals,
+  });
+
   if (context?.venue !== "uniswap-v2" || !context?.pool) {
-    return sellabilityResult(SELLABILITY.UNKNOWN, "unsupported-venue");
+    return result(SELLABILITY.UNKNOWN, "unsupported-venue");
   }
 
   const provider = dependencies.provider ?? getProvider();
@@ -413,15 +438,15 @@ export async function inspectSellability(context, dependencies = {}) {
       ? { ok: true, binding: dependencies.poolBinding }
       : await validateV2PoolBinding({ ...context, analysisBlock: head }, { provider, retry });
     if (!bindingEvidence.ok) {
-      return sellabilityResult(SELLABILITY.UNKNOWN, bindingEvidence.reason || "evidence-unavailable", {
+      return result(SELLABILITY.UNKNOWN, bindingEvidence.reason || "evidence-unavailable", {
         details: bindingEvidence.details,
       });
     }
     const binding = bindingEvidence.binding;
     const start = await resolveStartBlock(context, head, findBlock, provider, retry);
-    if (start == null) return unavailable("pool creation block unavailable");
+    if (start == null) return unavailableResult("pool creation block unavailable");
     if (!Number.isInteger(start) || start < 0 || start > head) {
-      return unavailable(`pool creation block ${start} is after analysis block ${head}`);
+      return unavailableResult(`pool creation block ${start} is after analysis block ${head}`);
     }
 
     const rawLogs = [];
@@ -468,12 +493,19 @@ export async function inspectSellability(context, dependencies = {}) {
       codeCache.set(key, eoa);
       return eoa;
     };
+    const orderedCandidates = [];
     for (const { transfer } of [...buys].reverse()) {
       const key = transfer.to.toLowerCase();
       if (buyerCandidates.has(key) || excludedAddress(transfer.to, context.pool)) continue;
       buyerCandidates.add(key);
-      if (!(await isEoa(transfer.to))) continue;
-      buyers.push(transfer.to);
+      orderedCandidates.push(transfer.to);
+    }
+    orderedCandidates.sort((a, b) =>
+      Number(walletCatalog.labels.has(b.toLowerCase())) - Number(walletCatalog.labels.has(a.toLowerCase()))
+    );
+    for (const candidate of orderedCandidates) {
+      if (!(await isEoa(candidate))) continue;
+      buyers.push(candidate);
       if (buyers.length === MAX_BUYERS) break;
     }
     buyerSamples = buyers.length;
@@ -493,13 +525,23 @@ export async function inspectSellability(context, dependencies = {}) {
       const reportedBalance = await readBalance(provider, context.token, wallet, head, retry);
       balances.set(wallet.toLowerCase(), reportedBalance);
       if (evaluateLedgerBalance({ ledgerBalance: expectedBalance, reportedBalance, oneToken }).blocked) {
-        return sellabilityResult(SELLABILITY.BLOCKED, "hidden-balance-mutation", {
+        return result(SELLABILITY.BLOCKED, "hidden-balance-mutation", {
           buyerSamples,
           ladderSamples,
           details: [`wallet=${wallet} expectedBalance=${expectedBalance} reported=${reportedBalance}`],
         });
       }
     }
+
+    const matches = buyers
+      .filter((wallet) => (balances.get(wallet.toLowerCase()) ?? 0n) >= oneToken)
+      .map((wallet) => walletCatalog.labels.get(wallet.toLowerCase()))
+      .filter(Boolean);
+    walletSignals = normalizeWalletSignals({
+      status: walletCatalog.status,
+      count: matches.length,
+      matches: matches.slice(0, 3),
+    });
 
     const ladderWallets = buyers.filter((wallet) => (balances.get(wallet.toLowerCase()) ?? 0n) >= oneToken).slice(0, MAX_LADDER_WALLETS);
     for (const wallet of ladderWallets) {
@@ -522,8 +564,8 @@ export async function inspectSellability(context, dependencies = {}) {
         }
       }
       const ladder = evaluateTransferLadder(steps);
-      if (ladder.blocked) return sellabilityResult(SELLABILITY.BLOCKED, ladder.reason, { buyerSamples, ladderSamples });
-      if (ladder.reason === "evidence-unavailable") return unavailable("transfer simulation returned empty data", { buyerSamples, ladderSamples });
+      if (ladder.blocked) return result(SELLABILITY.BLOCKED, ladder.reason, { buyerSamples, ladderSamples });
+      if (ladder.reason === "evidence-unavailable") return unavailableResult("transfer simulation returned empty data", { buyerSamples, ladderSamples });
     }
 
     const poolBalance = await readBalance(provider, context.token, context.pool, head, retry);
@@ -565,8 +607,8 @@ export async function inspectSellability(context, dependencies = {}) {
       if (hasMeaningfulSellSegment(receipt, binding, meaningfulThreshold)) sellers.add(seller);
       if (sellers.size >= 3 || receiptReads === MAX_RECEIPTS) break;
     }
-    return finalizeSellability({ buyerSamples, ladderSamples, sellers });
+    return finalizeSellability({ buyerSamples, ladderSamples, sellers, walletSignals });
   } catch (error) {
-    return unavailable(error, { buyerSamples, ladderSamples });
+    return unavailableResult(error, { buyerSamples, ladderSamples });
   }
 }

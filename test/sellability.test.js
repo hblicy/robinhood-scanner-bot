@@ -195,6 +195,7 @@ describe("sellability evidence normalization", () => {
     ladderSamples: 1,
     meaningfulSellers: 3,
     details: ["bound evidence"],
+    walletSignals: { status: "unconfigured", count: 0, matches: [] },
   };
 
   it("confirms only complete non-negative integer evidence with legacy false", () => {
@@ -243,6 +244,7 @@ describe("sellability core", () => {
       ladderSamples: 0,
       meaningfulSellers: 0,
       details: [],
+      walletSignals: { status: "unconfigured", count: 0, matches: [] },
     });
   });
 
@@ -412,6 +414,7 @@ describe("sellability core", () => {
           ladderSamples: input.ladderSamples,
           meaningfulSellers: 3,
           details: [],
+          walletSignals: { status: "unconfigured", count: 0, matches: [] },
         }
       );
     }
@@ -431,6 +434,7 @@ describe("sellability core", () => {
         ladderSamples: 2,
         meaningfulSellers: 0,
         details: [],
+        walletSignals: { status: "unconfigured", count: 0, matches: [] },
       }
     );
     assert.deepEqual(
@@ -446,6 +450,7 @@ describe("sellability core", () => {
         ladderSamples: 2,
         meaningfulSellers: 0,
         details: [],
+        walletSignals: { status: "unconfigured", count: 0, matches: [] },
       }
     );
   });
@@ -465,6 +470,7 @@ describe("sellability core", () => {
         ladderSamples: 1,
         meaningfulSellers: 2,
         details: ["only two sellers"],
+        walletSignals: { status: "unconfigured", count: 0, matches: [] },
       }
     );
   });
@@ -484,6 +490,7 @@ describe("sellability core", () => {
         ladderSamples: 3,
         meaningfulSellers: 2,
         details: ["invalid members present"],
+        walletSignals: { status: "unconfigured", count: 0, matches: [] },
       }
     );
   });
@@ -503,12 +510,78 @@ describe("sellability core", () => {
         ladderSamples: 3,
         meaningfulSellers: 3,
         details: ["ledger ok", "ladder ok"],
+        walletSignals: { status: "unconfigured", count: 0, matches: [] },
       }
     );
   });
 });
 
 describe("V2 sellability evidence", () => {
+  it("reports labeled buyers that still hold at least one token without extra read classes", async () => {
+    const catalog = {
+      status: "known",
+      labels: new Map([
+        [BUYERS[0].toLowerCase(), { label: "Alpha", type: "kol", source: "manual" }],
+        [BUYERS[1].toLowerCase(), { label: "Beta", type: "smart_money", source: "debot" }],
+      ]),
+    };
+    const logs = BUYERS.slice(0, 2).map((buyer, index) =>
+      transferLog({ from: POOL, to: buyer, value: 100n, blockNumber: 10 + index })
+    );
+    const provider = fakeProvider({
+      logs,
+      balances: new Map([
+        [BUYERS[0].toLowerCase(), 100n],
+        [BUYERS[1].toLowerCase(), 100n],
+      ]),
+    });
+
+    const result = await inspectSellability(context(), { provider, walletCatalog: catalog });
+
+    assert.equal(result.walletSignals.status, "known");
+    assert.equal(result.walletSignals.count, 2);
+    assert.deepEqual(result.walletSignals.matches.map((item) => item.label), ["Beta", "Alpha"]);
+  });
+
+  it("does not count a labeled buyer that has sold out", async () => {
+    const catalog = {
+      status: "known",
+      labels: new Map([
+        [BUYERS[0].toLowerCase(), { label: "Exited", type: "kol", source: "manual" }],
+      ]),
+    };
+    const provider = fakeProvider({
+      logs: [transferLog({ from: POOL, to: BUYERS[0], value: 100n })],
+      balances: new Map([[BUYERS[0].toLowerCase(), 0n]]),
+    });
+
+    const result = await inspectSellability(context(), { provider, walletCatalog: catalog });
+
+    assert.equal(result.walletSignals.count, 0);
+  });
+
+  it("prioritizes a labeled buyer before the five-buyer sample cap", async () => {
+    const catalog = {
+      status: "known",
+      labels: new Map([
+        [BUYERS[0].toLowerCase(), { label: "Oldest Tagged", type: "kol", source: "manual" }],
+      ]),
+    };
+    const logs = BUYERS.map((buyer, index) =>
+      transferLog({ from: POOL, to: buyer, value: 100n, blockNumber: 10 + index })
+    );
+    const provider = fakeProvider({
+      logs,
+      balances: new Map(BUYERS.map((buyer) => [buyer.toLowerCase(), 100n])),
+    });
+
+    const result = await inspectSellability(context(), { provider, walletCatalog: catalog });
+
+    assert.equal(result.buyerSamples, 5);
+    assert.equal(result.walletSignals.count, 1);
+    assert.equal(result.walletSignals.matches[0].label, "Oldest Tagged");
+  });
+
   it("builds newest-first non-overlapping ranges inside the 500-block evidence window", () => {
     const ranges = recentTransferRanges(0, 1000);
     assert.equal(ranges.length, 50);

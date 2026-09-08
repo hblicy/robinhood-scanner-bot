@@ -1,6 +1,7 @@
 import { SETTINGS } from "./config.js";
 import { safeErrorMessage } from "./safety.js";
 import { normalizeSellabilityEvidence } from "./sellability.js";
+import { normalizeWalletSignals } from "./wallet-labels.js";
 
 const VERDICT = {
   green: "🟢 可小仓试",
@@ -12,6 +13,7 @@ const VERDICT = {
 export function formatAlert(report) {
   const { meta, facts, score, verdict, red, checks, links, token, venue, creator } = report;
   const sellability = normalizeSellabilityEvidence(report.sellability, report.honeypot?.honeypot);
+  const walletSignals = normalizeWalletSignals(report.walletSignals || sellability.walletSignals);
   const sellabilityReason = formatSellabilityReason(sellability.status, sellability.reason);
   const lines = [];
   lines.push(`${VERDICT[verdict] || verdict}  <b>${esc(meta.symbol)}</b>  ${score}/100`);
@@ -42,6 +44,14 @@ export function formatAlert(report) {
   lines.push(
     `<b>卖出安全</b> ${sellabilityLabel(sellability.status)}  原因 ${sellabilityReason}  买家样本 ${sellability.buyerSamples}  额度样本 ${sellability.ladderSamples}  真实卖家 ${sellability.meaningfulSellers}`
   );
+  const walletSignalText = walletSignals.status !== "known"
+    ? "标签未配置"
+    : walletSignals.count === 0
+      ? "未命中"
+      : `命中 ${walletSignals.count}：${walletSignals.matches
+        .map((item) => `${esc(item.label)}(${item.type === "kol" ? "KOL" : "聪明钱"})`)
+        .join("、")}`;
+  lines.push(`<b>聪明钱</b> ${walletSignalText}`);
   const buyTax = Number.isFinite(facts.buyTaxBps) ? facts.buyTaxBps : "未知";
   const sellTax = Number.isFinite(facts.sellTaxBps) ? facts.sellTaxBps : "未知";
   const lpStatus = facts.lpUnknown

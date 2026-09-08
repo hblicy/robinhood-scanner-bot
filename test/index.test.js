@@ -1,6 +1,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
+  createCandidateRecheckHandler,
+  createCandidateRetryScheduler,
   initialOnchainCursor,
   processEvents,
   processOnchainRange,
@@ -8,7 +10,7 @@ import {
   runWatchIteration,
   scanOnce,
 } from "../src/scanner.js";
-import { CandidateQueue } from "../src/queue.js";
+import { CandidateQueue, createSerialExecutor } from "../src/queue.js";
 
 const CONFIRMED_SELLABILITY = {
   status: "confirmed",
@@ -19,6 +21,143 @@ const CONFIRMED_SELLABILITY = {
 };
 
 describe("scanner orchestration", () => {
+  it("schedules eligible initial reports idempotently", async () => {
+    const checks = new Map();
+    const store = {
+      scheduleCheck(check) {
+        if (!checks.has(check.id)) checks.set(check.id, structuredClone(check));
+        return checks.get(check.id);
+      },
+    };
+    const event = {
+      source: "gecko",
+      venue: "uniswap-v2",
+      pool: "0x2222222222222222222222222222222222222222",
+      token: "0x1111111111111111111111111111111111111111",
+      createdAt: 1_000,
+    };
+    const report = {
+      honeypot: { honeypot: null },
+      sellability: { status: "unknown", reason: "insufficient-meaningful-sells" },
+    };
+    const schedule = createCandidateRetryScheduler({ store, now: () => 1_000 });
+
+    await schedule(report, event);
+    await schedule(report, event);
+    await schedule({ ...report, sellability: { status: "unknown", reason: "prefilter-score" } }, event);
+
+    assert.equal(checks.size, 1);
+    assert.equal([...checks.values()][0].nextAttemptAt, 121_000);
+  });
+
+  it("rechecks through a shared serial executor and returns the next absolute retry", async () => {
+    let active = 0;
+    let maxActive = 0;
+    const observed = [];
+    const executeCandidate = createSerialExecutor();
+    const handler = createCandidateRecheckHandler({
+      executeCandidate,
+      now: () => 121_000,
+      maxAgeMinutes: 30,
+      minScore: 70,
+      analyze: async (candidate) => {
+        observed.push(candidate.observedAt);
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        await new Promise((resolve) => setImmediate(resolve));
+        active -= 1;
+        return {
+          ...candidate,
+          score: 65,
+          verdict: "skip",
+          meta: { symbol: "PENDING" },
+          honeypot: { honeypot: null },
+          sellability: { status: "unknown", reason: "insufficient-meaningful-sells" },
+        };
+      },
+      alertReport: async () => {},
+      log: () => {},
+    });
+    const event = {
+      source: "gecko",
+      venue: "uniswap-v2",
+      pool: "0x2222222222222222222222222222222222222222",
+      token: "0x1111111111111111111111111111111111111111",
+      createdAt: 1_000,
+    };
+    const check = {
+      id: "candidate-recheck:test",
+      type: "candidate_recheck",
+      event,
+      firstAnalyzedAt: 1_000,
+      attempts: 0,
+    };
+
+    const results = await Promise.all([handler(check), handler({ ...check, id: `${check.id}:2` })]);
+
+    assert.equal(maxActive, 1);
+    assert.deepEqual(observed, [121_000, 121_000]);
+    assert.deepEqual(results, [
+      { retryAt: 301_000, lastError: "insufficient-meaningful-sells" },
+      { retryAt: 301_000, lastError: "insufficient-meaningful-sells" },
+    ]);
+  });
+
+  it("completes terminal and expired rechecks while preserving alert rules", async () => {
+    const alerts = [];
+    const reports = [
+      {
+        score: 10,
+        verdict: "skip",
+        meta: { symbol: "BLOCKED" },
+        honeypot: { honeypot: true },
+        sellability: { status: "blocked", reason: "sell-transfer-blocked" },
+      },
+      {
+        score: 69,
+        verdict: "skip",
+        meta: { symbol: "LOW" },
+        honeypot: { honeypot: false },
+        sellability: CONFIRMED_SELLABILITY,
+      },
+    ];
+    let analyzed = 0;
+    const handler = createCandidateRecheckHandler({
+      executeCandidate: createSerialExecutor(),
+      now: () => 121_000,
+      maxAgeMinutes: 30,
+      minScore: 70,
+      analyze: async (candidate) => ({ ...candidate, ...reports[analyzed++] }),
+      alertReport: async (report) => { alerts.push(report.meta.symbol); },
+      log: () => {},
+    });
+    const event = {
+      source: "gecko",
+      venue: "uniswap-v2",
+      pool: "0x2222222222222222222222222222222222222222",
+      token: "0x1111111111111111111111111111111111111111",
+      createdAt: 1_000,
+    };
+    const check = { event, firstAnalyzedAt: 1_000, attempts: 0 };
+
+    assert.equal(await handler(check), undefined);
+    assert.equal(await handler(check), undefined);
+    assert.deepEqual(alerts, ["BLOCKED"]);
+
+    let oldAnalyzed = 0;
+    const expired = createCandidateRecheckHandler({
+      executeCandidate: createSerialExecutor(),
+      now: () => 2_000_000,
+      maxAgeMinutes: 30,
+      minScore: 70,
+      analyze: async () => { oldAnalyzed += 1; },
+      alertReport: async () => {},
+      log: () => {},
+    });
+    assert.equal(await expired({ ...check, event: { ...event, createdAt: 1_000 } }), undefined);
+    assert.equal(oldAnalyzed, 0);
+  });
+
   it("starts at the newer of the saved cursor and age-window boundary", async () => {
     const findFirstBlockAtOrAfter = async () => 40;
     assert.equal(

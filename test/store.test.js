@@ -47,6 +47,32 @@ afterEach(() => {
 });
 
 describe("createStore", () => {
+  it("schedules a generic pending check idempotently without resetting retry state", () => {
+    const store = openStore(tempDir());
+    const check = {
+      id: "candidate-recheck:key",
+      type: "candidate_recheck",
+      event: { token: TOKEN, venue: "uniswap-v2", pool: "0x2222222222222222222222222222222222222222" },
+      firstAnalyzedAt: 1_000,
+      dueAt: 121_000,
+      retryOffsetsMs: [120_000, 300_000, 600_000],
+      maxAttempts: 3,
+    };
+
+    store.scheduleCheck(check);
+    store.rescheduleCheck(check.id, {
+      status: "pending",
+      attempts: 1,
+      nextAttemptAt: 301_000,
+      lastError: "pending",
+    });
+    store.scheduleCheck(check);
+
+    const saved = store.snapshot().pendingChecks[check.id];
+    assert.equal(saved.attempts, 1);
+    assert.equal(saved.nextAttemptAt, 301_000);
+  });
+
   it("preserves historical positions and trades as opaque data", () => {
     const dir = tempDir();
     const positions = {

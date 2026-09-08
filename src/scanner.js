@@ -13,6 +13,11 @@ import { classifyPonsRecord, readPonsLaunch, scanPonsRange, verifyPonsDeployment
 import { drainOutbox, nextRetryAt } from "./outbox.js";
 import { formatInspectionReport, inspectToken } from "./check.js";
 import { evaluateHeat } from "./decay.js";
+import {
+  createCandidateRecheck,
+  decideCandidateRecheck,
+  shouldScheduleCandidateRecheck,
+} from "./candidate-retry.js";
 
 const DEFAULT_ANALYSIS_CONCURRENCY = 1;
 const candidates = new CandidateQueue({
@@ -107,6 +112,19 @@ export async function runPendingChecks({
       const handler = handlers?.[check.type];
       if (typeof handler !== "function") throw new Error(`no pending-check handler for ${check.type}`);
       const update = await handler(check);
+      if (update?.retryAt != null) {
+        if (!Number.isFinite(update.retryAt)) {
+          throw new Error(`pending check ${check.id} returned invalid retryAt`);
+        }
+        store.rescheduleCheck(check.id, {
+          status: "pending",
+          attempts: Number(check.attempts || 0) + 1,
+          nextAttemptAt: update.retryAt,
+          lastError: safeErrorMessage(update.lastError || "evidence pending"),
+        });
+        result.retried += 1;
+        continue;
+      }
       if (update?.nextToken && update?.token) {
         store.applyCheckResult(check.id, { ...update, completedAt: now() });
       } else {
@@ -115,11 +133,20 @@ export async function runPendingChecks({
       result.completed += 1;
     } catch (cause) {
       const attempts = Number(check.attempts || 0) + 1;
-      const exhausted = attempts >= maxAttempts;
+      const allowedAttempts = Number.isInteger(check.maxAttempts) && check.maxAttempts > 0
+        ? check.maxAttempts
+        : maxAttempts;
+      const exhausted = attempts >= allowedAttempts;
+      const anchoredOffset = Array.isArray(check.retryOffsetsMs)
+        ? check.retryOffsetsMs[attempts]
+        : null;
+      const retryAt = Number.isFinite(check.firstAnalyzedAt) && Number.isFinite(anchoredOffset)
+        ? check.firstAnalyzedAt + anchoredOffset
+        : nextRetryAt(now(), attempts);
       store.rescheduleCheck(check.id, {
         status: exhausted ? "failed" : "pending",
         attempts,
-        nextAttemptAt: nextRetryAt(now(), attempts),
+        nextAttemptAt: retryAt,
         lastError: safeErrorMessage(cause),
       });
       if (exhausted) result.failed += 1;
@@ -127,6 +154,54 @@ export async function runPendingChecks({
     }
   }
   return result;
+}
+
+export function createCandidateRetryScheduler({ store, now = Date.now }) {
+  if (!store || typeof store.scheduleCheck !== "function") {
+    throw new Error("candidate retry scheduler requires a store");
+  }
+  return async (report, event) => {
+    if (!shouldScheduleCandidateRecheck(event, report)) return null;
+    return store.scheduleCheck(createCandidateRecheck(event, now()));
+  };
+}
+
+export function createCandidateRecheckHandler({
+  executeCandidate,
+  now = Date.now,
+  maxAgeMinutes = SETTINGS.maxAgeMinutes,
+  minScore = SETTINGS.minScore,
+  analyze: analyzeCandidate = analyze,
+  alertReport: sendAlert = alertReport,
+  log = console.log,
+}) {
+  if (typeof executeCandidate !== "function") {
+    throw new Error("candidate recheck handler requires a shared executor");
+  }
+  return async (check) => {
+    if (!check?.event || typeof check.event !== "object" || !check.event.token) {
+      throw new Error(`candidate recheck ${check?.id || "unknown"} requires an event`);
+    }
+    const at = now();
+    const event = { ...structuredClone(check.event), observedAt: at };
+    const report = await executeCandidate(() => handleCandidate(
+      event,
+      { persistSeen: false },
+      {
+        now,
+        maxAgeMinutes,
+        minScore,
+        analyze: analyzeCandidate,
+        markSeen: () => {},
+        alertReport: sendAlert,
+        log,
+      }
+    ));
+    if (!report) return undefined;
+    const decision = decideCandidateRecheck(check, report, at, maxAgeMinutes);
+    if (decision.complete) return undefined;
+    return { retryAt: decision.retryAt, lastError: decision.lastError };
+  };
 }
 
 export function createInspectionCheckHandlers({
@@ -588,7 +663,6 @@ async function watch() {
     banner();
     const provider = getProvider();
     const store = getDefaultStore();
-    const pendingHandlers = createInspectionCheckHandlers({ provider, store });
     if (SETTINGS.onchainScan) {
       await verifyPonsDeployment(provider);
       await reconcilePonsWatchlist({ provider, store });
@@ -603,6 +677,19 @@ async function watch() {
     const ponsState = { lastBlock: null };
     const claimed = new Set();
     const executeCandidate = createSerialExecutor();
+    const scheduleCandidateRecheck = createCandidateRetryScheduler({ store, now: Date.now });
+    const pendingHandlers = {
+      ...createInspectionCheckHandlers({ provider, store }),
+      candidate_recheck: createCandidateRecheckHandler({
+        executeCandidate,
+        now: Date.now,
+        maxAgeMinutes: SETTINGS.maxAgeMinutes,
+        minScore: SETTINGS.minScore,
+        analyze,
+        alertReport,
+        log: console.log,
+      }),
+    };
     const createSourceProcessor = () => {
       const inner = new CandidateQueue({
         maxSize: SETTINGS.maxQueueSize,
@@ -644,6 +731,7 @@ async function watch() {
                 markSeen,
                 alertReport,
                 log: console.log,
+                onAnalyzed: scheduleCandidateRecheck,
               }
             );
           } catch (error) {

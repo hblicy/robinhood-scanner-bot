@@ -12,6 +12,7 @@
 | 新池发现 | 链上监听 Uniswap V2 `PairCreated`、V3 `PoolCreated`、V4 `Initialize`，并读取 GeckoTerminal `new_pools` |
 | 年龄与市场数据 | 按 `MAX_AGE_MINUTES` 过滤，读取成交、买卖笔数、流动性和市值 |
 | 社交与叙事 | 读取 DexScreener 社交链接并匹配名称关键词 |
+| KOL / 聪明钱 | 从本地标签匹配仍持有至少 1 枚代币的 V2 买家；1 个命中 +5，2 个及以上 +8 |
 | 持仓与创建者 | 读取 Blockscout holders、创建者余额和历史合约数量 |
 | 蜜罐与税率线索 | 通过只读 RPC 调用检查 V2 双向报价和代币转账行为 |
 | 流动性风险 | 检查 V2 LP 销毁比例；未知信息明确标为未完成 |
@@ -62,6 +63,38 @@ screen -r robinhood
 
 不要提交 `.env`，也不要把 token 粘贴到日志或问题报告中。
 
+## KOL / 聪明钱标签
+
+标签完全从本地读取，不需要 DeBot 或 OKX 密钥。先复制示例，再替换成自己核验过的钱包：
+
+```bash
+# Linux
+mkdir -p data
+cp examples/wallet-labels.json data/wallet-labels.json
+
+# Windows CMD
+copy examples\wallet-labels.json data\wallet-labels.json
+```
+
+标准格式是 JSON 数组：
+
+```json
+[
+  {
+    "address": "0x0000000000000000000000000000000000000011",
+    "label": "示例 KOL",
+    "type": "kol",
+    "source": "manual"
+  }
+]
+```
+
+`type` 只接受 `kol`、`smart_money`；`source` 只接受 `manual`、`debot`、`okx`。也可以直接使用 DeBot 导出的嵌套 JSON：程序递归读取 EVM 地址键的 `mark`，统一记为 `smart_money/debot`。文件不存在时报告显示“标签未配置”；文件存在但 JSON、地址、字段或重复地址无效时，程序会明确报错退出。修改文件后需要重启 `watch`。
+
+只有现有 V2 卖出检查已经采样、并且在同一固定区块仍持有至少 1 枚代币的钱包才算命中；Telegram 最多显示三个标签，不显示地址。1 个唯一命中加 5 分，2 个及以上加 8 分。该加分不绕过年龄、明确风险、卖出安全确认或最终 `MIN_SCORE` 门槛，也不会扩大 RPC 读取上限。为控制吞吐量，只有原始预评分达到 `MIN_SCORE - 10` 的候选才进入深度检查和标签匹配。
+
+DeBot 当前仅用于手工导出/导入；程序不调用其未公开接口。OKX 的 Smart Money/KOL Signal API 当前不支持 Robinhood Chain `4663`，因此不做实时接入；可以把人工核验后的 OKX 地址写入本地标准文件。
+
 ## 主要配置
 
 ```dotenv
@@ -103,6 +136,8 @@ Pons 链上阶段为 `not_graduated → swept → pool_created`，`rescued` 是�
 首次运行按区块时间二分定位年龄窗口起点。已有游标时，从“已保存游标”和“当前年龄窗口起点”中较新的位置继续。链上默认只处理落后最新高度 2 个区块的已确认范围。Factory 日志、身份 getter 和状态转换与 Pons 游标同次落盘；Telegram 或外部市场源失败不会回滚已确认的 Factory 游标，而会留在 outbox/pending check 中重试。超过 `MAX_AGE_MINUTES` 的辅助候选严格跳过。
 
 首次没有 Pons 游标时仅恢复链上状态、事件去重和游标，不创建历史 Telegram 或历史 pending checks。实时 Pons 原始 `new_launch`、`swept`、`graduated` 与市场热度只记录状态/终端日志；Telegram 生命周期白名单仅包含 `hard_kill`、`rescued`、`green`、`market_ready`。升级前已积压的其他类型会保留审计记录并标记为 `suppressed`。普通候选仍按 `MIN_SCORE` 输出完整评分报告，启动成功提示保持不变。
+
+普通 Uniswap V2 候选进入过深度检查、但卖出证据仍为 `unknown` 时，会把复查任务写入 `pendingChecks`，并按首次分析后的绝对时间 `+2 分钟 / +5 分钟 / +10 分钟` 最多复查三次；重启或离线不会重置时间锚点。变为 `blocked` 时无视分数立即推送风险，变为 `confirmed` 时只有达到最终分数门槛才推送，第三次仍未知则静默完成。`prefilter-score`、V3/V4、Pons 生命周期以及超过年龄窗口的候选不进入这套普通复查。
 
 链上与 GeckoTerminal 独立运行：一个来源故障不会阻止另一个来源。`scan` 会处理已取得的候选后汇总错误并以非零状态退出，不会把部分成功伪装成整轮成功；整轮超过 120 秒会明确报超时，公共 RPC 无法及时扫完时请换专用 RPC。`watch` 对同一 `data/` 使用单实例锁，重复启动会明确报错。
 

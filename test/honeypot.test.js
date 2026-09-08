@@ -45,6 +45,21 @@ const confirmedSellability = async () => ({
 });
 
 describe("honeypotCheck", () => {
+  it("passes the injected wallet catalog into sellability inspection", async () => {
+    const walletCatalog = { status: "known", labels: new Map() };
+    let receivedCatalog;
+    await honeypotCheck({ ...input, walletCatalog }, withBoundPool({
+      provider: { getBlockNumber: async () => 77 },
+      bytecodeFlags: async () => ({ hasCode: true }),
+      quoteRoundTrip: async () => ({ buyOk: true, sellOk: true }),
+      inspectSellability: async (_value, options) => {
+        receivedCatalog = options.walletCatalog;
+        return confirmedSellability();
+      },
+    }));
+    assert.equal(receivedCatalog, walletCatalog);
+  });
+
   it("rejects unsupported or missing-pool venues before touching any dependency", async () => {
     for (const candidate of [
       { ...input, venue: "uniswap-v3" },
@@ -302,6 +317,7 @@ describe("honeypotCheck", () => {
         ladderSamples: 1,
         meaningfulSellers: status === "confirmed" ? 3 : 0,
         details: ["evidence"],
+        walletSignals: { status: "unconfigured", count: 0, matches: [] },
       });
     });
   }

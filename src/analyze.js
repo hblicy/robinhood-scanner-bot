@@ -1,5 +1,6 @@
+import path from "node:path";
 import { Contract, ZeroAddress, formatEther, getAddress, parseEther } from "ethers";
-import { ADDR, NARRATIVE_WORDS, SETTINGS, isQuote } from "./config.js";
+import { ADDR, DATA_DIR, NARRATIVE_WORDS, SETTINGS, isQuote } from "./config.js";
 import { ERC20_ABI, V2_ROUTER_ABI } from "./abis.js";
 import {
   bytecodeFlags,
@@ -25,6 +26,7 @@ import {
   SELLABILITY,
   validateV2PoolBinding,
 } from "./sellability.js";
+import { loadWalletLabels, normalizeWalletSignals } from "./wallet-labels.js";
 
 const BUY_ETH = parseEther("0.001");
 
@@ -99,6 +101,7 @@ const DEFAULT_ANALYZE_DEPENDENCIES = {
     new Contract(token, ERC20_ABI, getProvider()).balanceOf(creator),
   deployerHistory,
   honeypotCheck,
+  walletCatalog: loadWalletLabels(path.join(DATA_DIR, "wallet-labels.json")),
 };
 
 export function scoreFromFacts(f) {
@@ -271,6 +274,20 @@ export function scoreFromFacts(f) {
     red.push("创建者大量发垃圾币");
   }
 
+  const walletCount = f.walletSignalsStatus === "known" && Number.isInteger(f.walletSignalCount)
+    ? Math.max(0, f.walletSignalCount)
+    : 0;
+  const walletPoints = walletCount >= 2 ? 8 : walletCount === 1 ? 5 : 0;
+  score += walletPoints;
+  checks.push({
+    key: "smart_money",
+    ok: walletPoints > 0,
+    pts: walletPoints,
+    detail: f.walletSignalsStatus !== "known"
+      ? "标签未配置"
+      : walletCount > 0 ? `命中 ${walletCount} 个已标记买家` : "未命中",
+  });
+
   score = Math.max(0, Math.min(100, score) - red.length * 12);
   checks.push({
     key: "market",
@@ -386,6 +403,8 @@ export async function analyze(event, overrides = {}) {
     sellabilityBuyerSamples: sellability.buyerSamples,
     sellabilityLadderSamples: sellability.ladderSamples,
     sellabilityMeaningfulSellers: sellability.meaningfulSellers,
+    walletSignalsStatus: sellability.walletSignals.status,
+    walletSignalCount: sellability.walletSignals.count,
     lpBurnedPct,
     lpUnknown: event.venue !== "uniswap-v2" || lpBurnedPct === null,
     mintable: Boolean(flags.mintable),
@@ -405,7 +424,9 @@ export async function analyze(event, overrides = {}) {
         hp.honeypot === false
     ),
   });
-  const prefilterSellability = sellabilityResult(SELLABILITY.UNKNOWN, "prefilter-score");
+  const prefilterSellability = sellabilityResult(SELLABILITY.UNKNOWN, "prefilter-score", {
+    walletSignals: { status: "unconfigured", count: 0, matches: [] },
+  });
   const prefilterHp = normalizeHoneypotSellability({
     honeypot: null,
     complete: false,
@@ -425,6 +446,7 @@ export async function analyze(event, overrides = {}) {
       blockNumber: event.blockNumber ?? null,
       pairCreatedAt: dex?.pairCreatedAt ?? event.createdAt ?? null,
       decimals: meta.decimals,
+      walletCatalog: dependencies.walletCatalog,
     }))
     : { ok: true, value: prefilterHp, error: null, cause: null };
   const hpRaw = hpResult.value || {
@@ -440,6 +462,7 @@ export async function analyze(event, overrides = {}) {
   );
   const hp = normalizeHoneypotSellability(hpRaw, rawSellability);
   const sellability = hp.sellability;
+  const walletSignals = normalizeWalletSignals(sellability.walletSignals);
 
   const facts = buildFacts(hp, sellability);
   const securityComplete = facts.securityComplete;
@@ -463,6 +486,7 @@ export async function analyze(event, overrides = {}) {
     lp: poolInfo,
     honeypot: hp,
     sellability,
+    walletSignals,
     marketBound,
     securityComplete,
     errorSources: [
@@ -488,9 +512,24 @@ export async function analyze(event, overrides = {}) {
 }
 
 export async function honeypotCheck(
-  { token, quote, venue, pool, holders = [], blockNumber = null, pairCreatedAt = null, decimals },
+  {
+    token,
+    quote,
+    venue,
+    pool,
+    holders = [],
+    blockNumber = null,
+    pairCreatedAt = null,
+    decimals,
+    walletCatalog,
+  },
   dependencies = {}
 ) {
+  const walletSignals = normalizeWalletSignals({
+    status: walletCatalog?.status,
+    count: 0,
+    matches: [],
+  });
   let poolAddress;
   try {
     poolAddress = getAddress(pool);
@@ -498,7 +537,7 @@ export async function honeypotCheck(
     poolAddress = null;
   }
   if (venue !== "uniswap-v2" || !poolAddress || poolAddress === ZeroAddress) {
-    const sellability = sellabilityResult(SELLABILITY.UNKNOWN, "unsupported-venue");
+    const sellability = sellabilityResult(SELLABILITY.UNKNOWN, "unsupported-venue", { walletSignals });
     return normalizeHoneypotSellability({
       honeypot: null,
       complete: false,
@@ -542,7 +581,7 @@ export async function honeypotCheck(
     const sellability = sellabilityResult(
       SELLABILITY.UNKNOWN,
       bindingEvidence?.reason || "evidence-unavailable",
-      { details: bindingEvidence?.details }
+      { details: bindingEvidence?.details, walletSignals }
     );
     return normalizeHoneypotSellability({
       honeypot: null,
@@ -557,7 +596,7 @@ export async function honeypotCheck(
     }, sellability);
   }
 
-  let sellability = sellabilityResult(SELLABILITY.UNKNOWN, "evidence-unavailable");
+  let sellability = sellabilityResult(SELLABILITY.UNKNOWN, "evidence-unavailable", { walletSignals });
   const result = {
     honeypot: null,
     complete: false,
@@ -578,6 +617,7 @@ export async function honeypotCheck(
     result.reason = reason;
     return normalizeHoneypotSellability(result, sellabilityResult(SELLABILITY.BLOCKED, reason, {
       details: detail ? [detail] : [],
+      walletSignals,
     }));
   };
 
@@ -600,6 +640,7 @@ export async function honeypotCheck(
     provider,
     retry: dependencies.retry,
     poolBinding: bindingEvidence.binding,
+    walletCatalog,
   });
   sellability = normalizeSellabilityEvidence(inspectedSellability, false);
   result.sellability = sellability;

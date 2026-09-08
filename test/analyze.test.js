@@ -6,6 +6,7 @@ const TOKEN = "0x1111111111111111111111111111111111111111";
 const QUOTE = "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73";
 const POOL = "0x3333333333333333333333333333333333333333";
 const NOW = Date.parse("2026-09-06T00:30:00Z");
+const WALLET_CATALOG = { status: "unconfigured", labels: new Map() };
 
 const event = {
   source: "onchain",
@@ -43,6 +44,7 @@ function dependencies(overrides = {}) {
       buyTaxBps: null,
       sellTaxBps: null,
     }),
+    walletCatalog: WALLET_CATALOG,
     ...overrides,
   };
 }
@@ -77,6 +79,62 @@ describe("analyze data completeness", () => {
     assert.equal(report.score, 21);
     assert.equal(honeypotCalls, 1);
     assert.equal(report.sellability.reason, "insufficient evidence");
+  });
+
+  it("passes the wallet catalog into deep inspection and maps normalized signals", async () => {
+    const walletCatalog = {
+      status: "known",
+      labels: new Map([[TOKEN.toLowerCase(), { label: "Alpha", type: "kol", source: "manual" }]]),
+    };
+    let receivedCatalog;
+    const report = await analyze(event, dependencies({
+      walletCatalog,
+      honeypotCheck: async (value) => {
+        receivedCatalog = value.walletCatalog;
+        return {
+          honeypot: null,
+          complete: false,
+          reason: "insufficient-meaningful-sells",
+          sellability: {
+            status: "unknown",
+            reason: "insufficient-meaningful-sells",
+            buyerSamples: 1,
+            ladderSamples: 1,
+            meaningfulSellers: 0,
+            walletSignals: {
+              status: "known",
+              count: 1,
+              matches: [{ label: "Alpha", type: "kol", source: "manual" }],
+            },
+          },
+        };
+      },
+    }));
+
+    assert.equal(receivedCatalog, walletCatalog);
+    assert.deepEqual(report.walletSignals, {
+      status: "known",
+      count: 1,
+      matches: [{ label: "Alpha", type: "kol", source: "manual" }],
+    });
+    assert.equal(report.facts.walletSignalsStatus, "known");
+    assert.equal(report.facts.walletSignalCount, 1);
+  });
+
+  it("does not use wallet labels to cross the deep-inspection prefilter", async () => {
+    let honeypotCalls = 0;
+    await analyze(event, dependencies({
+      minScore: 32,
+      walletCatalog: {
+        status: "known",
+        labels: new Map([[TOKEN.toLowerCase(), { label: "Alpha", type: "kol", source: "manual" }]]),
+      },
+      honeypotCheck: async () => {
+        honeypotCalls += 1;
+        return { honeypot: null, complete: false, reason: "unexpected" };
+      },
+    }));
+    assert.equal(honeypotCalls, 0);
   });
 
   it("preserves the original cause for a core dependency failure", async () => {
@@ -167,6 +225,7 @@ describe("analyze data completeness", () => {
       blockNumber: 123,
       pairCreatedAt,
       decimals: 18,
+      walletCatalog: WALLET_CATALOG,
     });
   });
 
@@ -196,6 +255,7 @@ describe("analyze data completeness", () => {
       ladderSamples: 0,
       meaningfulSellers: 0,
       details: [],
+      walletSignals: { status: "unconfigured", count: 0, matches: [] },
     });
     assert.equal(report.facts.sellabilityStatus, "unknown");
     assert.equal(report.facts.sellabilityReason, "legacy inspector unavailable");
