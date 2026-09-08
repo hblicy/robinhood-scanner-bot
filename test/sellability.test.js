@@ -11,6 +11,7 @@ import {
   finalizeSellability,
   inspectSellability,
   normalizeSellabilityEvidence,
+  recentTransferRanges,
   resolveStartBlock,
   sellabilityResult,
   validateV2PoolBinding,
@@ -508,6 +509,63 @@ describe("sellability core", () => {
 });
 
 describe("V2 sellability evidence", () => {
+  it("builds newest-first non-overlapping ranges inside the 500-block evidence window", () => {
+    const ranges = recentTransferRanges(0, 1000);
+    assert.equal(ranges.length, 50);
+    assert.deepEqual(ranges[0], { fromBlock: 991, toBlock: 1000 });
+    assert.deepEqual(ranges.at(-1), { fromBlock: 501, toBlock: 510 });
+    for (let index = 1; index < ranges.length; index++) {
+      assert.equal(ranges[index].toBlock + 1, ranges[index - 1].fromBlock);
+    }
+    assert.deepEqual(recentTransferRanges(997, 1000), [{ fromBlock: 997, toBlock: 1000 }]);
+  });
+
+  it("never requests Transfer logs older than the recent evidence window", async () => {
+    const requests = [];
+    const result = await inspectSellability(context({ analysisBlock: 1000, blockNumber: 0 }), {
+      provider: fakeProvider(),
+      getLogs: async (request) => {
+        requests.push(request);
+        return [];
+      },
+    });
+    assert.equal(result.status, "unknown");
+    assert.equal(requests.length, 50);
+    assert.ok(requests.every(({ fromBlock, toBlock }) => fromBlock >= 501 && toBlock <= 1000));
+  });
+
+  it("stops reading older Transfer ranges when raw buyer and seller coverage is sufficient", async () => {
+    const requests = [];
+    const recent = [
+      ...BUYERS.slice(0, 5).map((buyer, index) => transferLog({
+        from: POOL,
+        to: buyer,
+        value: 100n,
+        blockNumber: 995,
+        index,
+        transactionHash: `0xbuy${index}`,
+      })),
+      ...BUYERS.slice(0, 3).map((seller, index) => transferLog({
+        from: seller,
+        to: POOL,
+        value: 2n,
+        blockNumber: 996,
+        index: 10 + index,
+        transactionHash: `0xsell${index}`,
+      })),
+    ];
+    await inspectSellability(context({ analysisBlock: 1000, blockNumber: 0 }), {
+      provider: fakeProvider(),
+      getLogs: async (request) => {
+        requests.push(request);
+        return recent.filter(({ blockNumber }) =>
+          blockNumber >= request.fromBlock && blockNumber <= request.toBlock
+        );
+      },
+    });
+    assert.deepEqual(requests.map(({ fromBlock, toBlock }) => [fromBlock, toBlock]), [[991, 1000]]);
+  });
+
   it("does not touch a provider for unsupported venues or missing pools", async () => {
     let calls = 0;
     const provider = { getBlockNumber: async () => { calls++; return 1; } };
@@ -748,6 +806,28 @@ describe("V2 sellability evidence", () => {
 
     const normal = await inspectSellability(context({ analysisBlock: 77, blockNumber: 5 }), { provider: makeProvider(200n) });
     assert.notEqual(normal.reason, "hidden-balance-mutation");
+  });
+
+  it("reads the opening balance at the bounded scan start when launch block is zero", async () => {
+    const logs = [transferLog({ from: POOL, to: BUYERS[0], value: 100n, blockNumber: 501 })];
+    const provider = fakeProvider({ logs, balances: new Map([[BUYERS[0].toLowerCase(), 200n]]) });
+    const originalCall = provider.call;
+    let openingBalanceRead = false;
+    provider.call = async (request) => {
+      if (sameAddressForTest(request.to, TOKEN) &&
+        request.data.startsWith(iface.getFunction("balanceOf").selector) &&
+        iface.parseTransaction({ data: request.data }).args[0].toLowerCase() === BUYERS[0].toLowerCase() &&
+        request.blockTag === 500) {
+        openingBalanceRead = true;
+        return iface.encodeFunctionResult("balanceOf", [100n]);
+      }
+      return originalCall(request);
+    };
+
+    const result = await inspectSellability(context({ analysisBlock: 1000, blockNumber: 0 }), { provider });
+
+    assert.notEqual(result.reason, "hidden-balance-mutation");
+    assert.equal(openingBalanceRead, true);
   });
 
   it("returns unavailable when the opening balance read fails", async () => {
@@ -1109,6 +1189,15 @@ describe("V2 sellability evidence", () => {
     const calls = [];
     let receiptCount = 0;
     const provider = fakeProvider({ logs, balances: new Map(BUYERS.map((b) => [b.toLowerCase(), 100n])), calls, receipts: new Map() });
+    const originalCall = provider.call;
+    provider.call = async (request) => {
+      if (sameAddressForTest(request.to, TOKEN) &&
+        request.data.startsWith(iface.getFunction("balanceOf").selector) &&
+        request.blockTag === 0) {
+        return iface.encodeFunctionResult("balanceOf", [0n]);
+      }
+      return originalCall(request);
+    };
     const original = provider.getTransactionReceipt;
     provider.getTransactionReceipt = async (hash) => { receiptCount++; return original(hash); };
     const result = await inspectSellability(context(), { provider });

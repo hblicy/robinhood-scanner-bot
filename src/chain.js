@@ -1,12 +1,15 @@
 import { Contract, Interface, JsonRpcProvider, id, getAddress, ZeroAddress } from "ethers";
 import { ADDR, CHAIN, isQuote } from "./config.js";
 import { ERC20_ABI, PAIR_V2_ABI, V2_FACTORY_ABI, V3_FACTORY_ABI, V4_PM_ABI } from "./abis.js";
+import { createBudgetedProvider, createRpcScheduler } from "./rpc-budget.js";
 
 let httpProvider;
+const scheduleRpc = createRpcScheduler();
 
 export function getProvider() {
   if (!httpProvider) {
-    httpProvider = new JsonRpcProvider(CHAIN.rpc, CHAIN.id, { staticNetwork: true });
+    const provider = new JsonRpcProvider(CHAIN.rpc, CHAIN.id, { staticNetwork: true });
+    httpProvider = createBudgetedProvider(provider, scheduleRpc);
   }
   return httpProvider;
 }
@@ -18,7 +21,10 @@ export async function withRetry(fn, tries = 3, sleepImpl = sleep) {
       return await fn();
     } catch (err) {
       last = err;
-      if (i < tries - 1) await sleepImpl(400 * (i + 1));
+      if (i < tries - 1) {
+        const delay = isRateLimitError(err) ? 1000 * (2 ** i) : 400 * (i + 1);
+        await sleepImpl(delay);
+      }
     }
   }
   throw last;
@@ -46,6 +52,19 @@ function errorDetails(error) {
     }
   }
   return values;
+}
+
+export function isRateLimitError(error) {
+  return errorDetails(error).some((value) => {
+    const status = Number(typeof value === "object" ? value.status || value.statusCode : NaN);
+    const rawCode = typeof value === "object" ? value.code : undefined;
+    const numericCode = Number(rawCode);
+    const code = String(rawCode ?? "");
+    const message = typeof value === "string"
+      ? value
+      : `${value.shortMessage || ""} ${value.message || ""}`;
+    return status === 429 || numericCode === 429 || /rate[_\s-]?limit(?:ed)?|too many requests|compute units?|throughput/i.test(`${code} ${message}`);
+  });
 }
 
 export function isContractCallRevert(error) {

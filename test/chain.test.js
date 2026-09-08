@@ -8,12 +8,61 @@ import {
   bytecodeFlags,
   findFirstBlockAtOrAfter,
   getLogsChunked,
+  isRateLimitError,
   readOwnerFromContract,
   readV2PoolFromContract,
   parseV4PoolLog,
   scanOnchain,
   withRetry,
 } from "../src/chain.js";
+
+describe("withRetry backoff", () => {
+  it("uses one- and two-second backoff for nested rate limits", async () => {
+    const waits = [];
+    const limited = Object.assign(new Error("request failed"), {
+      error: { status: 429, message: "too many requests" },
+    });
+    await assert.rejects(
+      () => withRetry(async () => { throw limited; }, 3, async (ms) => waits.push(ms)),
+      (error) => error === limited
+    );
+    assert.deepEqual(waits, [1000, 2000]);
+  });
+
+  it("uses rate-limit backoff for a numeric JSON-RPC code 429", async () => {
+    const waits = [];
+    const limited = Object.assign(new Error("request failed"), {
+      error: { code: 429, message: "request failed" },
+    });
+    await assert.rejects(
+      () => withRetry(async () => { throw limited; }, 3, async (ms) => waits.push(ms)),
+      (error) => error === limited
+    );
+    assert.deepEqual(waits, [1000, 2000]);
+  });
+
+  it("keeps short backoff for ordinary failures", async () => {
+    const waits = [];
+    const failure = new Error("temporary RPC failure");
+    await assert.rejects(
+      () => withRetry(async () => { throw failure; }, 3, async (ms) => waits.push(ms)),
+      (error) => error === failure
+    );
+    assert.deepEqual(waits, [400, 800]);
+  });
+
+  it("recognizes common provider throughput messages", () => {
+    for (const message of [
+      "rate limit exceeded",
+      "too many requests",
+      "compute units exceeded",
+      "throughput limit exceeded",
+    ]) {
+      assert.equal(isRateLimitError(new Error(message)), true, message);
+    }
+    assert.equal(isRateLimitError(new Error("execution reverted")), false);
+  });
+});
 
 describe("bytecodeFlags", () => {
   it("reads token code at the supplied fixed block", async () => {
