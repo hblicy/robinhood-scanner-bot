@@ -56,9 +56,9 @@ OKX 有正式 API，但需 API Key、Secret、Passphrase，且 Signal 支持链�
 ```
 
 - `address` 必须是合法 EVM 地址。
-- `label` 必须是非空短文本。
+- `label` 去除首尾空白后必须为 1–80 个字符。
 - `type` 只允许 `kol` 或 `smart_money`。
-- `source` 允许 `manual`、`debot` 或 `okx`，仅用于报告溯源。
+- `source` 可省略并默认为 `manual`；显式值只允许 `manual`、`debot` 或 `okx`，仅用于报告溯源。
 - 同一地址重复出现视为配置错误，避免冲突标签被顺序覆盖。
 
 同时接受 DeBot 导出的嵌套对象。解析器递归查找合法 EVM 地址键，并使用其 `mark` 作为 `label`、`debot` 作为 `source`；非 EVM 地址忽略。DeBot 数据没有可靠类型时统一记为 `smart_money`，用户可以转换为标准格式后手动改成 `kol`。
