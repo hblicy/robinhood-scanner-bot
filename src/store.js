@@ -398,6 +398,26 @@ export function createStore({
         .map((entry) => structuredClone(entry));
     },
 
+    scheduleCheck(check) {
+      if (!check?.id || !check?.type || !Number.isFinite(check.dueAt)) {
+        throw new Error("pending check requires id, type and dueAt");
+      }
+      return commit((draft) => {
+        if (draft.pendingChecks[check.id]) return draft.pendingChecks[check.id];
+        draft.pendingChecks[check.id] = {
+          ...structuredClone(check),
+          eventId: check.eventId ?? null,
+          status: "pending",
+          attempts: 0,
+          nextAttemptAt: check.dueAt,
+          createdAt: now(),
+          completedAt: null,
+          lastError: null,
+        };
+        return draft.pendingChecks[check.id];
+      });
+    },
+
     completeCheck(id, completedAt = now()) {
       return commit((draft) => {
         const entry = requireEntry(draft.pendingChecks, id, "pending check");

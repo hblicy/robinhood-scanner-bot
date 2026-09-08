@@ -152,6 +152,55 @@ test("third-party check failures do not roll back the Pons cursor", async () => 
   assert.equal(result.retried, 1);
   assert.equal(state.cursors.ponsV2, 120);
   assert.match(state.pendingChecks[`${EVENT_ID}:curve_flow`].lastError, /Gecko unavailable/);
+  assert.equal(state.pendingChecks[`${EVENT_ID}:curve_flow`].nextAttemptAt, 15_000);
+});
+
+test("pending checks can request an expected business retry without throwing", async () => {
+  const store = tempStore();
+  store.scheduleCheck({
+    id: "candidate-recheck:business",
+    type: "candidate_recheck",
+    dueAt: 1_000,
+  });
+
+  const result = await runPendingChecks({
+    store,
+    handlers: {
+      candidate_recheck: async () => ({ retryAt: 5_000, lastError: "sellability pending" }),
+    },
+    now: () => 2_000,
+  });
+
+  const saved = store.snapshot().pendingChecks["candidate-recheck:business"];
+  assert.deepEqual(result, { completed: 0, retried: 1, failed: 0 });
+  assert.equal(saved.status, "pending");
+  assert.equal(saved.attempts, 1);
+  assert.equal(saved.nextAttemptAt, 5_000);
+  assert.equal(saved.lastError, "sellability pending");
+});
+
+test("candidate check errors use retry offsets anchored to first analysis", async () => {
+  const store = tempStore();
+  store.scheduleCheck({
+    id: "candidate-recheck:anchored",
+    type: "candidate_recheck",
+    dueAt: 121_000,
+    firstAnalyzedAt: 1_000,
+    retryOffsetsMs: [120_000, 300_000, 600_000],
+    maxAttempts: 3,
+  });
+
+  const result = await runPendingChecks({
+    store,
+    handlers: { candidate_recheck: async () => { throw new Error("RPC unavailable"); } },
+    now: () => 121_000,
+  });
+
+  const saved = store.snapshot().pendingChecks["candidate-recheck:anchored"];
+  assert.deepEqual(result, { completed: 0, retried: 1, failed: 0 });
+  assert.equal(saved.attempts, 1);
+  assert.equal(saved.nextAttemptAt, 301_000);
+  assert.match(saved.lastError, /RPC unavailable/);
 });
 
 test("inspection pending checks atomically update risk state and enqueue a transition", async () => {

@@ -107,6 +107,19 @@ export async function runPendingChecks({
       const handler = handlers?.[check.type];
       if (typeof handler !== "function") throw new Error(`no pending-check handler for ${check.type}`);
       const update = await handler(check);
+      if (update?.retryAt != null) {
+        if (!Number.isFinite(update.retryAt)) {
+          throw new Error(`pending check ${check.id} returned invalid retryAt`);
+        }
+        store.rescheduleCheck(check.id, {
+          status: "pending",
+          attempts: Number(check.attempts || 0) + 1,
+          nextAttemptAt: update.retryAt,
+          lastError: safeErrorMessage(update.lastError || "evidence pending"),
+        });
+        result.retried += 1;
+        continue;
+      }
       if (update?.nextToken && update?.token) {
         store.applyCheckResult(check.id, { ...update, completedAt: now() });
       } else {
@@ -115,11 +128,20 @@ export async function runPendingChecks({
       result.completed += 1;
     } catch (cause) {
       const attempts = Number(check.attempts || 0) + 1;
-      const exhausted = attempts >= maxAttempts;
+      const allowedAttempts = Number.isInteger(check.maxAttempts) && check.maxAttempts > 0
+        ? check.maxAttempts
+        : maxAttempts;
+      const exhausted = attempts >= allowedAttempts;
+      const anchoredOffset = Array.isArray(check.retryOffsetsMs)
+        ? check.retryOffsetsMs[attempts]
+        : null;
+      const retryAt = Number.isFinite(check.firstAnalyzedAt) && Number.isFinite(anchoredOffset)
+        ? check.firstAnalyzedAt + anchoredOffset
+        : nextRetryAt(now(), attempts);
       store.rescheduleCheck(check.id, {
         status: exhausted ? "failed" : "pending",
         attempts,
-        nextAttemptAt: nextRetryAt(now(), attempts),
+        nextAttemptAt: retryAt,
         lastError: safeErrorMessage(cause),
       });
       if (exhausted) result.failed += 1;
