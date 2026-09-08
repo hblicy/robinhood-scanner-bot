@@ -20,6 +20,8 @@ const MAX_LADDER_WALLETS = 3;
 const MAX_RECEIPTS = 30;
 const MAX_CODE_LOOKUPS = 50;
 const MAX_TRANSFER_LOGS = 10_000;
+const MAX_TRANSFER_LOOKBACK_BLOCKS = 500;
+const TRANSFER_CHUNK_BLOCKS = 10;
 
 function sameAddress(a, b) {
   return typeof a === "string" && typeof b === "string" && a.toLowerCase() === b.toLowerCase();
@@ -50,6 +52,22 @@ function sortReceiptLogs(logs) {
 function parseTransfer(log) {
   const parsed = transferInterface.parseLog(log);
   return { from: parsed.args.from, to: parsed.args.to, value: BigInt(parsed.args.value) };
+}
+
+export function recentTransferRanges(
+  start,
+  head,
+  maxBlocks = MAX_TRANSFER_LOOKBACK_BLOCKS,
+  chunk = TRANSFER_CHUNK_BLOCKS
+) {
+  const floor = Math.max(start, head - maxBlocks + 1);
+  const ranges = [];
+  for (let end = head; end >= floor;) {
+    const fromBlock = Math.max(floor, end - chunk + 1);
+    ranges.push({ fromBlock, toBlock: end });
+    end = fromBlock - 1;
+  }
+  return ranges;
 }
 
 function unavailable(error, evidence = {}) {
@@ -406,17 +424,32 @@ export async function inspectSellability(context, dependencies = {}) {
       return unavailable(`pool creation block ${start} is after analysis block ${head}`);
     }
 
-    const rawLogs = await getLogs({
-      address: context.token,
-      topics: [transferEvent.topicHash],
-      fromBlock: start,
-      toBlock: head,
-      maxLogs: MAX_TRANSFER_LOGS,
-      provider,
-      retry,
-    });
-    if (!Array.isArray(rawLogs) || rawLogs.length > MAX_TRANSFER_LOGS) {
-      throw new Error(`log budget exceeded: max ${MAX_TRANSFER_LOGS}`);
+    const rawLogs = [];
+    const rawBuyers = new Set();
+    const rawSellers = new Set();
+    let scanStart = head;
+    for (const range of recentTransferRanges(start, head)) {
+      const remaining = MAX_TRANSFER_LOGS - rawLogs.length;
+      const rangeLogs = await getLogs({
+        address: context.token,
+        topics: [transferEvent.topicHash],
+        fromBlock: range.fromBlock,
+        toBlock: range.toBlock,
+        maxLogs: remaining,
+        provider,
+        retry,
+      });
+      if (!Array.isArray(rangeLogs) || rangeLogs.length > remaining) {
+        throw new Error(`log budget exceeded: max ${remaining}`);
+      }
+      rawLogs.push(...rangeLogs);
+      scanStart = range.fromBlock;
+      for (const log of rangeLogs) {
+        const transfer = parseTransfer(log);
+        if (sameAddress(transfer.from, binding.pool)) rawBuyers.add(transfer.to.toLowerCase());
+        if (sameAddress(transfer.to, binding.pool)) rawSellers.add(transfer.from.toLowerCase());
+      }
+      if (rawBuyers.size >= MAX_BUYERS && rawSellers.size >= 3) break;
     }
     const logs = sortLogs(rawLogs).map((log) => ({ log, transfer: parseTransfer(log) }));
     const buys = logs.filter(({ transfer }) => sameAddress(transfer.from, context.pool));
@@ -455,7 +488,7 @@ export async function inspectSellability(context, dependencies = {}) {
         if (sameAddress(transfer.to, wallet)) intervalNet += transfer.value;
         if (sameAddress(transfer.from, wallet)) intervalNet -= transfer.value;
       }
-      const openingBalance = start === 0 ? 0n : await readBalance(provider, binding.token, wallet, start - 1, retry);
+      const openingBalance = start === 0 ? 0n : await readBalance(provider, binding.token, wallet, scanStart - 1, retry);
       const expectedBalance = openingBalance + intervalNet;
       const reportedBalance = await readBalance(provider, context.token, wallet, head, retry);
       balances.set(wallet.toLowerCase(), reportedBalance);
@@ -497,6 +530,13 @@ export async function inspectSellability(context, dependencies = {}) {
     const meaningfulThreshold = poolBalance / 10000n > oneToken ? poolBalance / 10000n : oneToken;
     const sellers = new Set();
     const receiptCandidates = new Map();
+    const receiptCache = new Map();
+    const readReceipt = (hash) => {
+      if (!receiptCache.has(hash)) {
+        receiptCache.set(hash, retry(() => provider.getTransactionReceipt(hash)));
+      }
+      return receiptCache.get(hash);
+    };
     for (const { log, transfer } of [...logs].reverse()) {
       if (!sameAddress(transfer.to, binding.pool) || transfer.value < meaningfulThreshold) continue;
       const hash = log.transactionHash;
@@ -518,7 +558,7 @@ export async function inspectSellability(context, dependencies = {}) {
       if (!hasEligibleSource) continue;
       if (receiptReads >= MAX_RECEIPTS) break;
       receiptReads++;
-      const receipt = await retry(() => provider.getTransactionReceipt(hash));
+      const receipt = await readReceipt(hash);
       if (Number(receipt?.status) !== 1 || typeof receipt?.from !== "string") continue;
       const seller = receipt.from.toLowerCase();
       if (!sources.has(seller) || sellers.has(seller) || excludedAddress(receipt.from, binding.pool) || !(await isEoa(receipt.from))) continue;

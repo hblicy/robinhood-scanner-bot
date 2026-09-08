@@ -11,6 +11,7 @@ import {
   finalizeSellability,
   inspectSellability,
   normalizeSellabilityEvidence,
+  recentTransferRanges,
   resolveStartBlock,
   sellabilityResult,
   validateV2PoolBinding,
@@ -508,6 +509,63 @@ describe("sellability core", () => {
 });
 
 describe("V2 sellability evidence", () => {
+  it("builds newest-first non-overlapping ranges inside the 500-block evidence window", () => {
+    const ranges = recentTransferRanges(0, 1000);
+    assert.equal(ranges.length, 50);
+    assert.deepEqual(ranges[0], { fromBlock: 991, toBlock: 1000 });
+    assert.deepEqual(ranges.at(-1), { fromBlock: 501, toBlock: 510 });
+    for (let index = 1; index < ranges.length; index++) {
+      assert.equal(ranges[index].toBlock + 1, ranges[index - 1].fromBlock);
+    }
+    assert.deepEqual(recentTransferRanges(997, 1000), [{ fromBlock: 997, toBlock: 1000 }]);
+  });
+
+  it("never requests Transfer logs older than the recent evidence window", async () => {
+    const requests = [];
+    const result = await inspectSellability(context({ analysisBlock: 1000, blockNumber: 0 }), {
+      provider: fakeProvider(),
+      getLogs: async (request) => {
+        requests.push(request);
+        return [];
+      },
+    });
+    assert.equal(result.status, "unknown");
+    assert.equal(requests.length, 50);
+    assert.ok(requests.every(({ fromBlock, toBlock }) => fromBlock >= 501 && toBlock <= 1000));
+  });
+
+  it("stops reading older Transfer ranges when raw buyer and seller coverage is sufficient", async () => {
+    const requests = [];
+    const recent = [
+      ...BUYERS.slice(0, 5).map((buyer, index) => transferLog({
+        from: POOL,
+        to: buyer,
+        value: 100n,
+        blockNumber: 995,
+        index,
+        transactionHash: `0xbuy${index}`,
+      })),
+      ...BUYERS.slice(0, 3).map((seller, index) => transferLog({
+        from: seller,
+        to: POOL,
+        value: 2n,
+        blockNumber: 996,
+        index: 10 + index,
+        transactionHash: `0xsell${index}`,
+      })),
+    ];
+    await inspectSellability(context({ analysisBlock: 1000, blockNumber: 0 }), {
+      provider: fakeProvider(),
+      getLogs: async (request) => {
+        requests.push(request);
+        return recent.filter(({ blockNumber }) =>
+          blockNumber >= request.fromBlock && blockNumber <= request.toBlock
+        );
+      },
+    });
+    assert.deepEqual(requests.map(({ fromBlock, toBlock }) => [fromBlock, toBlock]), [[991, 1000]]);
+  });
+
   it("does not touch a provider for unsupported venues or missing pools", async () => {
     let calls = 0;
     const provider = { getBlockNumber: async () => { calls++; return 1; } };
