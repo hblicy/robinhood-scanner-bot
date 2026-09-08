@@ -57,11 +57,13 @@ function errorDetails(error) {
 export function isRateLimitError(error) {
   return errorDetails(error).some((value) => {
     const status = Number(typeof value === "object" ? value.status || value.statusCode : NaN);
-    const code = typeof value === "object" ? String(value.code || "") : "";
+    const rawCode = typeof value === "object" ? value.code : undefined;
+    const numericCode = Number(rawCode);
+    const code = String(rawCode ?? "");
     const message = typeof value === "string"
       ? value
       : `${value.shortMessage || ""} ${value.message || ""}`;
-    return status === 429 || /rate[_\s-]?limit(?:ed)?|too many requests|compute units?|throughput/i.test(`${code} ${message}`);
+    return status === 429 || numericCode === 429 || /rate[_\s-]?limit(?:ed)?|too many requests|compute units?|throughput/i.test(`${code} ${message}`);
   });
 }
 

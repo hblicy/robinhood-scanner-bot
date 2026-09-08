@@ -42,3 +42,15 @@ export class CandidateQueue {
     this.inFlight.delete(key);
   }
 }
+
+export function createSerialExecutor() {
+  let tail = Promise.resolve();
+  return (operation) => {
+    if (typeof operation !== "function") {
+      return Promise.reject(new TypeError("operation must be a function"));
+    }
+    const result = tail.then(operation);
+    tail = result.catch(() => {});
+    return result;
+  };
+}

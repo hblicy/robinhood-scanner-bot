@@ -4,7 +4,7 @@ import { findFirstBlockAtOrAfter, getBlockNumber, getProvider, scanOnchain, slee
 import { geckoNewPools, getDexPaprikaTopPools } from "./market.js";
 import { analyze } from "./analyze.js";
 import { alertReport, formatAlert, formatLifecycleNotification, sendTelegram } from "./notify.js";
-import { CandidateQueue } from "./queue.js";
+import { CandidateQueue, createSerialExecutor } from "./queue.js";
 import { candidateKey, handleCandidate } from "./runtime.js";
 import { safeErrorMessage, sanitizeRpcUrl } from "./safety.js";
 import { acquireInstanceLock } from "./instance-lock.js";
@@ -602,6 +602,7 @@ async function watch() {
     const state = { lastBlock: null, lastGecko: 0 };
     const ponsState = { lastBlock: null };
     const claimed = new Set();
+    const executeCandidate = createSerialExecutor();
     const createSourceProcessor = () => {
       const inner = new CandidateQueue({
         maxSize: SETTINGS.maxQueueSize,
@@ -625,7 +626,7 @@ async function watch() {
       return (events) => processEvents(events, queue, () => drainQueue(
         queue,
         DEFAULT_ANALYSIS_CONCURRENCY,
-        async (event) => {
+        async (event) => executeCandidate(async () => {
           try {
             const classified = await classifyAuxiliaryCandidate(event, { provider });
             if (classified.identity === "pons-v2") return;
@@ -649,7 +650,7 @@ async function watch() {
             console.error("handle failed", event.token, safeErrorMessage(error));
             throw error;
           }
-        }
+        })
       ));
     };
     const common = {

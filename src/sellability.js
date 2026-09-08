@@ -488,7 +488,7 @@ export async function inspectSellability(context, dependencies = {}) {
         if (sameAddress(transfer.to, wallet)) intervalNet += transfer.value;
         if (sameAddress(transfer.from, wallet)) intervalNet -= transfer.value;
       }
-      const openingBalance = start === 0 ? 0n : await readBalance(provider, binding.token, wallet, scanStart - 1, retry);
+      const openingBalance = scanStart === 0 ? 0n : await readBalance(provider, binding.token, wallet, scanStart - 1, retry);
       const expectedBalance = openingBalance + intervalNet;
       const reportedBalance = await readBalance(provider, context.token, wallet, head, retry);
       balances.set(wallet.toLowerCase(), reportedBalance);

@@ -29,6 +29,18 @@ describe("withRetry backoff", () => {
     assert.deepEqual(waits, [1000, 2000]);
   });
 
+  it("uses rate-limit backoff for a numeric JSON-RPC code 429", async () => {
+    const waits = [];
+    const limited = Object.assign(new Error("request failed"), {
+      error: { code: 429, message: "request failed" },
+    });
+    await assert.rejects(
+      () => withRetry(async () => { throw limited; }, 3, async (ms) => waits.push(ms)),
+      (error) => error === limited
+    );
+    assert.deepEqual(waits, [1000, 2000]);
+  });
+
   it("keeps short backoff for ordinary failures", async () => {
     const waits = [];
     const failure = new Error("temporary RPC failure");

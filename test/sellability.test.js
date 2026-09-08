@@ -808,6 +808,28 @@ describe("V2 sellability evidence", () => {
     assert.notEqual(normal.reason, "hidden-balance-mutation");
   });
 
+  it("reads the opening balance at the bounded scan start when launch block is zero", async () => {
+    const logs = [transferLog({ from: POOL, to: BUYERS[0], value: 100n, blockNumber: 501 })];
+    const provider = fakeProvider({ logs, balances: new Map([[BUYERS[0].toLowerCase(), 200n]]) });
+    const originalCall = provider.call;
+    let openingBalanceRead = false;
+    provider.call = async (request) => {
+      if (sameAddressForTest(request.to, TOKEN) &&
+        request.data.startsWith(iface.getFunction("balanceOf").selector) &&
+        iface.parseTransaction({ data: request.data }).args[0].toLowerCase() === BUYERS[0].toLowerCase() &&
+        request.blockTag === 500) {
+        openingBalanceRead = true;
+        return iface.encodeFunctionResult("balanceOf", [100n]);
+      }
+      return originalCall(request);
+    };
+
+    const result = await inspectSellability(context({ analysisBlock: 1000, blockNumber: 0 }), { provider });
+
+    assert.notEqual(result.reason, "hidden-balance-mutation");
+    assert.equal(openingBalanceRead, true);
+  });
+
   it("returns unavailable when the opening balance read fails", async () => {
     const provider = fakeProvider({
       logs: [transferLog({ from: POOL, to: BUYERS[0], value: 100n, blockNumber: 5 })],
@@ -1167,6 +1189,15 @@ describe("V2 sellability evidence", () => {
     const calls = [];
     let receiptCount = 0;
     const provider = fakeProvider({ logs, balances: new Map(BUYERS.map((b) => [b.toLowerCase(), 100n])), calls, receipts: new Map() });
+    const originalCall = provider.call;
+    provider.call = async (request) => {
+      if (sameAddressForTest(request.to, TOKEN) &&
+        request.data.startsWith(iface.getFunction("balanceOf").selector) &&
+        request.blockTag === 0) {
+        return iface.encodeFunctionResult("balanceOf", [0n]);
+      }
+      return originalCall(request);
+    };
     const original = provider.getTransactionReceipt;
     provider.getTransactionReceipt = async (hash) => { receiptCount++; return original(hash); };
     const result = await inspectSellability(context(), { provider });

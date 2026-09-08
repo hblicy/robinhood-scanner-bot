@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { CandidateQueue } from "../src/queue.js";
+import { CandidateQueue, createSerialExecutor } from "../src/queue.js";
 
 describe("CandidateQueue", () => {
   it("releases in-flight tokens after processing", () => {
@@ -34,5 +34,23 @@ describe("CandidateQueue", () => {
     const q = new CandidateQueue({ maxSize: 2, hasSeen: () => false, keyOf });
     assert.equal(q.enqueue({ token: "0x1", pool: "0xa" }), true);
     assert.equal(q.enqueue({ token: "0x1", pool: "0xb" }), true);
+  });
+});
+
+describe("createSerialExecutor", () => {
+  it("serializes work submitted concurrently by separate callers", async () => {
+    const execute = createSerialExecutor();
+    let active = 0;
+    let maxActive = 0;
+    const work = () => execute(async () => {
+      active++;
+      maxActive = Math.max(maxActive, active);
+      await new Promise((resolve) => setImmediate(resolve));
+      active--;
+    });
+
+    await Promise.all([work(), work(), work()]);
+
+    assert.equal(maxActive, 1);
   });
 });
