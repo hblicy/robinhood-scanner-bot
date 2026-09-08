@@ -510,6 +510,34 @@ describe("scanner orchestration", () => {
     assert.equal(maxActive, 2);
   });
 
+  it("analyzes candidates serially by default", async () => {
+    let active = 0;
+    let maxActive = 0;
+    const events = Array.from({ length: 3 }, (_, index) => ({
+      token: `0xserial${index}`,
+      venue: "uniswap-v2",
+      pool: `0xpool${index}`,
+      source: "test",
+      createdAt: null,
+    }));
+    await runReadOnlyCandidates(events, {
+      maxQueueSize: 10,
+      maxAgeMinutes: 30,
+      minScore: 55,
+      now: () => 1,
+      analyze: async (candidate) => {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        await new Promise((resolve) => setImmediate(resolve));
+        active -= 1;
+        return { ...candidate, score: 0, verdict: "skip", meta: { symbol: "TEST" }, honeypot: {} };
+      },
+      consoleAlert: async () => {},
+      log: () => {},
+    });
+    assert.equal(maxActive, 1);
+  });
+
   it("commits a confirmed chain range even when Gecko fails", async () => {
     const ranges = [];
     const cursors = [];

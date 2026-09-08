@@ -14,7 +14,7 @@ import { drainOutbox, nextRetryAt } from "./outbox.js";
 import { formatInspectionReport, inspectToken } from "./check.js";
 import { evaluateHeat } from "./decay.js";
 
-const DEFAULT_ANALYSIS_CONCURRENCY = 2;
+const DEFAULT_ANALYSIS_CONCURRENCY = 1;
 const candidates = new CandidateQueue({
   maxSize: SETTINGS.maxQueueSize,
   hasSeen,
