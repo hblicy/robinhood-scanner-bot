@@ -21,6 +21,85 @@ const CONFIRMED_SELLABILITY = {
 };
 
 describe("scanner orchestration", () => {
+  it("retries recoverable startup RPC checks without exiting watch", async () => {
+    const scanner = await import("../src/scanner.js");
+    assert.equal(typeof scanner.runWatchStartupChecks, "function");
+    const transient = new AggregateError([
+      Object.assign(new Error("official timeout"), { code: "TIMEOUT" }),
+      Object.assign(new Error("analysis unavailable"), { code: "NETWORK_ERROR" }),
+    ]);
+    let verifyCalls = 0;
+    let reconcileCalls = 0;
+    const waits = [];
+    const logs = [];
+    await scanner.runWatchStartupChecks({
+      provider: {},
+      store: {},
+      retryMs: 5_000,
+      verify: async () => {
+        verifyCalls += 1;
+        if (verifyCalls === 1) throw transient;
+      },
+      reconcile: async () => { reconcileCalls += 1; },
+      wait: async (ms) => waits.push(ms),
+      logError: (message) => logs.push(message),
+    });
+    assert.equal(verifyCalls, 2);
+    assert.equal(reconcileCalls, 1);
+    assert.deepEqual(waits, [5_000]);
+    assert.equal(logs.length, 1);
+  });
+
+  it("propagates non-recoverable startup validation failures", async () => {
+    const scanner = await import("../src/scanner.js");
+    assert.equal(typeof scanner.runWatchStartupChecks, "function");
+    const permanent = new Error("Pons factory deployment mismatch");
+    const waits = [];
+    await assert.rejects(
+      () => scanner.runWatchStartupChecks({
+        provider: {},
+        store: {},
+        verify: async () => { throw permanent; },
+        reconcile: async () => {},
+        wait: async (ms) => waits.push(ms),
+        logError: () => {},
+      }),
+      (error) => error === permanent
+    );
+    assert.deepEqual(waits, []);
+  });
+
+  it("does not let a stale primary 503 hide the fallback validation failure", async () => {
+    const scanner = await import("../src/scanner.js");
+    const primary = Object.assign(new Error("official unavailable"), {
+      code: "SERVER_ERROR",
+      status: 503,
+    });
+    const fallback = Object.assign(new Error("execution reverted"), {
+      code: "CALL_EXCEPTION",
+    });
+    const permanent = new Error("cannot read Pons factory deployment links", {
+      cause: new AggregateError([primary, fallback]),
+    });
+    const waits = [];
+
+    await assert.rejects(
+      () => scanner.runWatchStartupChecks({
+        provider: {},
+        store: {},
+        verify: async () => { throw permanent; },
+        reconcile: async () => {},
+        wait: async (ms) => {
+          waits.push(ms);
+          throw new Error("unexpected startup retry");
+        },
+        logError: () => {},
+      }),
+      (error) => error === permanent
+    );
+    assert.deepEqual(waits, []);
+  });
+
   it("schedules eligible initial reports idempotently", async () => {
     const checks = new Map();
     const store = {

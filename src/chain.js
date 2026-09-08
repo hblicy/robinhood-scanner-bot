@@ -1,4 +1,4 @@
-import { Contract, Interface, JsonRpcProvider, id, getAddress, ZeroAddress } from "ethers";
+import { Contract, FetchRequest, Interface, JsonRpcProvider, id, getAddress, ZeroAddress } from "ethers";
 import { ADDR, CHAIN, SETTINGS, isQuote } from "./config.js";
 import { ERC20_ABI, PAIR_V2_ABI, V2_FACTORY_ABI, V3_FACTORY_ABI, V4_PM_ABI } from "./abis.js";
 import { createBudgetedProvider, createRpcScheduler } from "./rpc-budget.js";
@@ -8,7 +8,10 @@ let analysisProvider;
 let discoveryProvider;
 
 function createBudgetedJsonRpcProvider(url, cuPerSecond) {
-  const provider = new JsonRpcProvider(url, CHAIN.id, { staticNetwork: true });
+  const request = new FetchRequest(url);
+  request.timeout = 15_000;
+  request.retryFunc = async () => false;
+  const provider = new JsonRpcProvider(request, CHAIN.id, { staticNetwork: true });
   return createBudgetedProvider(provider, createRpcScheduler({ cuPerSecond }));
 }
 
@@ -80,14 +83,22 @@ function errorDetails(error) {
 
 export function isRateLimitError(error) {
   return errorDetails(error).some((value) => {
-    const status = Number(typeof value === "object" ? value.status || value.statusCode : NaN);
+    const statuses = typeof value === "object"
+      ? [
+        value.status,
+        value.statusCode,
+        value.response?.status,
+        value.response?.statusCode,
+        value.info?.responseStatus,
+      ].map((status) => Number.parseInt(String(status), 10)).filter(Number.isInteger)
+      : [];
     const rawCode = typeof value === "object" ? value.code : undefined;
     const numericCode = Number(rawCode);
     const code = String(rawCode ?? "");
     const message = typeof value === "string"
       ? value
       : `${value.shortMessage || ""} ${value.message || ""}`;
-    return status === 429 || numericCode === 429 || /rate[_\s-]?limit(?:ed)?|too many requests|compute units?|throughput/i.test(`${code} ${message}`);
+    return statuses.includes(429) || numericCode === 429 || /rate[_\s-]?limit(?:ed)?|too many requests|compute units?|throughput/i.test(`${code} ${message}`);
   });
 }
 
@@ -103,7 +114,7 @@ export function isDiscoveryFallbackError(error) {
       value.info?.responseStatus,
     ].map((status) => Number.parseInt(String(status), 10)).filter(Number.isInteger);
   });
-  if (statuses.some((status) => [408, 429, 500, 502, 503, 504].includes(status))) return true;
+  if (statuses.some((status) => status === 408 || status === 429 || (status >= 500 && status <= 599))) return true;
   if (statuses.length > 0) return false;
 
   const codes = details.map((value) =>
@@ -146,7 +157,10 @@ export function isContractCallRevert(error) {
 }
 
 export function isLogRangeLimitError(error) {
-  const details = errorDetails(error);
+  const activeError = error instanceof AggregateError && error.errors.length
+    ? error.errors.at(-1)
+    : error;
+  const details = errorDetails(activeError);
   if (details.some((value) => {
     const status = Number(typeof value === "object" ? value.status || value.statusCode : NaN);
     const code = typeof value === "object" ? String(value.code || "").toUpperCase() : "";

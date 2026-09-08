@@ -5,6 +5,7 @@ import {
   getAnalysisProvider,
   getBlockNumber,
   getDiscoveryProvider,
+  isDiscoveryFallbackError,
   scanOnchain,
   sleep,
 } from "./chain.js";
@@ -662,6 +663,46 @@ export async function runReadOnlyCandidates(events, dependencies) {
   return reports;
 }
 
+export async function runWatchStartupChecks({
+  provider,
+  store,
+  retryMs = Math.max(SETTINGS.pollMs, 5_000),
+  verify = verifyPonsDeployment,
+  reconcile = reconcilePonsWatchlist,
+  wait = sleep,
+  isRecoverable = isDiscoveryFallbackError,
+  logError = console.error,
+}) {
+  while (true) {
+    try {
+      await verify(provider);
+      await reconcile({ provider, store });
+      return;
+    } catch (cause) {
+      if (!isRecoverable(currentFailoverError(cause))) throw cause;
+      logError(`watch startup RPC check failed: ${safeErrorMessage(cause)}; retrying`);
+      await wait(retryMs);
+    }
+  }
+}
+
+function currentFailoverError(error) {
+  const pending = [error];
+  const visited = new Set();
+  while (pending.length) {
+    const current = pending.shift();
+    if (!current || visited.has(current)) continue;
+    if (typeof current === "object") visited.add(current);
+    if (current instanceof AggregateError && current.errors.length) {
+      return currentFailoverError(current.errors.at(-1));
+    }
+    if (typeof current === "object") {
+      pending.push(current.cause, current.error, current.info?.error);
+    }
+  }
+  return error;
+}
+
 async function watch() {
   const releaseLock = await acquireInstanceLock(DATA_DIR);
   const releaseOnExit = () => releaseLock();
@@ -678,8 +719,7 @@ async function watch() {
     const analyzeCandidate = (event) => analyze(event, { provider: analysisProvider });
     const store = getDefaultStore();
     if (SETTINGS.onchainScan) {
-      await verifyPonsDeployment(discoveryProvider);
-      await reconcilePonsWatchlist({ provider: discoveryProvider, store });
+      await runWatchStartupChecks({ provider: discoveryProvider, store });
     }
     if (SETTINGS.telegramToken) {
       await sendTelegram(

@@ -131,6 +131,7 @@ DEXPAPRIKA_SCAN=true
 - `DISCOVERY_RPC_URL` 默认使用 Robinhood 官方公共 RPC，负责区块、Factory 和 Pons 发现。
 - `ANALYSIS_RPC_URL` 负责候选深检，并在官方节点网络错误、超时、429 或 5xx 时临时接管发现请求。
 - 官方节点故障后进入 60 秒熔断；冷却结束会自动探测并切回官方。
+- 底层 HTTP 请求最长等待 15 秒，429 由外层退避和熔断处理，避免节点内部重试数分钟。
 - 旧 `RPC_URL` 仍可用：未填写 `ANALYSIS_RPC_URL` 时，它自动作为分析与备用节点。
 - 官方公共 RPC 会限流；双 RPC 能减少 Alchemy CU，但不能保证完全没有节点错误或漏扫。
 

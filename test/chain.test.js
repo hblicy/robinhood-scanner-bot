@@ -26,9 +26,19 @@ describe("dual RPC providers", () => {
     assert.notEqual(getDiscoveryProvider(), getAnalysisProvider());
   });
 
+  it("surfaces HTTP throttling to the outer retry and failover layers promptly", async () => {
+    for (const provider of [getDiscoveryProvider(), getAnalysisProvider()]) {
+      const request = await provider._getConnection();
+      assert.equal(request.timeout, 15_000);
+      assert.equal(typeof request.retryFunc, "function");
+      assert.equal(await request.retryFunc(request, { statusCode: 429 }, 0), false);
+    }
+  });
+
   for (const error of [
     { status: 408, message: "request timeout" },
     { status: 503, message: "service unavailable" },
+    { status: 522, message: "connection timed out" },
     { code: "NETWORK_ERROR", message: "socket closed" },
     { code: "TIMEOUT", message: "request timed out" },
     { error: { code: 429, message: "throughput exceeded" } },
@@ -121,6 +131,18 @@ describe("withRetry backoff", () => {
     const waits = [];
     const limited = Object.assign(new Error("request failed"), {
       error: { code: 429, message: "request failed" },
+    });
+    await assert.rejects(
+      () => withRetry(async () => { throw limited; }, 3, async (ms) => waits.push(ms)),
+      (error) => error === limited
+    );
+    assert.deepEqual(waits, [1000, 2000]);
+  });
+
+  it("uses rate-limit backoff for a nested HTTP response status 429", async () => {
+    const waits = [];
+    const limited = Object.assign(new Error("request failed"), {
+      response: { status: 429 },
     });
     await assert.rejects(
       () => withRetry(async () => { throw limited; }, 3, async (ms) => waits.push(ms)),
@@ -280,6 +302,30 @@ describe("getLogsChunked", () => {
     assert.equal(logs.length, 12);
     assert.equal(new Set(logs.map(({ blockNumber }) => blockNumber)).size, 12);
     assert.ok(ranges.some(([fromBlock, toBlock]) => fromBlock === toBlock));
+  });
+
+  it("splits the active fallback range error despite a stale primary transport error", async () => {
+    const primaryError = Object.assign(new Error("official unavailable"), {
+      code: "SERVER_ERROR",
+      status: 503,
+    });
+    const logs = await getLogsChunked({
+      address: ADDR.V2_FACTORY,
+      topics: [],
+      fromBlock: 1,
+      toBlock: 2,
+      chunk: 2,
+      provider: {
+        getLogs: async ({ fromBlock, toBlock }) => {
+          if (fromBlock !== toBlock) {
+            throw new AggregateError([primaryError, new Error("block range too large")]);
+          }
+          return [{ blockNumber: fromBlock }];
+        },
+      },
+      retry: async (fn) => fn(),
+    });
+    assert.deepEqual(logs.map(({ blockNumber }) => blockNumber), [1, 2]);
   });
 
   it("enforces one maxLogs budget across ordinary chunks", async () => {
