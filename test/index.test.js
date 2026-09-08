@@ -340,6 +340,78 @@ describe("scanner orchestration", () => {
     assert.equal(analyzed, 0);
   });
 
+  it("routes one-shot discovery to discovery RPC and analysis to analysis RPC", async () => {
+    const discoveryProvider = { role: "discovery" };
+    const analysisProvider = { role: "analysis" };
+    const token = "0x1000000000000000000000000000000000000001";
+    const event = {
+      source: "onchain",
+      venue: "uniswap-v2",
+      token,
+      pool: "0x2000000000000000000000000000000000000002",
+      createdAt: Date.now(),
+    };
+    let analyzedWith;
+
+    await scanOnce({
+      timeoutMs: 2_000,
+      now: () => Date.now(),
+      settings: {
+        onchainScan: true,
+        geckoScan: false,
+        confirmationBlocks: 0,
+        ponsConfirmations: 0,
+        maxAgeMinutes: 30,
+        maxQueueSize: 10,
+        minScore: 70,
+      },
+      discoveryProvider,
+      analysisProvider,
+      verifyPonsDeployment: async (provider) => assert.equal(provider, discoveryProvider),
+      previewPonsRange: async ({ provider }) => {
+        assert.equal(provider, discoveryProvider);
+        return { transitions: [] };
+      },
+      getBlockNumber: async (provider) => {
+        assert.equal(provider, discoveryProvider);
+        return 100;
+      },
+      findFirstBlockAtOrAfter: async (_target, _head, provider) => {
+        assert.equal(provider, discoveryProvider);
+        return 90;
+      },
+      scanOnchain: async (_from, _to, { provider }) => {
+        assert.equal(provider, discoveryProvider);
+        return [event];
+      },
+      geckoNewPools: async () => [],
+      classifyCandidate: async (candidate, { provider }) => {
+        assert.equal(provider, discoveryProvider);
+        return { ...candidate, identity: "not_pons", pad: "ordinary" };
+      },
+      analyze: async (_candidate, { provider }) => {
+        analyzedWith = provider;
+        return {
+          token,
+          pool: event.pool,
+          poolId: null,
+          venue: event.venue,
+          meta: { symbol: "TEST" },
+          score: 60,
+          verdict: "skip",
+          honeypot: { honeypot: null },
+          sellability: { status: "unknown", reason: "unsupported-venue" },
+          errorSources: [],
+        };
+      },
+      consoleAlert: async () => {},
+      consolePons: async () => {},
+      log: () => {},
+    });
+
+    assert.equal(analyzedWith, analysisProvider);
+  });
+
   it("keeps scanOnce free of persistent and Telegram calls", async () => {
     const calls = { seen: 0, telegram: 0, console: 0 };
     const ranges = [];

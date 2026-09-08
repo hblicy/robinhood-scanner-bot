@@ -1,12 +1,19 @@
 import { SETTINGS, CHAIN, DATA_DIR, isQuote } from "./config.js";
 import { getDefaultStore, getOnchainCursor, hasSeen, markSeen, setOnchainCursor } from "./store.js";
-import { findFirstBlockAtOrAfter, getBlockNumber, getProvider, scanOnchain, sleep } from "./chain.js";
+import {
+  findFirstBlockAtOrAfter,
+  getAnalysisProvider,
+  getBlockNumber,
+  getDiscoveryProvider,
+  scanOnchain,
+  sleep,
+} from "./chain.js";
 import { geckoNewPools, getDexPaprikaTopPools } from "./market.js";
 import { analyze } from "./analyze.js";
 import { alertReport, formatAlert, formatLifecycleNotification, sendTelegram } from "./notify.js";
 import { CandidateQueue, createSerialExecutor } from "./queue.js";
 import { candidateKey, handleCandidate } from "./runtime.js";
-import { safeErrorMessage, sanitizeRpcUrl } from "./safety.js";
+import { safeErrorMessage } from "./safety.js";
 import { acquireInstanceLock } from "./instance-lock.js";
 import { createPonsTokenState, reducePonsEvent } from "./lifecycle.js";
 import { classifyPonsRecord, readPonsLaunch, scanPonsRange, verifyPonsDeployment } from "./pons.js";
@@ -290,7 +297,7 @@ export async function refreshMarketHeat({
   const at = now();
   const [launchesResult, poolsResult] = await Promise.allSettled([
     (async () => {
-      const head = await readHead();
+      const head = await readHead(provider);
       const from = await findStart(at - 86_400_000, head, provider);
       const events = await scanRange(provider, from, head);
       return events.filter((event) => event.kind === "token_launched").length;
@@ -661,11 +668,18 @@ async function watch() {
   process.once("exit", releaseOnExit);
   try {
     banner();
-    const provider = getProvider();
+    const discoveryProvider = getDiscoveryProvider();
+    const analysisProvider = getAnalysisProvider();
+    const getDiscoveryBlockNumber = () => getBlockNumber(discoveryProvider);
+    const findDiscoveryStart = (target, head) =>
+      findFirstBlockAtOrAfter(target, head, discoveryProvider);
+    const scanDiscovery = (from, to) =>
+      scanOnchain(from, to, { provider: discoveryProvider });
+    const analyzeCandidate = (event) => analyze(event, { provider: analysisProvider });
     const store = getDefaultStore();
     if (SETTINGS.onchainScan) {
-      await verifyPonsDeployment(provider);
-      await reconcilePonsWatchlist({ provider, store });
+      await verifyPonsDeployment(discoveryProvider);
+      await reconcilePonsWatchlist({ provider: discoveryProvider, store });
     }
     if (SETTINGS.telegramToken) {
       await sendTelegram(
@@ -679,13 +693,13 @@ async function watch() {
     const executeCandidate = createSerialExecutor();
     const scheduleCandidateRecheck = createCandidateRetryScheduler({ store, now: Date.now });
     const pendingHandlers = {
-      ...createInspectionCheckHandlers({ provider, store }),
+      ...createInspectionCheckHandlers({ provider: analysisProvider, store }),
       candidate_recheck: createCandidateRecheckHandler({
         executeCandidate,
         now: Date.now,
         maxAgeMinutes: SETTINGS.maxAgeMinutes,
         minScore: SETTINGS.minScore,
-        analyze,
+        analyze: analyzeCandidate,
         alertReport,
         log: console.log,
       }),
@@ -715,7 +729,7 @@ async function watch() {
         DEFAULT_ANALYSIS_CONCURRENCY,
         async (event) => executeCandidate(async () => {
           try {
-            const classified = await classifyAuxiliaryCandidate(event, { provider });
+            const classified = await classifyAuxiliaryCandidate(event, { provider: discoveryProvider });
             if (classified.identity === "pons-v2") return;
             if (classified.identity === "unknown") {
               throw new Error(`Pons identity unknown for ${event.token}: ${classified.error}`);
@@ -727,7 +741,7 @@ async function watch() {
                 now: Date.now,
                 maxAgeMinutes: SETTINGS.maxAgeMinutes,
                 minScore: SETTINGS.minScore,
-                analyze,
+                analyze: analyzeCandidate,
                 markSeen,
                 alertReport,
                 log: console.log,
@@ -743,10 +757,10 @@ async function watch() {
     };
     const common = {
         now: Date.now,
-        getBlockNumber,
+        getBlockNumber: getDiscoveryBlockNumber,
         getOnchainCursor,
-        findFirstBlockAtOrAfter,
-        scanOnchain,
+        findFirstBlockAtOrAfter: findDiscoveryStart,
+        scanOnchain: scanDiscovery,
         setOnchainCursor,
         geckoNewPools,
         log: console.log,
@@ -754,11 +768,11 @@ async function watch() {
     const loops = [];
     if (SETTINGS.onchainScan) {
       loops.push(runPonsWatchLoop(ponsState, {
-        provider,
+        provider: discoveryProvider,
         store,
         settings: SETTINGS,
-        getBlockNumber,
-        findFirstBlockAtOrAfter,
+        getBlockNumber: getDiscoveryBlockNumber,
+        findFirstBlockAtOrAfter: findDiscoveryStart,
         scanRange: scanPonsRange,
         readLaunch: readPonsLaunch,
         now: Date.now,
@@ -798,7 +812,7 @@ async function watch() {
     if (SETTINGS.dexPaprikaScan) {
       loops.push((async () => {
         while (true) {
-          const heat = await refreshMarketHeat({ provider, store });
+          const heat = await refreshMarketHeat({ provider: discoveryProvider, store });
           console.log(`market heat: ${heat.decision} level=${heat.level} launches24h=${heat.launches24h ?? "unknown"} cap=${heat.admissionCap}`);
           const hour = Math.floor(Date.now() / 3_600_000);
           await sleep(Math.max(1, (hour + 1) * 3_600_000 - Date.now()));
@@ -829,7 +843,8 @@ async function watch() {
 async function scanOnceCore(supplied = null) {
   const dependencies = supplied || {
     settings: SETTINGS,
-    provider: getProvider(),
+    discoveryProvider: getDiscoveryProvider(),
+    analysisProvider: getAnalysisProvider(),
     getBlockNumber,
     findFirstBlockAtOrAfter,
     scanOnchain,
@@ -837,7 +852,7 @@ async function scanOnceCore(supplied = null) {
     previewPonsRange,
     verifyPonsDeployment,
     analyze,
-    classifyCandidate: (event) => classifyAuxiliaryCandidate(event, { provider: dependencies.provider }),
+    classifyCandidate: classifyAuxiliaryCandidate,
     consoleAlert: async (report) => {
       console.log(formatAlert(report).replace(/<[^>]+>/g, ""));
     },
@@ -846,6 +861,8 @@ async function scanOnceCore(supplied = null) {
     },
     log: console.log,
   };
+  const discoveryProvider = dependencies.discoveryProvider || dependencies.provider;
+  const analysisProvider = dependencies.analysisProvider || dependencies.provider || getAnalysisProvider();
   const settings = dependencies.settings;
   banner();
   const sources = [];
@@ -854,16 +871,17 @@ async function scanOnceCore(supplied = null) {
       sources.push({
         name: "pons",
         run: async () => {
-          if (dependencies.verifyPonsDeployment) await dependencies.verifyPonsDeployment(dependencies.provider);
-          const latestHead = await dependencies.getBlockNumber();
+          if (dependencies.verifyPonsDeployment) await dependencies.verifyPonsDeployment(discoveryProvider);
+          const latestHead = await dependencies.getBlockNumber(discoveryProvider);
           const head = latestHead - (settings.ponsConfirmations ?? settings.confirmationBlocks ?? 0);
           if (head < 0) return [];
           const from = await dependencies.findFirstBlockAtOrAfter(
             (dependencies.now || Date.now)() - settings.maxAgeMinutes * 60_000,
-            head
+            head,
+            discoveryProvider
           );
           const preview = await dependencies.previewPonsRange({
-            provider: dependencies.provider,
+            provider: discoveryProvider,
             fromBlock: from,
             toBlock: head,
             now: dependencies.now || Date.now,
@@ -875,15 +893,16 @@ async function scanOnceCore(supplied = null) {
     sources.push({
       name: "onchain",
       run: async () => {
-        const latestHead = await dependencies.getBlockNumber();
+        const latestHead = await dependencies.getBlockNumber(discoveryProvider);
         const head = latestHead - (settings.confirmationBlocks ?? 0);
         if (head < 0) return [];
         const from = await dependencies.findFirstBlockAtOrAfter(
           (dependencies.now || Date.now)() - settings.maxAgeMinutes * 60_000,
-          head
+          head,
+          discoveryProvider
         );
         dependencies.log(`one-shot read-only scan blocks ${from}-${head}`);
-        return dependencies.scanOnchain(from, head);
+        return dependencies.scanOnchain(from, head, { provider: discoveryProvider });
       },
     });
   }
@@ -920,8 +939,10 @@ async function scanOnceCore(supplied = null) {
       maxAgeMinutes: settings.maxAgeMinutes,
       minScore: settings.minScore,
       now: dependencies.now || Date.now,
-      analyze: dependencies.analyze,
-      classifyCandidate: dependencies.classifyCandidate,
+      analyze: (event) => dependencies.analyze(event, { provider: analysisProvider }),
+      classifyCandidate: dependencies.classifyCandidate
+        ? (event) => dependencies.classifyCandidate(event, { provider: discoveryProvider })
+        : undefined,
       consoleAlert: dependencies.consoleAlert,
       log: dependencies.log,
     });
@@ -965,7 +986,9 @@ function banner() {
   console.log("====================================================");
   console.log(" Robinhood Chain scanner");
   console.log(` ${CHAIN.name}  chainId=${CHAIN.id}`);
-  console.log(` RPC ${sanitizeRpcUrl(CHAIN.rpc)}`);
+  const sharedRpc = CHAIN.discoveryRpc === CHAIN.analysisRpc;
+  console.log(` Discovery RPC ${sharedRpc ? "shared endpoint" : "official primary + analysis fallback"}`);
+  console.log(` Analysis RPC configured${sharedRpc ? " (same endpoint; no CU separation)" : ""}`);
   console.log(" mode=push-only");
   console.log(` maxAge=${SETTINGS.maxAgeMinutes}m  minScore=${SETTINGS.minScore}`);
   console.log(" Scanner and alerts only. Transaction functionality is not included.");

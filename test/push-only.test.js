@@ -6,6 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import * as scanner from "../src/index.js";
+import { banner } from "../src/scanner.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SOURCE_EXTENSIONS = new Set([".cjs", ".js", ".mjs"]);
@@ -145,5 +146,20 @@ describe("push-only command surface", () => {
       assert.match(output, /Transaction functionality is not included.*commands: watch \| scan \| check <token>/);
       assert.doesNotMatch(output, /MAX_AGE_MINUTES|MAX_QUEUE_SIZE|Robinhood Chain scanner/);
     }
+  });
+
+  it("prints RPC roles without exposing endpoint URLs", () => {
+    const lines = [];
+    const original = console.log;
+    console.log = (line) => lines.push(String(line));
+    try {
+      banner();
+    } finally {
+      console.log = original;
+    }
+    const output = lines.join("\n");
+    assert.match(output, /Discovery RPC|发现 RPC/);
+    assert.match(output, /Analysis RPC|分析 RPC/);
+    assert.doesNotMatch(output, /https?:\/\//);
   });
 });
