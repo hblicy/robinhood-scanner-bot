@@ -19,6 +19,7 @@ const event = {
 function dependencies(overrides = {}) {
   return {
     now: () => NOW,
+    minScore: 0,
     readTokenMeta: async () => ({ name: "Safe", symbol: "SAFE", decimals: 18, totalSupply: 1000n }),
     readOwner: async () => null,
     bytecodeFlags: async () => ({ hasCode: true }),
@@ -47,6 +48,37 @@ function dependencies(overrides = {}) {
 }
 
 describe("analyze data completeness", () => {
+  it("skips deep sellability inspection when the preliminary score cannot reach the final floor", async () => {
+    let honeypotCalls = 0;
+    const report = await analyze(event, dependencies({
+      minScore: 70,
+      honeypotCheck: async () => {
+        honeypotCalls += 1;
+        throw new Error("deep inspection should not run");
+      },
+    }));
+
+    assert.equal(honeypotCalls, 0);
+    assert.equal(report.sellability.status, "unknown");
+    assert.equal(report.sellability.reason, "prefilter-score");
+    assert.equal(report.errorSources.some(({ source }) => source === "honeypot"), false);
+  });
+
+  it("runs deep inspection at exactly ten points below the final floor", async () => {
+    let honeypotCalls = 0;
+    const report = await analyze(event, dependencies({
+      minScore: 31,
+      honeypotCheck: async () => {
+        honeypotCalls += 1;
+        return { honeypot: null, complete: false, reason: "insufficient evidence" };
+      },
+    }));
+
+    assert.equal(report.score, 21);
+    assert.equal(honeypotCalls, 1);
+    assert.equal(report.sellability.reason, "insufficient evidence");
+  });
+
   it("preserves the original cause for a core dependency failure", async () => {
     const rootCause = new Error("original rpc failure");
     await assert.rejects(

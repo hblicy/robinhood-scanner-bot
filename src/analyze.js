@@ -86,6 +86,7 @@ function requireCore(source, result, token) {
 
 const DEFAULT_ANALYZE_DEPENDENCIES = {
   now: Date.now,
+  minScore: SETTINGS.minScore,
   readTokenMeta,
   readOwner,
   bytecodeFlags,
@@ -354,47 +355,13 @@ export async function analyze(event, overrides = {}) {
     : { ok: true, value: null, error: null };
   const history = historyResult.value;
 
-  const hpResult = await settled(dependencies.honeypotCheck({
-    token,
-    quote: event.quote,
-    venue: event.venue,
-    pool: event.pool,
-    holders,
-    blockNumber: event.blockNumber ?? null,
-    pairCreatedAt: dex?.pairCreatedAt ?? event.createdAt ?? null,
-    decimals: meta.decimals,
-  }));
-  const hpRaw = hpResult.value || {
-    honeypot: null,
-    complete: false,
-    reason: hpResult.error,
-    buyTaxBps: null,
-    sellTaxBps: null,
-  };
-  const rawSellability = hpRaw.sellability || sellabilityResult(
-    SELLABILITY.UNKNOWN,
-    hpRaw.reason || "evidence-unavailable"
-  );
-  const hp = normalizeHoneypotSellability(hpRaw, rawSellability);
-  const sellability = hp.sellability;
-
   const mkt = event.market || {};
   const holdersKnown = holdersResult.ok && supply > 0n && holders.length > 0;
   // Selector scanning is diagnostic only; it cannot prove proxy or non-standard privilege absence.
   const privilegesKnown = false;
   const deployerHistoryKnown = Boolean(historyResult.ok && history?.known);
   const marketBound = dex?.marketBound === true;
-  const securityComplete = Boolean(
-    marketBound &&
-      holdersKnown &&
-      creatorKnown &&
-      privilegesKnown &&
-      deployerHistoryKnown &&
-      lpBurnedPct !== null &&
-      hp.complete === true &&
-      hp.honeypot === false
-  );
-  const facts = {
+  const buildFacts = (hp, sellability) => ({
     ageMinutes,
     hasTwitter: Boolean(dex?.twitter),
     hasTelegram: Boolean(dex?.telegram),
@@ -427,8 +394,55 @@ export async function analyze(event, overrides = {}) {
     deployerTokens: history?.created ?? null,
     deployerHistoryKnown,
     marketBound,
-    securityComplete,
+    securityComplete: Boolean(
+      marketBound &&
+        holdersKnown &&
+        creatorKnown &&
+        privilegesKnown &&
+        deployerHistoryKnown &&
+        lpBurnedPct !== null &&
+        hp.complete === true &&
+        hp.honeypot === false
+    ),
+  });
+  const prefilterSellability = sellabilityResult(SELLABILITY.UNKNOWN, "prefilter-score");
+  const prefilterHp = normalizeHoneypotSellability({
+    honeypot: null,
+    complete: false,
+    reason: "prefilter-score",
+    buyTaxBps: null,
+    sellTaxBps: null,
+  }, prefilterSellability);
+  const preliminary = scoreFromFacts(buildFacts(prefilterHp, prefilterSellability));
+  const inspectDeeply = preliminary.score >= Math.max(0, Number(dependencies.minScore) - 10);
+  const hpResult = inspectDeeply
+    ? await settled(dependencies.honeypotCheck({
+      token,
+      quote: event.quote,
+      venue: event.venue,
+      pool: event.pool,
+      holders,
+      blockNumber: event.blockNumber ?? null,
+      pairCreatedAt: dex?.pairCreatedAt ?? event.createdAt ?? null,
+      decimals: meta.decimals,
+    }))
+    : { ok: true, value: prefilterHp, error: null, cause: null };
+  const hpRaw = hpResult.value || {
+    honeypot: null,
+    complete: false,
+    reason: hpResult.error,
+    buyTaxBps: null,
+    sellTaxBps: null,
   };
+  const rawSellability = hpRaw.sellability || sellabilityResult(
+    SELLABILITY.UNKNOWN,
+    hpRaw.reason || "evidence-unavailable"
+  );
+  const hp = normalizeHoneypotSellability(hpRaw, rawSellability);
+  const sellability = hp.sellability;
+
+  const facts = buildFacts(hp, sellability);
+  const securityComplete = facts.securityComplete;
 
   const scored = scoreFromFacts(facts);
 
