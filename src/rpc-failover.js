@@ -17,6 +17,7 @@ export function createFailoverProvider({
   let circuitOpen = false;
   let openUntil = 0;
   let probeInFlight = false;
+  let openError = null;
 
   const runFallback = async (method, args, primaryError = null) => {
     try {
@@ -33,7 +34,10 @@ export function createFailoverProvider({
   const open = (error, renewCooldown) => {
     const changed = !circuitOpen;
     circuitOpen = true;
-    if (changed || renewCooldown) openUntil = now() + cooldownMs;
+    if (changed || renewCooldown) {
+      openUntil = now() + cooldownMs;
+      openError = error;
+    }
     if (changed) {
       log(`发现 RPC 进入熔断，临时使用分析备用节点：${safeErrorMessage(error)}`);
     }
@@ -41,8 +45,8 @@ export function createFailoverProvider({
 
   const invoke = async (method, args) => {
     const current = now();
-    if (circuitOpen && current < openUntil) return runFallback(method, args);
-    if (circuitOpen && probeInFlight) return runFallback(method, args);
+    if (circuitOpen && current < openUntil) return runFallback(method, args, openError);
+    if (circuitOpen && probeInFlight) return runFallback(method, args, openError);
 
     const probing = circuitOpen;
     if (probing) probeInFlight = true;
@@ -51,6 +55,7 @@ export function createFailoverProvider({
       if (probing) {
         circuitOpen = false;
         openUntil = 0;
+        openError = null;
         log("发现 RPC 已恢复，切回官方节点");
       }
       return result;

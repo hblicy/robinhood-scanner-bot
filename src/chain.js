@@ -72,6 +72,7 @@ function errorDetails(error) {
     values.push(current);
     if (typeof current === "object") {
       pending.push(current.cause, current.error, current.info?.error);
+      if (Array.isArray(current.errors)) pending.push(...current.errors);
     }
   }
   return values;
@@ -91,16 +92,39 @@ export function isRateLimitError(error) {
 }
 
 export function isDiscoveryFallbackError(error) {
+  const details = errorDetails(error);
+  const statuses = details.flatMap((value) => {
+    if (typeof value !== "object") return [];
+    return [
+      value.status,
+      value.statusCode,
+      value.response?.status,
+      value.response?.statusCode,
+      value.info?.responseStatus,
+    ].map((status) => Number.parseInt(String(status), 10)).filter(Number.isInteger);
+  });
+  if (statuses.some((status) => [408, 429, 500, 502, 503, 504].includes(status))) return true;
+  if (statuses.length > 0) return false;
+
+  const codes = details.map((value) =>
+    typeof value === "object" ? String(value.code || "").toUpperCase() : ""
+  );
+  if (codes.some((code) => [
+    "CALL_EXCEPTION",
+    "INVALID_ARGUMENT",
+    "UNSUPPORTED_OPERATION",
+    "BAD_DATA",
+    "-32601",
+  ].includes(code))) return false;
+  if (codes.some((code) => ["NETWORK_ERROR", "TIMEOUT"].includes(code))) return true;
   if (isRateLimitError(error)) return true;
-  return errorDetails(error).some((value) => {
-    const status = Number(typeof value === "object" ? value.status || value.statusCode : NaN);
-    const code = typeof value === "object" ? String(value.code || "").toUpperCase() : "";
+  if (codes.includes("SERVER_ERROR")) return true;
+
+  return details.some((value) => {
     const message = typeof value === "string"
       ? value
       : `${value.shortMessage || ""} ${value.message || ""}`;
-    return [408, 500, 502, 503, 504].includes(status)
-      || ["NETWORK_ERROR", "SERVER_ERROR", "TIMEOUT"].includes(code)
-      || /\b(?:timed?\s*out|connection|socket|econnreset|econnrefused|enotfound|eai_again|service unavailable|bad gateway|gateway timeout)\b/i.test(message);
+    return /\b(?:timed?\s*out|connection|socket|econnreset|econnrefused|enotfound|eai_again|service unavailable|bad gateway|gateway timeout)\b/i.test(message);
   });
 }
 

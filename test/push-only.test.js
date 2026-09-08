@@ -162,4 +162,35 @@ describe("push-only command surface", () => {
     assert.match(output, /Analysis RPC|分析 RPC/);
     assert.doesNotMatch(output, /https?:\/\//);
   });
+
+  it("recognizes normalized RPC URLs as the same endpoint", () => {
+    const result = spawnSync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "-e",
+        "import('./src/scanner.js').then(({ banner }) => banner())",
+      ],
+      {
+        cwd: root,
+        env: {
+          ...process.env,
+          DISCOVERY_RPC_URL: "https://rpc.example",
+          ANALYSIS_RPC_URL: "https://rpc.example/",
+          RPC_URL: "",
+          POLL_MS: "2500",
+          GECKO_POLL_MS: "15000",
+          MAX_AGE_MINUTES: "30",
+          ONCHAIN_SCAN: "true",
+          GECKO_SCAN: "true",
+          QUOTE_TOKENS: "WETH,ETH,USDG",
+        },
+        encoding: "utf8",
+      }
+    );
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /shared endpoint/);
+    assert.match(result.stdout, /no CU separation/);
+    assert.doesNotMatch(result.stdout, /official primary \+ analysis fallback/);
+  });
 });

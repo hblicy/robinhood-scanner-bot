@@ -982,11 +982,18 @@ async function checkOne(token, supplied = null) {
   return report;
 }
 
+function normalizedRpcEndpoint(value) {
+  const url = new URL(value);
+  url.hash = "";
+  return url.href;
+}
+
 function banner() {
   console.log("====================================================");
   console.log(" Robinhood Chain scanner");
   console.log(` ${CHAIN.name}  chainId=${CHAIN.id}`);
-  const sharedRpc = CHAIN.discoveryRpc === CHAIN.analysisRpc;
+  const sharedRpc = normalizedRpcEndpoint(CHAIN.discoveryRpc)
+    === normalizedRpcEndpoint(CHAIN.analysisRpc);
   console.log(` Discovery RPC ${sharedRpc ? "shared endpoint" : "official primary + analysis fallback"}`);
   console.log(` Analysis RPC configured${sharedRpc ? " (same endpoint; no CU separation)" : ""}`);
   console.log(" mode=push-only");

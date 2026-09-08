@@ -49,6 +49,43 @@ describe("dual RPC providers", () => {
     });
   }
 
+  it("does not fall back for an ethers HTTP 400 server error", () => {
+    const error = Object.assign(new Error("server response 400 Bad Request"), {
+      code: "SERVER_ERROR",
+      info: { responseStatus: "400 Bad Request" },
+    });
+    assert.equal(isDiscoveryFallbackError(error), false);
+  });
+
+  it("keeps an HTTP 400 authoritative over rate-limit message text", () => {
+    const error = Object.assign(new Error("server response 400: too many requests"), {
+      code: "SERVER_ERROR",
+      info: { responseStatus: "400 Bad Request" },
+    });
+    assert.equal(isDiscoveryFallbackError(error), false);
+  });
+
+  for (const error of [
+    { code: "CALL_EXCEPTION", message: "execution reverted: connection disabled" },
+    { code: "INVALID_ARGUMENT", message: "invalid connection option" },
+    { code: -32601, message: "connection method not found" },
+    { code: "CALL_EXCEPTION", message: "execution reverted: rate limit exceeded" },
+    { code: "INVALID_ARGUMENT", message: "invalid throughput option" },
+    { code: -32601, message: "too many requests for unsupported method" },
+  ]) {
+    it(`keeps permanent ${error.code} authoritative over message keywords`, () => {
+      assert.equal(isDiscoveryFallbackError(error), false);
+    });
+  }
+
+  it("falls back for an ethers HTTP 503 server error", () => {
+    const error = Object.assign(new Error("server response 503 Service Unavailable"), {
+      code: "SERVER_ERROR",
+      info: { responseStatus: "503 Service Unavailable" },
+    });
+    assert.equal(isDiscoveryFallbackError(error), true);
+  });
+
   it("passes one explicit provider through every onchain discovery read", async () => {
     const discoveryProvider = { role: "discovery" };
     const seen = [];

@@ -1,6 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createFailoverProvider } from "../src/rpc-failover.js";
+import { withRetry } from "../src/chain.js";
 
 function provider(name, calls, implementation = async () => name) {
   return {
@@ -149,6 +150,38 @@ describe("discovery RPC failover", () => {
         && error.errors[0] === primaryError
         && error.errors[1] === fallbackError
     );
+  });
+
+  it("preserves the opening primary error across fallback-only retries", async () => {
+    let primaryCalls = 0;
+    let fallbackCalls = 0;
+    const waits = [];
+    const primaryError = Object.assign(new Error("official rate limited"), { status: 429 });
+    const fallbackError = new Error("analysis unavailable");
+    const routed = createFailoverProvider({
+      primary: provider("official", [], async () => {
+        primaryCalls += 1;
+        throw primaryError;
+      }),
+      fallback: provider("analysis", [], async () => {
+        fallbackCalls += 1;
+        throw fallbackError;
+      }),
+      shouldFallback: () => true,
+      cooldownMs: 60_000,
+      now: () => 0,
+      log: () => {},
+    });
+
+    await assert.rejects(
+      () => withRetry(() => routed.getBlockNumber(), 3, async (ms) => waits.push(ms)),
+      (error) => error instanceof AggregateError
+        && error.errors[0] === primaryError
+        && error.errors[1] === fallbackError
+    );
+    assert.equal(primaryCalls, 1);
+    assert.equal(fallbackCalls, 3);
+    assert.deepEqual(waits, [1000, 2000]);
   });
 
   it("logs only state changes and redacts URLs", async () => {
