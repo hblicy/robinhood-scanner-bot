@@ -11,6 +11,65 @@ const CONFIRMED_SELLABILITY = {
 };
 
 describe("scanner runtime", () => {
+  it("persists post-analysis state before marking the candidate seen", async () => {
+    const order = [];
+    const event = { venue: "uniswap-v2", pool: "0xA", token: "0x1", createdAt: null, source: "test" };
+    let callbackReport;
+    let callbackEvent;
+
+    await handleCandidate(event, { persistSeen: true }, {
+      now: () => 1,
+      maxAgeMinutes: 30,
+      minScore: 55,
+      analyze: async () => {
+        order.push("analyze");
+        return {
+          ...event,
+          score: 50,
+          verdict: "skip",
+          meta: { symbol: "PENDING" },
+          honeypot: { honeypot: null },
+          sellability: { status: "unknown", reason: "insufficient-meaningful-sells" },
+        };
+      },
+      onAnalyzed: async (report, analyzedEvent) => {
+        order.push("schedule");
+        callbackReport = report;
+        callbackEvent = analyzedEvent;
+      },
+      markSeen: () => { order.push("seen"); },
+      alertReport: async () => {},
+      log: () => {},
+    });
+
+    assert.deepEqual(order, ["analyze", "schedule", "seen"]);
+    assert.equal(callbackReport.sellability.status, "unknown");
+    assert.equal(callbackEvent, event);
+  });
+
+  it("does not mark seen when post-analysis persistence fails", async () => {
+    let seen = 0;
+    const event = { venue: "uniswap-v2", pool: "0xA", token: "0x1", createdAt: null, source: "test" };
+    await assert.rejects(() => handleCandidate(event, { persistSeen: true }, {
+      now: () => 1,
+      maxAgeMinutes: 30,
+      minScore: 55,
+      analyze: async () => ({
+        ...event,
+        score: 50,
+        verdict: "skip",
+        meta: { symbol: "PENDING" },
+        honeypot: { honeypot: null },
+        sellability: { status: "unknown", reason: "insufficient-meaningful-sells" },
+      }),
+      onAnalyzed: async () => { throw new Error("state write failed"); },
+      markSeen: () => { seen += 1; },
+      alertReport: async () => {},
+      log: () => {},
+    }), /state write failed/);
+    assert.equal(seen, 0);
+  });
+
   it("keys candidates by venue, pool and token", () => {
     assert.notEqual(
       candidateKey({ venue: "uniswap-v2", pool: "0xA", token: "0x1" }),

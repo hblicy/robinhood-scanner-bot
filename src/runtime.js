@@ -48,6 +48,9 @@ export async function handleCandidate(event, options, dependencies) {
       `quiet skip ${report.meta.symbol} ${report.score}/100 ${report.verdict}${suffix} sellability=${sellabilityStatus}:${sellabilityReason}`
     );
   }
+  if (typeof dependencies.onAnalyzed === "function") {
+    await dependencies.onAnalyzed(normalizedReport, event);
+  }
   if (options.persistSeen !== false) {
     dependencies.markSeen(key, {
       token: report.token,
