@@ -1,12 +1,15 @@
 import { Contract, Interface, JsonRpcProvider, id, getAddress, ZeroAddress } from "ethers";
 import { ADDR, CHAIN, isQuote } from "./config.js";
 import { ERC20_ABI, PAIR_V2_ABI, V2_FACTORY_ABI, V3_FACTORY_ABI, V4_PM_ABI } from "./abis.js";
+import { createBudgetedProvider, createRpcScheduler } from "./rpc-budget.js";
 
 let httpProvider;
+const scheduleRpc = createRpcScheduler();
 
 export function getProvider() {
   if (!httpProvider) {
-    httpProvider = new JsonRpcProvider(CHAIN.rpc, CHAIN.id, { staticNetwork: true });
+    const provider = new JsonRpcProvider(CHAIN.rpc, CHAIN.id, { staticNetwork: true });
+    httpProvider = createBudgetedProvider(provider, scheduleRpc);
   }
   return httpProvider;
 }
