@@ -72,6 +72,30 @@ function makeReport(overrides = {}) {
 }
 
 describe("formatAlert", () => {
+  it("distinguishes unconfigured, unmatched, and matched smart-wallet signals", () => {
+    const unconfigured = formatAlert(makeReport({
+      walletSignals: { status: "unconfigured", count: 0, matches: [] },
+    }));
+    const unmatched = formatAlert(makeReport({
+      walletSignals: { status: "known", count: 0, matches: [] },
+    }));
+    const matched = formatAlert(makeReport({
+      walletSignals: {
+        status: "known",
+        count: 2,
+        matches: [
+          { label: "Alpha", type: "kol", source: "manual" },
+          { label: "Beta", type: "smart_money", source: "debot" },
+        ],
+      },
+    }));
+
+    assert.match(unconfigured, /聪明钱.*标签未配置/);
+    assert.match(unmatched, /聪明钱.*未命中/);
+    assert.match(matched, /聪明钱.*2.*Alpha.*Beta/);
+    assert.doesNotMatch(matched, /0x0000000000000000000000000000000000000011/);
+  });
+
   it("renders the checklist without throwing", () => {
     const text = formatAlert(makeReport());
     assert.match(text, /CAT/);
