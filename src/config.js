@@ -13,6 +13,11 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const fileEnv = readEnvFile(path.join(root, ".env"));
 const ALLOWED_ENV = new Set([
   "RPC_URL",
+  "DISCOVERY_RPC_URL",
+  "ANALYSIS_RPC_URL",
+  "DISCOVERY_RPC_CUPS",
+  "ANALYSIS_RPC_CUPS",
+  "DISCOVERY_RPC_COOLDOWN_MS",
   "TELEGRAM_BOT_TOKEN",
   "TELEGRAM_CHAT_ID",
   "QUOTE_TOKENS",
@@ -73,10 +78,36 @@ function envBool(name, fallback = false) {
 export const ROOT = root;
 export const DATA_DIR = path.join(root, "data");
 
+const OFFICIAL_RPC = "https://rpc.mainnet.chain.robinhood.com";
+
+function validateRpcUrl(name, value) {
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error(`${name} must be a valid HTTP(S) URL`);
+  }
+  if (!["http:", "https:"].includes(parsed.protocol)) {
+    throw new Error(`${name} must be a valid HTTP(S) URL`);
+  }
+  return value;
+}
+
+const explicitAnalysisRpc = env("ANALYSIS_RPC_URL", "");
+const analysisInput = explicitAnalysisRpc || env("RPC_URL", OFFICIAL_RPC);
+const discoveryInput = env("DISCOVERY_RPC_URL", OFFICIAL_RPC);
+const analysisRpc = validateRpcUrl(
+  explicitAnalysisRpc ? "ANALYSIS_RPC_URL" : "RPC_URL",
+  analysisInput
+);
+const discoveryRpc = validateRpcUrl("DISCOVERY_RPC_URL", discoveryInput);
+
 export const CHAIN = {
   id: 4663,
   name: "Robinhood Chain",
-  rpc: env("RPC_URL", "https://rpc.mainnet.chain.robinhood.com"),
+  rpc: analysisRpc,
+  discoveryRpc,
+  analysisRpc,
   explorer: "https://robinhoodchain.blockscout.com",
   dexScreener: "https://dexscreener.com/robinhood",
   geckoNetwork: "robinhood",
@@ -155,6 +186,18 @@ if (!onchainScan && !geckoScan) {
 export const SETTINGS = {
   telegramToken: env("TELEGRAM_BOT_TOKEN"),
   telegramChat: env("TELEGRAM_CHAT_ID"),
+  discoveryRpcCups: validatePositiveInteger(
+    "DISCOVERY_RPC_CUPS",
+    envNum("DISCOVERY_RPC_CUPS", 150)
+  ),
+  analysisRpcCups: validatePositiveInteger(
+    "ANALYSIS_RPC_CUPS",
+    envNum("ANALYSIS_RPC_CUPS", 250)
+  ),
+  discoveryRpcCooldownMs: validatePositiveInteger(
+    "DISCOVERY_RPC_COOLDOWN_MS",
+    envNum("DISCOVERY_RPC_COOLDOWN_MS", 60_000)
+  ),
   maxAgeMinutes: validatePositiveNumber("MAX_AGE_MINUTES", envNum("MAX_AGE_MINUTES", 30)),
   minLiquidityUsd: validateRange("MIN_LIQUIDITY_USD", envNum("MIN_LIQUIDITY_USD", 1500), 0, Number.MAX_VALUE),
   maxMcapUsd: validatePositiveNumber("MAX_MCAP_USD", envNum("MAX_MCAP_USD", 1_500_000)),
