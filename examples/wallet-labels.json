@@ -1,0 +1,14 @@
+[
+  {
+    "address": "0x0000000000000000000000000000000000000011",
+    "label": "Example KOL",
+    "type": "kol",
+    "source": "manual"
+  },
+  {
+    "address": "0x0000000000000000000000000000000000000022",
+    "label": "Example Smart Money",
+    "type": "smart_money",
+    "source": "manual"
+  }
+]
