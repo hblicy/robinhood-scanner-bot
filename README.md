@@ -98,7 +98,13 @@ DeBot 当前仅用于手工导出/导入；程序不调用其未公开接口。O
 ## 主要配置
 
 ```dotenv
-RPC_URL=https://rpc.mainnet.chain.robinhood.com
+DISCOVERY_RPC_URL=https://rpc.mainnet.chain.robinhood.com
+DISCOVERY_RPC_CUPS=150
+ANALYSIS_RPC_URL=
+# 兼容旧部署：ANALYSIS_RPC_URL 留空时读取 RPC_URL
+RPC_URL=
+ANALYSIS_RPC_CUPS=250
+DISCOVERY_RPC_COOLDOWN_MS=60000
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_ID=
 
@@ -118,7 +124,30 @@ SEEN_TTL_MS=86400000
 DEXPAPRIKA_SCAN=true
 ```
 
-布尔值只接受 `true/false`、`1/0`、`yes/no`、`on/off`；`QUOTE_TOKENS` 接受内置 `WETH`、`ETH`、`USDG` 或明确的 20-byte 地址，symbol 只用于显示，不能决定 LONG 分类。至少启用一个扫描来源。数值越界时程序会明确报错。公共 RPC 可以用于试跑；长期监听建议使用稳定的专用 RPC。
+布尔值只接受 `true/false`、`1/0`、`yes/no`、`on/off`；`QUOTE_TOKENS` 接受内置 `WETH`、`ETH`、`USDG` 或明确的 20-byte 地址，symbol 只用于显示，不能决定 LONG 分类。至少启用一个扫描来源。数值越界时程序会明确报错。
+
+### 双 RPC 配置
+
+- `DISCOVERY_RPC_URL` 默认使用 Robinhood 官方公共 RPC，负责区块、Factory 和 Pons 发现。
+- `ANALYSIS_RPC_URL` 负责候选深检，并在官方节点网络错误、超时、429 或 5xx 时临时接管发现请求。
+- 官方节点故障后进入 60 秒熔断；冷却结束会自动探测并切回官方。
+- 旧 `RPC_URL` 仍可用：未填写 `ANALYSIS_RPC_URL` 时，它自动作为分析与备用节点。
+- 官方公共 RPC 会限流；双 RPC 能减少 Alchemy CU，但不能保证完全没有节点错误或漏扫。
+
+旧服务器可以保留：
+
+```dotenv
+RPC_URL=https://robinhood-mainnet.g.alchemy.com/v2/<API_KEY>
+```
+
+显式配置写法：
+
+```dotenv
+DISCOVERY_RPC_URL=https://rpc.mainnet.chain.robinhood.com
+ANALYSIS_RPC_URL=https://robinhood-mainnet.g.alchemy.com/v2/<API_KEY>
+```
+
+修改后重启 `npm run watch`。如果两个变量最终指向同一个地址，启动横幅会提示没有实现 CU 分流。
 
 ## 扫描恢复与本地状态
 
@@ -157,7 +186,7 @@ Pons 链上阶段为 `not_graduated → swept → pool_created`，`rescued` 是�
 | 项目 | 值 |
 | --- | --- |
 | Chain ID | 4663 |
-| RPC | `https://rpc.mainnet.chain.robinhood.com` |
+| 发现 RPC（默认） | `https://rpc.mainnet.chain.robinhood.com` |
 | 浏览器 | `https://robinhoodchain.blockscout.com` |
 | WETH | `0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73` |
 | Uniswap V2 Factory | `0x8bcEaA40B9AcdfAedF85AdF4FF01F5Ad6517937f` |
