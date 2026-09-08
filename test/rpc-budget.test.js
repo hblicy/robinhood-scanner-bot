@@ -5,6 +5,7 @@ import {
   createRpcScheduler,
   RPC_CU,
 } from "../src/rpc-budget.js";
+import { createFailoverProvider } from "../src/rpc-failover.js";
 
 describe("RPC CU scheduling", () => {
   it("reserves non-overlapping start times for concurrent work", async () => {
@@ -52,5 +53,29 @@ describe("RPC CU scheduling", () => {
     }, async (_cost, operation) => operation());
 
     await assert.rejects(() => budgeted.getLogs({}), (error) => error === failure);
+  });
+
+  it("lets discovery fallback reuse an already budgeted analysis provider", async () => {
+    const charged = [];
+    const analysis = createBudgetedProvider({
+      async getBlockNumber() { return 22; },
+    }, async (cost, operation) => {
+      charged.push(cost);
+      return operation();
+    });
+    const discovery = createFailoverProvider({
+      primary: {
+        async getBlockNumber() {
+          throw Object.assign(new Error("official timeout"), { code: "TIMEOUT" });
+        },
+      },
+      fallback: analysis,
+      shouldFallback: () => true,
+      cooldownMs: 60_000,
+      now: () => 0,
+      log: () => {},
+    });
+    assert.equal(await discovery.getBlockNumber(), 22);
+    assert.deepEqual(charged, [RPC_CU.getBlockNumber]);
   });
 });

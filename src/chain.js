@@ -1,17 +1,40 @@
 import { Contract, Interface, JsonRpcProvider, id, getAddress, ZeroAddress } from "ethers";
-import { ADDR, CHAIN, isQuote } from "./config.js";
+import { ADDR, CHAIN, SETTINGS, isQuote } from "./config.js";
 import { ERC20_ABI, PAIR_V2_ABI, V2_FACTORY_ABI, V3_FACTORY_ABI, V4_PM_ABI } from "./abis.js";
 import { createBudgetedProvider, createRpcScheduler } from "./rpc-budget.js";
+import { createFailoverProvider } from "./rpc-failover.js";
 
-let httpProvider;
-const scheduleRpc = createRpcScheduler();
+let analysisProvider;
+let discoveryProvider;
+
+function createBudgetedJsonRpcProvider(url, cuPerSecond) {
+  const provider = new JsonRpcProvider(url, CHAIN.id, { staticNetwork: true });
+  return createBudgetedProvider(provider, createRpcScheduler({ cuPerSecond }));
+}
+
+export function getAnalysisProvider() {
+  if (!analysisProvider) {
+    analysisProvider = createBudgetedJsonRpcProvider(CHAIN.analysisRpc, SETTINGS.analysisRpcCups);
+  }
+  return analysisProvider;
+}
+
+export function getDiscoveryProvider() {
+  if (!discoveryProvider) {
+    const official = createBudgetedJsonRpcProvider(CHAIN.discoveryRpc, SETTINGS.discoveryRpcCups);
+    discoveryProvider = createFailoverProvider({
+      primary: official,
+      fallback: getAnalysisProvider(),
+      shouldFallback: isDiscoveryFallbackError,
+      cooldownMs: SETTINGS.discoveryRpcCooldownMs,
+      log: console.warn,
+    });
+  }
+  return discoveryProvider;
+}
 
 export function getProvider() {
-  if (!httpProvider) {
-    const provider = new JsonRpcProvider(CHAIN.rpc, CHAIN.id, { staticNetwork: true });
-    httpProvider = createBudgetedProvider(provider, scheduleRpc);
-  }
-  return httpProvider;
+  return getAnalysisProvider();
 }
 
 export async function withRetry(fn, tries = 3, sleepImpl = sleep) {
@@ -67,6 +90,20 @@ export function isRateLimitError(error) {
   });
 }
 
+export function isDiscoveryFallbackError(error) {
+  if (isRateLimitError(error)) return true;
+  return errorDetails(error).some((value) => {
+    const status = Number(typeof value === "object" ? value.status || value.statusCode : NaN);
+    const code = typeof value === "object" ? String(value.code || "").toUpperCase() : "";
+    const message = typeof value === "string"
+      ? value
+      : `${value.shortMessage || ""} ${value.message || ""}`;
+    return [408, 500, 502, 503, 504].includes(status)
+      || ["NETWORK_ERROR", "SERVER_ERROR", "TIMEOUT"].includes(code)
+      || /\b(?:timed?\s*out|connection|socket|econnreset|econnrefused|enotfound|eai_again|service unavailable|bad gateway|gateway timeout)\b/i.test(message);
+  });
+}
+
 export function isContractCallRevert(error) {
   const details = errorDetails(error);
   if (details.some((value) => {
@@ -99,8 +136,8 @@ export function isLogRangeLimitError(error) {
   });
 }
 
-export async function getBlockNumber() {
-  return withRetry(() => getProvider().getBlockNumber());
+export async function getBlockNumber(provider = getAnalysisProvider()) {
+  return withRetry(() => provider.getBlockNumber());
 }
 
 export async function findFirstBlockAtOrAfter(
@@ -247,28 +284,30 @@ function parseFactoryLog(log, venue, parser) {
 export async function scanOnchain(
   fromBlock,
   toBlock,
-  { getLogs = getLogsChunked, attachTimes = attachBlockTimes } = {}
+  {
+    provider = getAnalysisProvider(),
+    getLogs = getLogsChunked,
+    attachTimes = attachBlockTimes,
+  } = {}
 ) {
   const events = [];
+  const common = { fromBlock, toBlock, provider };
 
   const [v2logs, v3logs, v4logs] = await Promise.all([
     getLogs({
+      ...common,
       address: ADDR.V2_FACTORY,
       topics: [TOPICS.pairCreated],
-      fromBlock,
-      toBlock,
     }),
     getLogs({
+      ...common,
       address: ADDR.V3_FACTORY,
       topics: [TOPICS.poolCreated],
-      fromBlock,
-      toBlock,
     }),
     getLogs({
+      ...common,
       address: ADDR.V4_POOL_MANAGER,
       topics: [TOPICS.initialize],
-      fromBlock,
-      toBlock,
     }),
   ]);
 
@@ -314,7 +353,7 @@ export async function scanOnchain(
     if (event) events.push(event);
   }
 
-  return attachTimes(events);
+  return attachTimes(events, provider);
 }
 
 export async function attachBlockTimes(

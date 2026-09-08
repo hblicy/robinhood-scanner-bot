@@ -7,7 +7,11 @@ import {
   attachBlockTimes,
   bytecodeFlags,
   findFirstBlockAtOrAfter,
+  getAnalysisProvider,
+  getDiscoveryProvider,
   getLogsChunked,
+  getProvider,
+  isDiscoveryFallbackError,
   isRateLimitError,
   readOwnerFromContract,
   readV2PoolFromContract,
@@ -15,6 +19,53 @@ import {
   scanOnchain,
   withRetry,
 } from "../src/chain.js";
+
+describe("dual RPC providers", () => {
+  it("keeps getProvider as the analysis provider alias", () => {
+    assert.equal(getProvider(), getAnalysisProvider());
+    assert.notEqual(getDiscoveryProvider(), getAnalysisProvider());
+  });
+
+  for (const error of [
+    { status: 408, message: "request timeout" },
+    { status: 503, message: "service unavailable" },
+    { code: "NETWORK_ERROR", message: "socket closed" },
+    { code: "TIMEOUT", message: "request timed out" },
+    { error: { code: 429, message: "throughput exceeded" } },
+  ]) {
+    it(`falls back for transient discovery failure ${error.status || error.code || "nested"}`, () => {
+      assert.equal(isDiscoveryFallbackError(error), true);
+    });
+  }
+
+  for (const error of [
+    { code: "CALL_EXCEPTION", message: "execution reverted" },
+    { code: "INVALID_ARGUMENT", message: "invalid address" },
+    { code: -32601, message: "method not found" },
+    new Error("token metadata missing"),
+  ]) {
+    it(`does not fall back for permanent discovery failure ${error.code || error.message}`, () => {
+      assert.equal(isDiscoveryFallbackError(error), false);
+    });
+  }
+
+  it("passes one explicit provider through every onchain discovery read", async () => {
+    const discoveryProvider = { role: "discovery" };
+    const seen = [];
+    await scanOnchain(10, 11, {
+      provider: discoveryProvider,
+      getLogs: async (request) => {
+        seen.push(request.provider);
+        return [];
+      },
+      attachTimes: async (events, provider) => {
+        seen.push(provider);
+        return events;
+      },
+    });
+    assert.deepEqual(seen, [discoveryProvider, discoveryProvider, discoveryProvider, discoveryProvider]);
+  });
+});
 
 describe("withRetry backoff", () => {
   it("uses one- and two-second backoff for nested rate limits", async () => {
