@@ -21,7 +21,10 @@ export async function withRetry(fn, tries = 3, sleepImpl = sleep) {
       return await fn();
     } catch (err) {
       last = err;
-      if (i < tries - 1) await sleepImpl(400 * (i + 1));
+      if (i < tries - 1) {
+        const delay = isRateLimitError(err) ? 1000 * (2 ** i) : 400 * (i + 1);
+        await sleepImpl(delay);
+      }
     }
   }
   throw last;
@@ -49,6 +52,17 @@ function errorDetails(error) {
     }
   }
   return values;
+}
+
+export function isRateLimitError(error) {
+  return errorDetails(error).some((value) => {
+    const status = Number(typeof value === "object" ? value.status || value.statusCode : NaN);
+    const code = typeof value === "object" ? String(value.code || "") : "";
+    const message = typeof value === "string"
+      ? value
+      : `${value.shortMessage || ""} ${value.message || ""}`;
+    return status === 429 || /rate[_\s-]?limit(?:ed)?|too many requests|compute units?|throughput/i.test(`${code} ${message}`);
+  });
 }
 
 export function isContractCallRevert(error) {
