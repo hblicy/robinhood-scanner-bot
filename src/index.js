@@ -1,5 +1,6 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseCli } from "./cli.js";
 import { safeErrorMessage } from "./safety.js";
 
 export function assertSupportedCommand(command) {
@@ -10,10 +11,9 @@ export function assertSupportedCommand(command) {
 }
 
 export async function main() {
-  const command = assertSupportedCommand(process.argv[2] || "watch");
-  const argument = process.argv[3];
+  const cli = parseCli(process.argv.slice(2));
   const { runCommand } = await import("./scanner.js");
-  await runCommand(command, argument);
+  await runCommand(cli.command, cli.argument, { chainKey: cli.chain });
 }
 
 const isMain = Boolean(process.argv[1]) && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
