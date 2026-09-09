@@ -27,7 +27,12 @@ import {
   decideCandidateRecheck,
   shouldScheduleCandidateRecheck,
 } from "./candidate-retry.js";
-import { RetryableCandidateError } from "./candidate-recovery.js";
+import {
+  RetryableCandidateError,
+  activeCandidateRecoveryKeys,
+  createCandidateRecovery,
+  isRetryableCandidateFailure,
+} from "./candidate-recovery.js";
 
 const DEFAULT_ANALYSIS_CONCURRENCY = 1;
 const candidates = new CandidateQueue({
@@ -803,6 +808,101 @@ export async function processWatchCandidate(event, {
   return handleCandidate(classified, { persistSeen: true }, candidateDependencies);
 }
 
+export function createCandidateRecoveryScheduler({ store, recoveryKeys, now = Date.now }) {
+  if (!store || typeof store.scheduleCheck !== "function") {
+    throw new Error("candidate recovery scheduler requires a store");
+  }
+  if (!(recoveryKeys instanceof Set)) {
+    throw new Error("candidate recovery scheduler requires a recovery key set");
+  }
+  return async (event, error) => {
+    const check = store.scheduleCheck(createCandidateRecovery(event, now(), error));
+    recoveryKeys.add(candidateKey(event));
+    return check;
+  };
+}
+
+export function createCandidateRecoveryHandler({
+  executeCandidate,
+  classifyCandidate,
+  candidateDependencies,
+}) {
+  if (typeof executeCandidate !== "function") {
+    throw new Error("candidate recovery handler requires a shared executor");
+  }
+  if (typeof classifyCandidate !== "function") {
+    throw new Error("candidate recovery handler requires a classifier");
+  }
+  if (typeof candidateDependencies?.now !== "function") {
+    throw new Error("candidate recovery handler requires a clock");
+  }
+  return async (check) => {
+    if (!check?.event?.token) throw new Error("candidate recovery check requires an event");
+    const event = {
+      ...structuredClone(check.event),
+      observedAt: candidateDependencies.now(),
+    };
+    return executeCandidate(() => processWatchCandidate(event, {
+      classifyCandidate,
+      candidateDependencies,
+    }));
+  };
+}
+
+export function createWatchSourceProcessor({
+  maxQueueSize,
+  hasSeen: isSeen,
+  claimed,
+  recoveryKeys,
+  executeCandidate,
+  classifyCandidate,
+  candidateDependencies,
+  scheduleRecovery,
+  logError = console.error,
+}) {
+  const inner = new CandidateQueue({
+    maxSize: maxQueueSize,
+    hasSeen: (key) => isSeen(key) || claimed.has(key) || recoveryKeys.has(key),
+    keyOf: candidateKey,
+  });
+  const queue = {
+    get size() { return inner.size; },
+    get isFull() { return inner.isFull; },
+    enqueue(event) {
+      const accepted = inner.enqueue(event);
+      if (accepted) claimed.add(candidateKey(event));
+      return accepted;
+    },
+    take: () => inner.take(),
+    finish(event) {
+      inner.finish(event);
+      claimed.delete(candidateKey(event));
+    },
+  };
+  return (events) => processEvents(events, queue, () => drainQueue(
+    queue,
+    DEFAULT_ANALYSIS_CONCURRENCY,
+    async (event) => executeCandidate(async () => {
+      try {
+        return await processWatchCandidate(event, { classifyCandidate, candidateDependencies });
+      } catch (error) {
+        if (!isRetryableCandidateFailure(error)) {
+          logError(`handle failed ${event.token} ${safeErrorMessage(error)}`);
+          throw error;
+        }
+        try {
+          await scheduleRecovery(event, error);
+        } catch (persistenceError) {
+          logError(`candidate recovery persistence failed ${event.token} ${safeErrorMessage(persistenceError)}`);
+          throw persistenceError;
+        }
+        logError(`candidate deferred ${event.token} ${safeErrorMessage(error)}`);
+        return null;
+      }
+    })
+  ));
+}
+
 function currentFailoverError(error) {
   const pending = [error];
   const visited = new Set();
@@ -849,8 +949,14 @@ async function watch({ mode = "live" } = {}) {
     const state = { lastBlock: null, lastGecko: 0 };
     const ponsState = { lastBlock: null };
     const claimed = new Set();
+    const recoveryKeys = activeCandidateRecoveryKeys(store.snapshot());
     const executeCandidate = createSerialExecutor();
     const scheduleCandidateRecheck = createCandidateRetryScheduler({ store, now: Date.now });
+    const scheduleCandidateRecovery = createCandidateRecoveryScheduler({
+      store,
+      recoveryKeys,
+      now: Date.now,
+    });
     const candidateDependencies = buildWatchCandidateDependencies({
       rpc,
       mode,
@@ -873,49 +979,23 @@ async function watch({ mode = "live" } = {}) {
         log: console.log,
         mode,
       }),
+      candidate_recovery: createCandidateRecoveryHandler({
+        executeCandidate,
+        classifyCandidate: rpc.classifyCandidate,
+        candidateDependencies,
+      }),
     };
-    const createSourceProcessor = () => {
-      const inner = new CandidateQueue({
-        maxSize: SETTINGS.maxQueueSize,
-        hasSeen: (key) => hasSeen(key) || claimed.has(key),
-        keyOf: candidateKey,
-      });
-      const queue = {
-        get size() { return inner.size; },
-        get isFull() { return inner.isFull; },
-        enqueue(event) {
-          const accepted = inner.enqueue(event);
-          if (accepted) claimed.add(candidateKey(event));
-          return accepted;
-        },
-        take: () => inner.take(),
-        finish(event) {
-          inner.finish(event);
-          claimed.delete(candidateKey(event));
-        },
-      };
-      return (events) => processEvents(events, queue, () => drainQueue(
-        queue,
-        DEFAULT_ANALYSIS_CONCURRENCY,
-        async (event) => executeCandidate(async () => {
-          try {
-            const classified = await rpc.classifyCandidate(event);
-            if (classified.identity === "pons-v2") return;
-            if (classified.identity === "unknown") {
-              throw new Error(`Pons identity unknown for ${event.token}: ${classified.error}`);
-            }
-            await handleCandidate(
-              classified,
-              { persistSeen: true },
-              candidateDependencies
-            );
-          } catch (error) {
-            console.error("handle failed", event.token, safeErrorMessage(error));
-            throw error;
-          }
-        })
-      ));
-    };
+    const createSourceProcessor = () => createWatchSourceProcessor({
+      maxQueueSize: SETTINGS.maxQueueSize,
+      hasSeen,
+      claimed,
+      recoveryKeys,
+      executeCandidate,
+      classifyCandidate: rpc.classifyCandidate,
+      candidateDependencies,
+      scheduleRecovery: scheduleCandidateRecovery,
+      logError: console.error,
+    });
     const common = {
         ...rpc.onchain,
         now: Date.now,

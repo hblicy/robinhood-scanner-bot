@@ -12,6 +12,7 @@ import {
   scanOnce,
 } from "../src/scanner.js";
 import { CandidateQueue, createSerialExecutor } from "../src/queue.js";
+import { candidateKey } from "../src/runtime.js";
 
 const CONFIRMED_SELLABILITY = {
   status: "confirmed",
@@ -20,6 +21,45 @@ const CONFIRMED_SELLABILITY = {
   ladderSamples: 1,
   meaningfulSellers: 3,
 };
+
+function watchCandidateEvent(overrides = {}) {
+  return {
+    chain: "robinhood",
+    token: "0x1000000000000000000000000000000000000001",
+    pool: "0x2000000000000000000000000000000000000002",
+    source: "onchain",
+    venue: "uniswap-v2",
+    createdAt: 1_000,
+    observedAt: 2_000,
+    ...overrides,
+  };
+}
+
+function watchCandidateReport(event, overrides = {}) {
+  return {
+    ...event,
+    score: 80,
+    verdict: "review",
+    meta: { symbol: "TEST" },
+    honeypot: { honeypot: false },
+    sellability: CONFIRMED_SELLABILITY,
+    ...overrides,
+  };
+}
+
+function watchCandidateDependencies(overrides = {}) {
+  return {
+    now: () => 2_000,
+    maxAgeMinutes: 30,
+    minScore: 70,
+    mode: "live",
+    analyze: async (event) => watchCandidateReport(event),
+    markSeen: () => {},
+    alertReport: async () => {},
+    log: () => {},
+    ...overrides,
+  };
+}
 
 describe("scanner orchestration", () => {
   it("executes classify, analyze and markSeen through the live candidate path", async () => {
@@ -64,6 +104,191 @@ describe("scanner orchestration", () => {
     });
 
     assert.deepEqual(calls, ["classify", "analyze", "alert", "seen"]);
+  });
+
+  it("persists one retryable failure, advances the cursor, and suppresses the duplicate", async () => {
+    const scanner = await import("../src/scanner.js");
+    const recovery = await import("../src/candidate-recovery.js");
+    assert.equal(typeof scanner.createWatchSourceProcessor, "function");
+    const event = watchCandidateEvent();
+    const scheduled = [];
+    const recoveryKeys = new Set();
+    let classifications = 0;
+    const process = scanner.createWatchSourceProcessor({
+      maxQueueSize: 10,
+      hasSeen: () => false,
+      claimed: new Set(),
+      recoveryKeys,
+      executeCandidate: (work) => work(),
+      classifyCandidate: async () => {
+        classifications += 1;
+        throw Object.assign(new Error("Too Many Requests"), { status: 429 });
+      },
+      candidateDependencies: watchCandidateDependencies(),
+      scheduleRecovery: async (value, error) => {
+        scheduled.push(recovery.createCandidateRecovery(value, 10_000, error));
+        recoveryKeys.add(candidateKey(value));
+      },
+      logError: () => {},
+    });
+    let cursor = null;
+
+    await runWatchIteration({ lastBlock: 9, lastGecko: 0 }, {
+      settings: { onchainScan: true, geckoScan: false, confirmationBlocks: 0, maxAgeMinutes: 30 },
+      now: () => 2_000,
+      runDiscoverySession: (work) => work({}),
+      getBlockNumber: async () => 10,
+      getOnchainCursor: () => 9,
+      findFirstBlockAtOrAfter: async () => 9,
+      scanOnchain: async () => [event],
+      setOnchainCursor: (value) => { cursor = value; },
+      handleEvents: process,
+      geckoNewPools: async () => [],
+      log: () => {},
+    });
+    const duplicate = await process([event]);
+
+    assert.equal(cursor, 10);
+    assert.equal(classifications, 1);
+    assert.equal(scheduled.length, 1);
+    assert.deepEqual(duplicate, { accepted: 0, handled: 0, failed: 0 });
+  });
+
+  it("adds the recovery key only after the pending check is durable", async () => {
+    const scanner = await import("../src/scanner.js");
+    assert.equal(typeof scanner.createCandidateRecoveryScheduler, "function");
+    const event = watchCandidateEvent();
+    const recoveryKeys = new Set();
+    let saved = null;
+    const schedule = scanner.createCandidateRecoveryScheduler({
+      store: {
+        scheduleCheck(check) {
+          saved = check;
+          return check;
+        },
+      },
+      recoveryKeys,
+      now: () => 10_000,
+    });
+
+    await schedule(event, Object.assign(new Error("Too Many Requests"), { status: 429 }));
+
+    assert.equal(saved.type, "candidate_recovery");
+    assert.match(saved.lastError, /Too Many Requests/);
+    assert.equal(recoveryKeys.has(candidateKey(event)), true);
+
+    const failedKeys = new Set();
+    const failedSchedule = scanner.createCandidateRecoveryScheduler({
+      store: { scheduleCheck() { throw new Error("state write failed"); } },
+      recoveryKeys: failedKeys,
+      now: () => 10_000,
+    });
+    await assert.rejects(() => failedSchedule(event, new Error("rate limited")), /state write failed/);
+    assert.equal(failedKeys.size, 0);
+  });
+
+  it("does not persist or hide an unexpected candidate error", async () => {
+    const scanner = await import("../src/scanner.js");
+    assert.equal(typeof scanner.createWatchSourceProcessor, "function");
+    let scheduled = 0;
+    const process = scanner.createWatchSourceProcessor({
+      maxQueueSize: 10,
+      hasSeen: () => false,
+      claimed: new Set(),
+      recoveryKeys: new Set(),
+      executeCandidate: (work) => work(),
+      classifyCandidate: async () => { throw new ReferenceError("programming fault"); },
+      candidateDependencies: watchCandidateDependencies(),
+      scheduleRecovery: async () => { scheduled += 1; },
+      logError: () => {},
+    });
+
+    assert.deepEqual(await process([watchCandidateEvent()]), { accepted: 1, handled: 0, failed: 1 });
+    assert.equal(scheduled, 0);
+  });
+
+  it("keeps the cursor when recovery persistence fails", async () => {
+    const scanner = await import("../src/scanner.js");
+    assert.equal(typeof scanner.createWatchSourceProcessor, "function");
+    const event = watchCandidateEvent();
+    const process = scanner.createWatchSourceProcessor({
+      maxQueueSize: 10,
+      hasSeen: () => false,
+      claimed: new Set(),
+      recoveryKeys: new Set(),
+      executeCandidate: (work) => work(),
+      classifyCandidate: async () => {
+        throw Object.assign(new Error("Too Many Requests"), { status: 429 });
+      },
+      candidateDependencies: watchCandidateDependencies(),
+      scheduleRecovery: async () => { throw new Error("state write failed"); },
+      logError: () => {},
+    });
+    let cursor = null;
+
+    await runWatchIteration({ lastBlock: 9, lastGecko: 0 }, {
+      settings: { onchainScan: true, geckoScan: false, confirmationBlocks: 0, maxAgeMinutes: 30 },
+      now: () => 2_000,
+      runDiscoverySession: (work) => work({}),
+      getBlockNumber: async () => 10,
+      getOnchainCursor: () => 9,
+      findFirstBlockAtOrAfter: async () => 9,
+      scanOnchain: async () => [event],
+      setOnchainCursor: (value) => { cursor = value; },
+      handleEvents: process,
+      geckoNewPools: async () => [],
+      log: () => {},
+    });
+
+    assert.equal(cursor, null);
+  });
+
+  it("recovery retries the complete candidate path", async () => {
+    const scanner = await import("../src/scanner.js");
+    assert.equal(typeof scanner.createCandidateRecoveryHandler, "function");
+    const calls = [];
+    const event = watchCandidateEvent();
+    const handler = scanner.createCandidateRecoveryHandler({
+      executeCandidate: (work) => work(),
+      classifyCandidate: async (value) => {
+        assert.equal(value.observedAt, 5_000);
+        calls.push("classify");
+        return { ...value, identity: "not_pons" };
+      },
+      candidateDependencies: watchCandidateDependencies({
+        now: () => 5_000,
+        analyze: async (value) => {
+          calls.push("analyze");
+          return watchCandidateReport(value);
+        },
+        alertReport: async () => calls.push("alert"),
+        onAnalyzed: async () => calls.push("sellability-recheck"),
+        markSeen: () => calls.push("seen"),
+      }),
+    });
+
+    await handler({ id: "candidate-recovery:test", event });
+    assert.deepEqual(calls, ["classify", "analyze", "alert", "sellability-recheck", "seen"]);
+  });
+
+  it("records Pons candidates as seen without generic analysis", async () => {
+    const scanner = await import("../src/scanner.js");
+    let analyzed = 0;
+    const seen = [];
+    const event = watchCandidateEvent();
+
+    const report = await scanner.processWatchCandidate(event, {
+      classifyCandidate: async (value) => ({ ...value, identity: "pons-v2" }),
+      candidateDependencies: watchCandidateDependencies({
+        analyze: async () => { analyzed += 1; },
+        markSeen: (key, payload) => seen.push([key, payload]),
+      }),
+    });
+
+    assert.equal(report, null);
+    assert.equal(analyzed, 0);
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0][1].skipped, "pons-v2");
   });
 
   it("shares one discovery session runner across watch loops and keeps candidate calls on analysis RPC", async () => {
