@@ -467,4 +467,3 @@ Expected: remote branch advances without force push.
 Run: `gh pr view 9 --repo hblicy/robinhood-scanner-bot --json number,url,state,headRefName,baseRefName`
 
 Expected: PR #9 is open, head is `fix/watch-analysis-binding`, and base is `main`.
-
