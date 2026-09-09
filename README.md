@@ -130,10 +130,13 @@ DEXPAPRIKA_SCAN=true
 
 - `DISCOVERY_RPC_URL` 默认使用 Robinhood 官方公共 RPC，负责区块、Factory 和 Pons 发现。
 - `ANALYSIS_RPC_URL` 负责候选深检，并在官方节点网络错误、超时、429 或 5xx 时临时接管发现请求。
+- 两个 URL 规范化后若指向同一端点，只创建一个 provider，并采用 `DISCOVERY_RPC_CUPS`、`ANALYSIS_RPC_CUPS` 中较低的预算；不会把同一个失败请求再向自己回退一次。
+- 两个 URL 不同时，发现回退会在备用节点上重新读取 head，并从尚未提交的游标重新执行整段扫描；不会把主节点的 head 与备用节点的日志混在同一轮提交。
 - 官方节点故障后进入 60 秒熔断；冷却结束会自动探测并切回官方。
 - 底层 HTTP 请求最长等待 15 秒，429 由外层退避和熔断处理，避免节点内部重试数分钟。
 - 旧 `RPC_URL` 仍可用：未填写 `ANALYSIS_RPC_URL` 时，它自动作为分析与备用节点。
-- 官方公共 RPC 会限流；双 RPC 能减少 Alchemy CU，但不能保证完全没有节点错误或漏扫。
+- 区间扫描或候选处理失败会保留带上下文的脱敏日志，长期运行的 `watch` 不会因此退出；日志不会打印 RPC URL 中的 API key、Token 或查询参数凭据。
+- 官方公共 RPC 会限流；双 RPC 能减少 Alchemy CU，但不能保证完全没有节点错误。未提交区间会重试，只有完整处理成功后才推进游标。
 
 旧服务器可以保留：
 
