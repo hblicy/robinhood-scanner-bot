@@ -5,6 +5,7 @@ import {
   getAnalysisProvider,
   getBlockNumber,
   getDiscoveryProvider,
+  getDiscoverySessions,
   isDiscoveryFallbackError,
   scanOnchain,
   sleep,
@@ -693,6 +694,7 @@ export async function runReadOnlyCandidates(events, dependencies) {
 
 export async function runWatchStartupChecks({
   provider,
+  runDiscoverySession = (work) => work(provider),
   store,
   retryMs = Math.max(SETTINGS.pollMs, 5_000),
   verify = verifyPonsDeployment,
@@ -703,8 +705,10 @@ export async function runWatchStartupChecks({
 }) {
   while (true) {
     try {
-      await verify(provider);
-      await reconcile({ provider, store });
+      await runDiscoverySession(async (activeProvider) => {
+        await verify(activeProvider);
+        await reconcile({ provider: activeProvider, store });
+      });
       return;
     } catch (cause) {
       if (!isRecoverable(currentFailoverError(cause))) throw cause;
@@ -712,6 +716,36 @@ export async function runWatchStartupChecks({
       await wait(retryMs);
     }
   }
+}
+
+export function createWatchRpcBindings({
+  analysisProvider = getAnalysisProvider(),
+  discoverySessions = getDiscoverySessions(),
+  getBlockNumberImpl = getBlockNumber,
+  findFirstBlockAtOrAfterImpl = findFirstBlockAtOrAfter,
+  scanOnchainImpl = scanOnchain,
+  analyzeImpl = analyze,
+  classifyCandidateImpl = classifyAuxiliaryCandidate,
+} = {}) {
+  const runDiscoverySession = (work) => discoverySessions.run(work);
+  const getDiscoveryBlockNumber = (provider) => getBlockNumberImpl(provider);
+  const findDiscoveryStart = (target, head, provider) =>
+    findFirstBlockAtOrAfterImpl(target, head, provider);
+  const scanDiscovery = (from, to, provider) =>
+    scanOnchainImpl(from, to, { provider });
+  const discovery = {
+    runDiscoverySession,
+    getBlockNumber: getDiscoveryBlockNumber,
+    findFirstBlockAtOrAfter: findDiscoveryStart,
+  };
+  return {
+    analysisProvider,
+    startup: { runDiscoverySession },
+    onchain: { ...discovery, scanOnchain: scanDiscovery },
+    pons: { ...discovery },
+    analyzeCandidate: (event) => analyzeImpl(event, { provider: analysisProvider }),
+    classifyCandidate: (event) => classifyCandidateImpl(event, { provider: analysisProvider }),
+  };
 }
 
 function currentFailoverError(error) {
@@ -737,17 +771,11 @@ async function watch() {
   process.once("exit", releaseOnExit);
   try {
     banner();
-    const discoveryProvider = getDiscoveryProvider();
-    const analysisProvider = getAnalysisProvider();
-    const getDiscoveryBlockNumber = () => getBlockNumber(discoveryProvider);
-    const findDiscoveryStart = (target, head) =>
-      findFirstBlockAtOrAfter(target, head, discoveryProvider);
-    const scanDiscovery = (from, to) =>
-      scanOnchain(from, to, { provider: discoveryProvider });
-    const analyzeCandidate = (event) => analyze(event, { provider: analysisProvider });
+    const rpc = createWatchRpcBindings();
+    const { analysisProvider } = rpc;
     const store = getDefaultStore();
     if (SETTINGS.onchainScan) {
-      await runWatchStartupChecks({ provider: discoveryProvider, store });
+      await runWatchStartupChecks({ ...rpc.startup, store });
     }
     if (SETTINGS.telegramToken) {
       await sendTelegram(
@@ -767,7 +795,7 @@ async function watch() {
         now: Date.now,
         maxAgeMinutes: SETTINGS.maxAgeMinutes,
         minScore: SETTINGS.minScore,
-        analyze: analyzeCandidate,
+        analyze: rpc.analyzeCandidate,
         alertReport,
         log: console.log,
       }),
@@ -797,7 +825,7 @@ async function watch() {
         DEFAULT_ANALYSIS_CONCURRENCY,
         async (event) => executeCandidate(async () => {
           try {
-            const classified = await classifyAuxiliaryCandidate(event, { provider: discoveryProvider });
+            const classified = await rpc.classifyCandidate(event);
             if (classified.identity === "pons-v2") return;
             if (classified.identity === "unknown") {
               throw new Error(`Pons identity unknown for ${event.token}: ${classified.error}`);
@@ -824,11 +852,9 @@ async function watch() {
       ));
     };
     const common = {
+        ...rpc.onchain,
         now: Date.now,
-        getBlockNumber: getDiscoveryBlockNumber,
         getOnchainCursor,
-        findFirstBlockAtOrAfter: findDiscoveryStart,
-        scanOnchain: scanDiscovery,
         setOnchainCursor,
         geckoNewPools,
         log: console.log,
@@ -836,11 +862,9 @@ async function watch() {
     const loops = [];
     if (SETTINGS.onchainScan) {
       loops.push(runPonsWatchLoop(ponsState, {
-        provider: discoveryProvider,
+        ...rpc.pons,
         store,
         settings: SETTINGS,
-        getBlockNumber: getDiscoveryBlockNumber,
-        findFirstBlockAtOrAfter: findDiscoveryStart,
         scanRange: scanPonsRange,
         readLaunch: readPonsLaunch,
         now: Date.now,
@@ -880,7 +904,7 @@ async function watch() {
     if (SETTINGS.dexPaprikaScan) {
       loops.push((async () => {
         while (true) {
-          const heat = await refreshMarketHeat({ provider: discoveryProvider, store });
+          const heat = await refreshMarketHeat({ provider: analysisProvider, store });
           console.log(`market heat: ${heat.decision} level=${heat.level} launches24h=${heat.launches24h ?? "unknown"} cap=${heat.admissionCap}`);
           const hour = Math.floor(Date.now() / 3_600_000);
           await sleep(Math.max(1, (hour + 1) * 3_600_000 - Date.now()));

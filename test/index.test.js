@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   createCandidateRecheckHandler,
   createCandidateRetryScheduler,
+  createWatchRpcBindings,
   initialOnchainCursor,
   processEvents,
   processOnchainRange,
@@ -21,6 +22,56 @@ const CONFIRMED_SELLABILITY = {
 };
 
 describe("scanner orchestration", () => {
+  it("shares one discovery session runner across watch loops and keeps candidate calls on analysis RPC", async () => {
+    const discoveryProvider = { role: "discovery" };
+    const analysisProvider = { role: "analysis" };
+    const calls = [];
+    const bindings = createWatchRpcBindings({
+      analysisProvider,
+      discoverySessions: {
+        run: async (work) => work(discoveryProvider),
+      },
+      getBlockNumberImpl: async (provider) => {
+        calls.push(["head", provider]);
+        return 100;
+      },
+      findFirstBlockAtOrAfterImpl: async (_target, _head, provider) => {
+        calls.push(["boundary", provider]);
+        return 90;
+      },
+      scanOnchainImpl: async (_from, _to, { provider }) => {
+        calls.push(["logs", provider]);
+        return [];
+      },
+      analyzeImpl: async (_event, { provider }) => {
+        calls.push(["analyze", provider]);
+        return {};
+      },
+      classifyCandidateImpl: async (_event, { provider }) => {
+        calls.push(["classify", provider]);
+        return {};
+      },
+    });
+
+    assert.equal(bindings.onchain.runDiscoverySession, bindings.pons.runDiscoverySession);
+    assert.equal(bindings.onchain.runDiscoverySession, bindings.startup.runDiscoverySession);
+    await bindings.onchain.runDiscoverySession(async (provider) => {
+      await bindings.onchain.getBlockNumber(provider);
+      await bindings.onchain.findFirstBlockAtOrAfter(0, 100, provider);
+      await bindings.onchain.scanOnchain(90, 100, provider);
+    });
+    await bindings.analyzeCandidate({});
+    await bindings.classifyCandidate({});
+
+    assert.deepEqual(calls, [
+      ["head", discoveryProvider],
+      ["boundary", discoveryProvider],
+      ["logs", discoveryProvider],
+      ["analyze", analysisProvider],
+      ["classify", analysisProvider],
+    ]);
+  });
+
   it("retries recoverable startup RPC checks without exiting watch", async () => {
     const scanner = await import("../src/scanner.js");
     assert.equal(typeof scanner.runWatchStartupChecks, "function");
