@@ -44,6 +44,19 @@ export const CLANKER_V4_ABI = [
   "event TokenCreated(address msgSender,address indexed tokenAddress,address indexed tokenAdmin,string tokenImage,string tokenName,string tokenSymbol,string tokenMetadata,string tokenContext,int24 startingTick,address poolHook,bytes32 poolId,address pairedToken,address locker,address mevModule,uint256 extensionsSupply,address[] extensions)",
 ];
 
+export const PANCAKE_INFINITY_CL_ABI = [
+  "event Initialize(bytes32 indexed id,address indexed currency0,address indexed currency1,address hooks,uint24 fee,bytes32 parameters,uint160 sqrtPriceX96,int24 tick)",
+];
+
+export const FOUR_MEME_V2_ABI = [
+  "event TokenCreate(address creator,address token,uint256 requestId,string name,string symbol,uint256 totalSupply,uint256 launchTime,uint256 launchFee)",
+  "event LiquidityAdded(address token1,uint256 token1Amount,address token2,uint256 token2Amount)",
+];
+
+export const FOUR_MEME_HELPER_ABI = [
+  "function getTokenInfo(address token) view returns (uint256 version,address tokenManager,address quote,uint256 lastPrice,uint256 tradingFeeRate,uint256 minTradingFee,uint256 launchTime,uint256 offers,uint256 maxOffers,uint256 funds,uint256 maxFunds,bool liquidityAdded)",
+];
+
 export const V2_ROUTER_ABI = [
   "function getAmountsOut(uint256 amountIn, address[] path) view returns (uint256[] amounts)",
 ];

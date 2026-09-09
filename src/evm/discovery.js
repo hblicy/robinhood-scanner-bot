@@ -54,7 +54,7 @@ export async function scanEvmRange({
     if (!adapter) continue;
     let parsed;
     try {
-      parsed = adapter.parse(log, { chain, provider });
+      parsed = await adapter.parse(log, { chain, provider });
     } catch (cause) {
       throw new Error(
         `${chain.key} ${adapter.id} parse failed at block ${log.blockNumber ?? "unknown"} `
