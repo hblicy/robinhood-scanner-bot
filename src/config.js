@@ -9,6 +9,9 @@ import {
   validateRange,
 } from "./safety.js";
 
+export { EVM_PROFILES } from "./chains/evm-profiles.js";
+export { loadChainConfig } from "./chains/load-chain.js";
+
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const fileEnv = readEnvFile(path.join(root, ".env"));
 const ALLOWED_ENV = new Set([
