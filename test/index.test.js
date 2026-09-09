@@ -22,6 +22,21 @@ const CONFIRMED_SELLABILITY = {
 };
 
 describe("scanner orchestration", () => {
+  it("binds live candidate analysis to the watch RPC analysis function", async () => {
+    const scanner = await import("../src/scanner.js");
+    assert.equal(typeof scanner.buildWatchCandidateDependencies, "function");
+
+    const analyzeCandidate = async () => ({ score: 80 });
+    const dependencies = scanner.buildWatchCandidateDependencies({
+      rpc: { analyzeCandidate },
+      mode: "live",
+      onAnalyzed: async () => {},
+    });
+
+    assert.equal(dependencies.analyze, analyzeCandidate);
+    assert.equal(dependencies.mode, "live");
+  });
+
   it("shares one discovery session runner across watch loops and keeps candidate calls on analysis RPC", async () => {
     const discoveryProvider = { role: "discovery" };
     const analysisProvider = { role: "analysis" };

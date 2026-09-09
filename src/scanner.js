@@ -756,6 +756,32 @@ export function createWatchRpcBindings({
   };
 }
 
+export function buildWatchCandidateDependencies({
+  rpc,
+  mode = "live",
+  onAnalyzed,
+  alertReport: sendAlert = alertReport,
+  now = Date.now,
+  markSeen: persistSeen = markSeen,
+  log = console.log,
+  settings = SETTINGS,
+}) {
+  if (typeof rpc?.analyzeCandidate !== "function") {
+    throw new Error("watch candidate analysis RPC binding is required");
+  }
+  return {
+    now,
+    maxAgeMinutes: settings.maxAgeMinutes,
+    minScore: settings.minScore,
+    mode,
+    analyze: rpc.analyzeCandidate,
+    markSeen: persistSeen,
+    alertReport: sendAlert,
+    log,
+    onAnalyzed,
+  };
+}
+
 function currentFailoverError(error) {
   const pending = [error];
   const visited = new Set();
@@ -804,6 +830,12 @@ async function watch({ mode = "live" } = {}) {
     const claimed = new Set();
     const executeCandidate = createSerialExecutor();
     const scheduleCandidateRecheck = createCandidateRetryScheduler({ store, now: Date.now });
+    const candidateDependencies = buildWatchCandidateDependencies({
+      rpc,
+      mode,
+      onAnalyzed: scheduleCandidateRecheck,
+      alertReport: sendCandidateAlert,
+    });
     const pendingHandlers = {
       ...createInspectionCheckHandlers({
         provider: analysisProvider,
@@ -854,17 +886,7 @@ async function watch({ mode = "live" } = {}) {
             await handleCandidate(
               classified,
               { persistSeen: true },
-              {
-                now: Date.now,
-                maxAgeMinutes: SETTINGS.maxAgeMinutes,
-                minScore: SETTINGS.minScore,
-                mode,
-                analyze: analyzeCandidate,
-                markSeen,
-                alertReport: sendCandidateAlert,
-                log: console.log,
-                onAnalyzed: scheduleCandidateRecheck,
-              }
+              candidateDependencies
             );
           } catch (error) {
             console.error("handle failed", event.token, safeErrorMessage(error));
