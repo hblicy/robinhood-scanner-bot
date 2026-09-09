@@ -2,38 +2,69 @@ import { Contract, FetchRequest, Interface, JsonRpcProvider, id, getAddress, Zer
 import { ADDR, CHAIN, SETTINGS, isQuote } from "./config.js";
 import { ERC20_ABI, PAIR_V2_ABI, V2_FACTORY_ABI, V3_FACTORY_ABI, V4_PM_ABI } from "./abis.js";
 import { createBudgetedProvider, createRpcScheduler } from "./rpc-budget.js";
-import { createFailoverProvider } from "./rpc-failover.js";
+import { createRoleProviders } from "./rpc-endpoints.js";
+import { createDiscoverySessionRunner } from "./discovery-session.js";
 
-let analysisProvider;
-let discoveryProvider;
+let rpcContext;
 
-function createBudgetedJsonRpcProvider(url, cuPerSecond) {
+function createBudgetedJsonRpcProvider(url, cuPerSecond, chainId = CHAIN.id) {
   const request = new FetchRequest(url);
   request.timeout = 15_000;
   request.retryFunc = async () => false;
-  const provider = new JsonRpcProvider(request, CHAIN.id, { staticNetwork: true });
+  const provider = new JsonRpcProvider(request, chainId, { staticNetwork: true });
   return createBudgetedProvider(provider, createRpcScheduler({ cuPerSecond }));
 }
 
-export function getAnalysisProvider() {
-  if (!analysisProvider) {
-    analysisProvider = createBudgetedJsonRpcProvider(CHAIN.analysisRpc, SETTINGS.analysisRpcCups);
+export function createChainRpcContext({
+  chain,
+  settings,
+  createProvider = null,
+  shouldFallback = isDiscoveryFallbackError,
+  log = console.warn,
+}) {
+  const buildProvider = createProvider ?? ((url, cups) =>
+    createBudgetedJsonRpcProvider(url, cups, chain.id));
+  const providers = createRoleProviders({
+    discoveryUrl: chain.discoveryRpc,
+    analysisUrl: chain.analysisRpc,
+    discoveryCups: settings.discoveryRpcCups,
+    analysisCups: settings.analysisRpcCups,
+    createProvider: buildProvider,
+  });
+  return {
+    analysisProvider: providers.analysis,
+    discoveryPrimary: providers.discoveryPrimary,
+    discoveryFallback: providers.discoveryFallback,
+    discoverySessions: createDiscoverySessionRunner({
+      primary: providers.discoveryPrimary,
+      fallback: providers.discoveryFallback,
+      shouldFallback,
+      cooldownMs: settings.discoveryRpcCooldownMs,
+      log,
+    }),
+  };
+}
+
+function getRpcContext() {
+  if (!rpcContext) {
+    rpcContext = createChainRpcContext({
+      chain: CHAIN,
+      settings: SETTINGS,
+    });
   }
-  return analysisProvider;
+  return rpcContext;
+}
+
+export function getAnalysisProvider() {
+  return getRpcContext().analysisProvider;
 }
 
 export function getDiscoveryProvider() {
-  if (!discoveryProvider) {
-    const official = createBudgetedJsonRpcProvider(CHAIN.discoveryRpc, SETTINGS.discoveryRpcCups);
-    discoveryProvider = createFailoverProvider({
-      primary: official,
-      fallback: getAnalysisProvider(),
-      shouldFallback: isDiscoveryFallbackError,
-      cooldownMs: SETTINGS.discoveryRpcCooldownMs,
-      log: console.warn,
-    });
-  }
-  return discoveryProvider;
+  return getRpcContext().discoveryPrimary;
+}
+
+export function getDiscoverySessions() {
+  return getRpcContext().discoverySessions;
 }
 
 export function getProvider() {

@@ -6,6 +6,7 @@ import { ADDR } from "../src/config.js";
 import {
   attachBlockTimes,
   bytecodeFlags,
+  createChainRpcContext,
   findFirstBlockAtOrAfter,
   getAnalysisProvider,
   getDiscoveryProvider,
@@ -21,9 +22,69 @@ import {
 } from "../src/chain.js";
 
 describe("dual RPC providers", () => {
-  it("keeps getProvider as the analysis provider alias", () => {
+  it("keeps getProvider as the analysis alias and reuses the default shared endpoint", () => {
     assert.equal(getProvider(), getAnalysisProvider());
-    assert.notEqual(getDiscoveryProvider(), getAnalysisProvider());
+    assert.equal(getDiscoveryProvider(), getAnalysisProvider());
+  });
+
+  it("shares one provider and disables fallback for the same normalized URL", () => {
+    const made = [];
+    const context = createChainRpcContext({
+      chain: {
+        id: 4663,
+        discoveryRpc: "https://rpc.example/x/",
+        analysisRpc: "https://RPC.example:443/x",
+      },
+      settings: {
+        discoveryRpcCups: 150,
+        analysisRpcCups: 250,
+        discoveryRpcCooldownMs: 60_000,
+      },
+      createProvider: (url, cups) => {
+        const provider = { url, cups };
+        made.push(provider);
+        return provider;
+      },
+      shouldFallback: () => true,
+      log: () => {},
+    });
+    assert.equal(made.length, 1);
+    assert.equal(made[0].cups, 150);
+    assert.equal(context.analysisProvider, context.discoveryPrimary);
+    assert.equal(context.discoveryFallback, null);
+  });
+
+  it("restarts a discovery session on the existing analysis provider", async () => {
+    const made = [];
+    const context = createChainRpcContext({
+      chain: {
+        id: 4663,
+        discoveryRpc: "https://official.example",
+        analysisRpc: "https://analysis.example/key",
+      },
+      settings: {
+        discoveryRpcCups: 150,
+        analysisRpcCups: 250,
+        discoveryRpcCooldownMs: 60_000,
+      },
+      createProvider: (url, cups) => {
+        const provider = { url, cups };
+        made.push(provider);
+        return provider;
+      },
+      shouldFallback: () => true,
+      log: () => {},
+    });
+    const seen = [];
+    const value = await context.discoverySessions.run(async (provider) => {
+      seen.push(provider);
+      if (provider === context.discoveryPrimary) throw new Error("temporary");
+      return 42;
+    });
+    assert.equal(value, 42);
+    assert.deepEqual(seen, [context.discoveryPrimary, context.analysisProvider]);
+    assert.equal(context.discoveryFallback, context.analysisProvider);
+    assert.equal(made.length, 2);
   });
 
   it("surfaces HTTP throttling to the outer retry and failover layers promptly", async () => {
