@@ -134,6 +134,7 @@ sourceKind          dex | launchpad
 token               目标代币地址
 quoteToken          报价代币地址
 pool                池地址
+poolId              非地址型池标识；没有时为 null
 creator             创建者；未知时为 null
 blockOrSlot          EVM 区块号或 Solana slot
 transactionId       EVM tx hash 或 Solana signature
@@ -187,7 +188,7 @@ sourceProvenance     原始来源和解析器版本
 
 - EVM 原始事件：`chainId + txHash + logIndex`。
 - Solana 原始事件：`chain + signature + instructionIndex`。
-- 池业务标识：`chain + venue + pool`。
+- 池业务标识：`chain + venue + poolId/pool`。
 - 代币业务标识：`chain + token`。
 - Telegram 通知标识：`chain + token + alertType + stateVersion`。
 
