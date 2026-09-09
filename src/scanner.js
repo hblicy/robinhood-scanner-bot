@@ -35,6 +35,13 @@ import {
 } from "./candidate-recovery.js";
 
 const DEFAULT_ANALYSIS_CONCURRENCY = 1;
+class NonRetryablePendingCheckError extends Error {
+  constructor(message, options) {
+    super(message, options);
+    this.name = "NonRetryablePendingCheckError";
+  }
+}
+
 const candidates = new CandidateQueue({
   maxSize: SETTINGS.maxQueueSize,
   hasSeen,
@@ -147,6 +154,7 @@ export async function runPendingChecks({
       }
       result.completed += 1;
     } catch (cause) {
+      if (cause instanceof NonRetryablePendingCheckError) throw cause.cause || cause;
       const attempts = Number(check.attempts || 0) + 1;
       const allowedAttempts = Number.isInteger(check.maxAttempts) && check.maxAttempts > 0
         ? check.maxAttempts
@@ -393,6 +401,7 @@ export async function classifyAuxiliaryCandidate(event, {
   try {
     record = await readLaunch(provider, event.token);
   } catch (cause) {
+    if (!isDiscoveryFallbackError(cause)) throw cause;
     return { ...event, pad: "unknown", identity: "unknown", error: safeErrorMessage(cause) };
   }
   const classification = classifyPonsRecord(event.token, record);
@@ -842,10 +851,20 @@ export function createCandidateRecoveryHandler({
       ...structuredClone(check.event),
       observedAt: candidateDependencies.now(),
     };
-    return executeCandidate(() => processWatchCandidate(event, {
-      classifyCandidate,
-      candidateDependencies,
-    }));
+    return executeCandidate(async () => {
+      try {
+        return await processWatchCandidate(event, {
+          classifyCandidate,
+          candidateDependencies,
+        });
+      } catch (cause) {
+        if (isRetryableCandidateFailure(cause)) throw cause;
+        throw new NonRetryablePendingCheckError(
+          `candidate recovery failed unexpectedly for ${event.token}`,
+          { cause }
+        );
+      }
+    });
   };
 }
 

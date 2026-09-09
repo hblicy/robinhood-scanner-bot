@@ -271,6 +271,39 @@ describe("scanner orchestration", () => {
     assert.deepEqual(calls, ["classify", "analyze", "alert", "sellability-recheck", "seen"]);
   });
 
+  it("propagates a programming error from candidate recovery without rescheduling", async () => {
+    const scanner = await import("../src/scanner.js");
+    const event = watchCandidateEvent();
+    const programmingError = new ReferenceError("analysis binding is missing");
+    let rescheduled = 0;
+    const handler = scanner.createCandidateRecoveryHandler({
+      executeCandidate: (work) => work(),
+      classifyCandidate: async () => { throw programmingError; },
+      candidateDependencies: watchCandidateDependencies(),
+    });
+    const check = {
+      id: "candidate-recovery:programming-error",
+      type: "candidate_recovery",
+      event,
+      attempts: 0,
+      nextAttemptAt: 0,
+    };
+
+    await assert.rejects(
+      () => scanner.runPendingChecks({
+        store: {
+          listDueChecks: () => [check],
+          rescheduleCheck: () => { rescheduled += 1; },
+          completeCheck: () => { throw new Error("must not complete"); },
+        },
+        handlers: { candidate_recovery: handler },
+        now: () => 5_000,
+      }),
+      (error) => error === programmingError
+    );
+    assert.equal(rescheduled, 0);
+  });
+
   it("records Pons candidates as seen without generic analysis", async () => {
     const scanner = await import("../src/scanner.js");
     let analyzed = 0;

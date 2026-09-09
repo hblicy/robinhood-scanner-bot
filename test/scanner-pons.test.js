@@ -481,6 +481,15 @@ test("auxiliary discovery classifies LONG only after an explicit non-Pons factor
   });
   assert.equal(unknown.pad, "unknown");
   assert.match(unknown.error, /RPC timeout/);
+
+  const programmingError = new ReferenceError("readLaunch binding is missing");
+  await assert.rejects(
+    () => classifyAuxiliaryCandidate(event, {
+      provider: {},
+      readLaunch: async () => { throw programmingError; },
+    }),
+    (error) => error === programmingError
+  );
 });
 
 test("LONG classification uses quote addresses and ignores display symbols", async () => {
