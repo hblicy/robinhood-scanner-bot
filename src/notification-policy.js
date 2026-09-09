@@ -1,10 +1,10 @@
-const ALLOWED_LIFECYCLE_TYPES = new Set([
-  "hard_kill",
-  "rescued",
-  "green",
-  "market_ready",
-]);
+import { decideLifecycleAlert } from "./core/alert-policy.js";
 
-export function shouldSendLifecycleNotification(entry) {
-  return ALLOWED_LIFECYCLE_TYPES.has(String(entry?.transitionType || ""));
+export function shouldSendLifecycleNotification(entry, { mode = "live" } = {}) {
+  return decideLifecycleAlert({
+    mode,
+    transitionType: String(entry?.transitionType || ""),
+    watchlisted: entry?.watchlisted === true,
+    evidenceConfirmed: entry?.evidenceConfirmed === true,
+  }) !== null;
 }

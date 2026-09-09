@@ -31,6 +31,9 @@ function replaceDiagnosticLock(lockPath, payload) {
 }
 
 export function instanceLockPort(dataDir) {
+  if (typeof dataDir !== "string" || !dataDir.trim()) {
+    throw new Error("instance lock dataDir is required");
+  }
   const digest = createHash("sha256")
     .update(path.resolve(dataDir).toLowerCase())
     .digest();

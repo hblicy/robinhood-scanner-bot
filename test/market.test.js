@@ -77,6 +77,12 @@ describe("selectDexPair", () => {
     });
     assert.equal(selected.pairAddress.toLowerCase(), WRONG_POOL.toLowerCase());
   });
+
+  it("selects only pairs from the active chain", () => {
+    const basePair = { ...pair(EXACT_POOL, 100), chainId: "base" };
+    assert.equal(selectDexPair([basePair], { token: TOKEN, chain: "robinhood" }), null);
+    assert.equal(selectDexPair([basePair], { token: TOKEN, chain: "base" }), basePair);
+  });
 });
 
 describe("summarizeDeployerHistory", () => {

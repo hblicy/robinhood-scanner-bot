@@ -1,5 +1,7 @@
 node_modules/
 .env
-data/
+data/*
+!data/wallets/
+!data/wallets/*.json
 *.log
 .DS_Store

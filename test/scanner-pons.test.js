@@ -118,6 +118,7 @@ test("Telegram failure leaves a critical notification retryable without rolling 
         id: `${EVENT_ID}:hard_kill`,
         eventId: EVENT_ID,
         transitionType: "hard_kill",
+        evidenceConfirmed: true,
         token: TOKEN,
         text: "hard kill",
       }],
@@ -325,13 +326,15 @@ test("a Pons watch iteration scans only finalized blocks and advances its own cu
   const store = tempStore();
   const ranges = [];
   const runtime = { lastBlock: null };
+  const discoveryProvider = { role: "discovery" };
   const result = await runPonsWatchIteration(runtime, {
-    provider: {},
+    provider: discoveryProvider,
     store,
     settings: { ponsConfirmations: 2, lineAMaxAgeMinutes: 20 },
     getBlockNumber: async () => 125,
     findFirstBlockAtOrAfter: async () => 120,
-    scanRange: async (_provider, fromBlock, toBlock) => {
+    scanRange: async (provider, fromBlock, toBlock) => {
+      assert.equal(provider, discoveryProvider);
       ranges.push([fromBlock, toBlock]);
       return [launchEvent()];
     },
@@ -366,6 +369,43 @@ test("a saved Pons cursor schedules realtime checks without raw launch notificat
   const state = store.snapshot();
   assert.equal(Object.keys(state.outbox).length, 0);
   assert.ok(state.pendingChecks[`${EVENT_ID}:line_a`]);
+});
+
+test("a Pons discovery fallback restarts the whole range and commits only the fallback head", async () => {
+  const store = tempStore();
+  store.commitPonsRange({ toBlock: 90, transitions: [] });
+  const runtime = { lastBlock: 90 };
+  const official = { name: "official", head: 102 };
+  const analysis = { name: "analysis", head: 98 };
+  const ranges = [];
+
+  await runPonsWatchIteration(runtime, {
+    provider: official,
+    store,
+    settings: { ponsConfirmations: 0, lineAMaxAgeMinutes: 20 },
+    runDiscoverySession: async (work) => {
+      await assert.rejects(() => work(official), /official logs failed/);
+      return work(analysis);
+    },
+    getBlockNumber: async (provider) => provider.head,
+    findFirstBlockAtOrAfter: async () => 1,
+    scanRange: async (provider, fromBlock, toBlock) => {
+      ranges.push([provider.name, fromBlock, toBlock]);
+      if (provider === official) throw new Error("official logs failed");
+      return [];
+    },
+    readLaunch: async () => {
+      throw new Error("readLaunch should not be called for an empty range");
+    },
+    now: () => 10_000,
+  });
+
+  assert.deepEqual(ranges, [
+    ["official", 91, 102],
+    ["analysis", 91, 98],
+  ]);
+  assert.equal(store.getPonsCursor(), 98);
+  assert.equal(runtime.lastBlock, 98);
 });
 
 test("the Pons watch loop retries the same range after a transient launch read failure", async () => {
@@ -458,16 +498,26 @@ test("LONG classification uses quote addresses and ignores display symbols", asy
 
 test("market heat is persisted without Telegram notifications", async () => {
   const store = tempStore();
+  const discoveryProvider = { role: "discovery" };
   const base = {
-    provider: {},
+    provider: discoveryProvider,
     store,
     now: () => 3_600_000,
-    getBlockNumber: async () => 100,
-    findFirstBlockAtOrAfter: async () => 50,
-    scanRange: async () => [
-      { kind: "token_launched" },
-      { kind: "token_launched" },
-    ],
+    getBlockNumber: async (provider) => {
+      assert.equal(provider, discoveryProvider);
+      return 100;
+    },
+    findFirstBlockAtOrAfter: async (_target, _head, provider) => {
+      assert.equal(provider, discoveryProvider);
+      return 50;
+    },
+    scanRange: async (provider) => {
+      assert.equal(provider, discoveryProvider);
+      return [
+        { kind: "token_launched" },
+        { kind: "token_launched" },
+      ];
+    },
     getTopPools: async () => [{ category: "memecoin" }],
     settings: { highHeatLaunches24h: 20_000, watchlistCapNormal: 3, watchlistCapHighHeat: 1 },
   };

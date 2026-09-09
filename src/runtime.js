@@ -1,10 +1,8 @@
 import { normalizeSellabilityEvidence } from "./sellability.js";
+import { candidateKey } from "./core/candidate.js";
+import { decideCandidateAlert } from "./core/alert-policy.js";
 
-export function candidateKey(event) {
-  return [event?.venue || "unknown", event?.poolId || event?.pool || "no-pool", event?.token || "no-token"]
-    .map((value) => String(value).toLowerCase())
-    .join("|");
-}
+export { candidateKey } from "./core/candidate.js";
 
 function normalizeSellabilityReason(reason) {
   if (reason == null || reason === "") return "none";
@@ -33,14 +31,15 @@ export async function handleCandidate(event, options, dependencies) {
   const sellabilityReason = normalizeSellabilityReason(
     sellability.reason || (sellabilityStatus === "confirmed" ? null : "evidence-unavailable")
   );
-  const shouldAlert =
-    sellabilityStatus === "blocked" ||
-    (sellabilityStatus === "confirmed" && (
-      report.verdict === "green" ||
-      report.verdict === "review" ||
-      report.score >= dependencies.minScore
-    ));
-  if (shouldAlert) await dependencies.alertReport(normalizedReport);
+  const alertDecision = decideCandidateAlert({
+    mode: dependencies.mode ?? "live",
+    sellability: sellabilityStatus,
+    score: report.score,
+    minScore: dependencies.minScore,
+  });
+  normalizedReport.watchlistAdmission = alertDecision?.watchlistAdmission === true;
+  normalizedReport.alertType = alertDecision?.type ?? null;
+  if (alertDecision) await dependencies.alertReport(normalizedReport);
   else {
     const errorSources = [...new Set((report.errorSources || []).map(({ source }) => source))];
     const suffix = errorSources.length ? ` data-errors=${errorSources.join(",")}` : "";

@@ -6,6 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import * as scanner from "../src/index.js";
+import { banner } from "../src/scanner.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SOURCE_EXTENSIONS = new Set([".cjs", ".js", ".mjs"]);
@@ -46,7 +47,19 @@ function sourceText(directory = path.join(root, "src")) {
 describe("push-only command surface", () => {
   it("exposes only scanner scripts", () => {
     const pkg = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
-    assert.deepEqual(Object.keys(pkg.scripts).sort(), ["check", "scan", "start", "test", "watch"]);
+    assert.deepEqual(Object.keys(pkg.scripts).sort(), [
+      "check",
+      "import-wallets",
+      "scan",
+      "start",
+      "test",
+      "watch",
+      "watch:base",
+      "watch:bsc",
+      "watch:ethereum",
+      "watch:robinhood",
+      "watch:solana",
+    ]);
   });
 
   it("collects nested source files deterministically", () => {
@@ -145,5 +158,51 @@ describe("push-only command surface", () => {
       assert.match(output, /Transaction functionality is not included.*commands: watch \| scan \| check <token>/);
       assert.doesNotMatch(output, /MAX_AGE_MINUTES|MAX_QUEUE_SIZE|Robinhood Chain scanner/);
     }
+  });
+
+  it("prints RPC roles without exposing endpoint URLs", () => {
+    const lines = [];
+    const original = console.log;
+    console.log = (line) => lines.push(String(line));
+    try {
+      banner();
+    } finally {
+      console.log = original;
+    }
+    const output = lines.join("\n");
+    assert.match(output, /Discovery RPC|发现 RPC/);
+    assert.match(output, /Analysis RPC|分析 RPC/);
+    assert.doesNotMatch(output, /https?:\/\//);
+  });
+
+  it("recognizes normalized RPC URLs as the same endpoint", () => {
+    const result = spawnSync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "-e",
+        "import('./src/scanner.js').then(({ banner }) => banner())",
+      ],
+      {
+        cwd: root,
+        env: {
+          ...process.env,
+          DISCOVERY_RPC_URL: "https://rpc.example",
+          ANALYSIS_RPC_URL: "https://rpc.example/",
+          RPC_URL: "",
+          POLL_MS: "2500",
+          GECKO_POLL_MS: "15000",
+          MAX_AGE_MINUTES: "30",
+          ONCHAIN_SCAN: "true",
+          GECKO_SCAN: "true",
+          QUOTE_TOKENS: "WETH,ETH,USDG",
+        },
+        encoding: "utf8",
+      }
+    );
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /shared endpoint/);
+    assert.match(result.stdout, /no CU separation/);
+    assert.doesNotMatch(result.stdout, /official primary \+ analysis fallback/);
   });
 });

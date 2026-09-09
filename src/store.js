@@ -2,8 +2,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { DATA_DIR, SETTINGS } from "./config.js";
+import { advanceProgramCursor, createSolanaCursorState } from "./solana/cursor.js";
 
-const STATE_VERSION = 4;
+const STATE_VERSION = 5;
 const MIN_APPLIED_EVENT_TTL_MS = 7 * 86_400_000;
 
 function readJson(dataDir, file, fallback) {
@@ -45,6 +46,7 @@ function validateCursors(cursors) {
   if (cursors.ponsV2 != null && (!Number.isInteger(cursors.ponsV2) || cursors.ponsV2 < 0)) {
     throw new Error("state.json Pons V2 cursor must be a non-negative integer");
   }
+  createSolanaCursorState(cursors.solanaPrograms ?? {});
 }
 
 function validateObject(value, name) {
@@ -68,8 +70,8 @@ export function migrateState(raw) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
     throw new Error("state.json must contain an object");
   }
-  if (![3, STATE_VERSION].includes(raw.schemaVersion)) {
-    throw new Error(`state.json must use schemaVersion 3 or ${STATE_VERSION}`);
+  if (![3, 4, STATE_VERSION].includes(raw.schemaVersion)) {
+    throw new Error(`state.json must use schemaVersion 3, 4, or ${STATE_VERSION}`);
   }
   validateObject(raw.seen, "seen");
   const positions = raw.positions === undefined ? {} : raw.positions;
@@ -78,6 +80,7 @@ export function migrateState(raw) {
   const cursors = {
     onchain: raw.cursors?.onchain ?? null,
     ponsV2: raw.cursors?.ponsV2 ?? null,
+    solanaPrograms: structuredClone(raw.cursors?.solanaPrograms ?? {}),
   };
   validateCursors(cursors);
 
@@ -127,13 +130,17 @@ export function createStore({
   seenTtlMs = 86_400_000,
   appliedEventTtlMs = MIN_APPLIED_EVENT_TTL_MS,
   writeState = atomicWriteState,
+  readOnly = false,
 }) {
+  if (typeof dataDir !== "string" || !dataDir.trim()) {
+    throw new Error("store dataDir is required");
+  }
   let state;
   const stateFile = path.join(dataDir, "state.json");
   if (fs.existsSync(stateFile)) {
     const loaded = readJson(dataDir, "state.json", null);
     state = migrateState(loaded);
-    if (loaded.schemaVersion !== STATE_VERSION) writeState(dataDir, state);
+    if (!readOnly && loaded.schemaVersion !== STATE_VERSION) writeState(dataDir, state);
   } else {
     const seen = readJson(dataDir, "seen.json", {});
     const rawPositions = readJson(dataDir, "positions.json", {});
@@ -150,7 +157,7 @@ export function createStore({
       cursors: { onchain: null, ponsV2: null },
       ...emptyLifecycleState(),
     });
-    writeState(dataDir, state);
+    if (!readOnly) writeState(dataDir, state);
   }
 
   const eventTtlMs = Math.max(MIN_APPLIED_EVENT_TTL_MS, appliedEventTtlMs);
@@ -167,6 +174,7 @@ export function createStore({
   }
 
   function commit(mutator) {
+    if (readOnly) throw new Error("read-only store cannot persist state");
     const draft = structuredClone(state);
     const result = mutator(draft);
     writeState(dataDir, draft);
@@ -248,6 +256,34 @@ export function createStore({
 
     getPonsCursor() {
       return state.cursors.ponsV2 ?? null;
+    },
+
+    getSolanaProgramCursor(programId) {
+      return structuredClone(state.cursors.solanaPrograms[programId] ?? null);
+    },
+
+    commitSolanaProgramRange({ programId, cursor, events = [] }) {
+      if (!Array.isArray(events)) throw new Error("Solana applied events must contain an array");
+      return commit((draft) => {
+        for (const event of events) {
+          const eventId = String(event?.eventId || "");
+          if (!eventId) throw new Error("Solana applied eventId is required");
+          if (!draft.appliedEvents[eventId]) {
+            draft.appliedEvents[eventId] = {
+              appliedAt: now(),
+              slot: Number.isInteger(event.slot) ? event.slot : cursor.slot,
+            };
+          }
+        }
+        const next = advanceProgramCursor(
+          createSolanaCursorState(draft.cursors.solanaPrograms),
+          programId,
+          cursor
+        );
+        draft.cursors.solanaPrograms = next.programs;
+        pruneAppliedEvents(draft);
+        return draft.cursors.solanaPrograms[programId] ?? null;
+      });
     },
 
     getHeat() {
@@ -511,17 +547,27 @@ export function createStore({
   };
 }
 
-let defaultStore;
+const stores = new Map();
+
+export function getStoreFor(dataDir, settings = SETTINGS, { readOnly = false } = {}) {
+  if (typeof dataDir !== "string" || !dataDir.trim()) {
+    throw new Error("store dataDir is required");
+  }
+  const resolved = path.resolve(dataDir);
+  const key = `${resolved}|${readOnly ? "read-only" : "persistent"}`;
+  if (!stores.has(key)) {
+    stores.set(key, createStore({
+      dataDir: resolved,
+      maxSeenEntries: settings.maxSeenEntries || 10_000,
+      seenTtlMs: settings.seenTtlMs || 86_400_000,
+      readOnly,
+    }));
+  }
+  return stores.get(key);
+}
 
 export function getDefaultStore() {
-  if (!defaultStore) {
-    defaultStore = createStore({
-      dataDir: DATA_DIR,
-      maxSeenEntries: SETTINGS.maxSeenEntries || 10_000,
-      seenTtlMs: SETTINGS.seenTtlMs || 86_400_000,
-    });
-  }
-  return defaultStore;
+  return getStoreFor(DATA_DIR, SETTINGS);
 }
 
 export const hasSeen = (...args) => getDefaultStore().hasSeen(...args);

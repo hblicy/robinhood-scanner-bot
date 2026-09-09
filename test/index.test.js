@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   createCandidateRecheckHandler,
   createCandidateRetryScheduler,
+  createWatchRpcBindings,
   initialOnchainCursor,
   processEvents,
   processOnchainRange,
@@ -21,6 +22,135 @@ const CONFIRMED_SELLABILITY = {
 };
 
 describe("scanner orchestration", () => {
+  it("shares one discovery session runner across watch loops and keeps candidate calls on analysis RPC", async () => {
+    const discoveryProvider = { role: "discovery" };
+    const analysisProvider = { role: "analysis" };
+    const calls = [];
+    const bindings = createWatchRpcBindings({
+      analysisProvider,
+      discoverySessions: {
+        run: async (work) => work(discoveryProvider),
+      },
+      getBlockNumberImpl: async (provider) => {
+        calls.push(["head", provider]);
+        return 100;
+      },
+      findFirstBlockAtOrAfterImpl: async (_target, _head, provider) => {
+        calls.push(["boundary", provider]);
+        return 90;
+      },
+      scanOnchainImpl: async (_from, _to, { provider }) => {
+        calls.push(["logs", provider]);
+        return [];
+      },
+      analyzeImpl: async (_event, { provider }) => {
+        calls.push(["analyze", provider]);
+        return {};
+      },
+      classifyCandidateImpl: async (_event, { provider }) => {
+        calls.push(["classify", provider]);
+        return {};
+      },
+    });
+
+    assert.equal(bindings.onchain.runDiscoverySession, bindings.pons.runDiscoverySession);
+    assert.equal(bindings.onchain.runDiscoverySession, bindings.startup.runDiscoverySession);
+    await bindings.onchain.runDiscoverySession(async (provider) => {
+      await bindings.onchain.getBlockNumber(provider);
+      await bindings.onchain.findFirstBlockAtOrAfter(0, 100, provider);
+      await bindings.onchain.scanOnchain(90, 100, provider);
+    });
+    await bindings.analyzeCandidate({});
+    await bindings.classifyCandidate({});
+
+    assert.deepEqual(calls, [
+      ["head", discoveryProvider],
+      ["boundary", discoveryProvider],
+      ["logs", discoveryProvider],
+      ["analyze", analysisProvider],
+      ["classify", analysisProvider],
+    ]);
+  });
+
+  it("retries recoverable startup RPC checks without exiting watch", async () => {
+    const scanner = await import("../src/scanner.js");
+    assert.equal(typeof scanner.runWatchStartupChecks, "function");
+    const transient = new AggregateError([
+      Object.assign(new Error("official timeout"), { code: "TIMEOUT" }),
+      Object.assign(new Error("analysis unavailable"), { code: "NETWORK_ERROR" }),
+    ]);
+    let verifyCalls = 0;
+    let reconcileCalls = 0;
+    const waits = [];
+    const logs = [];
+    await scanner.runWatchStartupChecks({
+      provider: {},
+      store: {},
+      retryMs: 5_000,
+      verify: async () => {
+        verifyCalls += 1;
+        if (verifyCalls === 1) throw transient;
+      },
+      reconcile: async () => { reconcileCalls += 1; },
+      wait: async (ms) => waits.push(ms),
+      logError: (message) => logs.push(message),
+    });
+    assert.equal(verifyCalls, 2);
+    assert.equal(reconcileCalls, 1);
+    assert.deepEqual(waits, [5_000]);
+    assert.equal(logs.length, 1);
+  });
+
+  it("propagates non-recoverable startup validation failures", async () => {
+    const scanner = await import("../src/scanner.js");
+    assert.equal(typeof scanner.runWatchStartupChecks, "function");
+    const permanent = new Error("Pons factory deployment mismatch");
+    const waits = [];
+    await assert.rejects(
+      () => scanner.runWatchStartupChecks({
+        provider: {},
+        store: {},
+        verify: async () => { throw permanent; },
+        reconcile: async () => {},
+        wait: async (ms) => waits.push(ms),
+        logError: () => {},
+      }),
+      (error) => error === permanent
+    );
+    assert.deepEqual(waits, []);
+  });
+
+  it("does not let a stale primary 503 hide the fallback validation failure", async () => {
+    const scanner = await import("../src/scanner.js");
+    const primary = Object.assign(new Error("official unavailable"), {
+      code: "SERVER_ERROR",
+      status: 503,
+    });
+    const fallback = Object.assign(new Error("execution reverted"), {
+      code: "CALL_EXCEPTION",
+    });
+    const permanent = new Error("cannot read Pons factory deployment links", {
+      cause: new AggregateError([primary, fallback]),
+    });
+    const waits = [];
+
+    await assert.rejects(
+      () => scanner.runWatchStartupChecks({
+        provider: {},
+        store: {},
+        verify: async () => { throw permanent; },
+        reconcile: async () => {},
+        wait: async (ms) => {
+          waits.push(ms);
+          throw new Error("unexpected startup retry");
+        },
+        logError: () => {},
+      }),
+      (error) => error === permanent
+    );
+    assert.deepEqual(waits, []);
+  });
+
   it("schedules eligible initial reports idempotently", async () => {
     const checks = new Map();
     const store = {
@@ -219,7 +349,7 @@ describe("scanner orchestration", () => {
     assert.deepEqual(result, { accepted: 2, handled: 1, failed: 1 });
   });
 
-  it("advances the persisted onchain cursor only after a fully successful range", async () => {
+  it("reports range completeness without persisting the cursor itself", async () => {
     const cursorWrites = [];
     const scannedRanges = [];
     const success = await processOnchainRange(
@@ -260,7 +390,7 @@ describe("scanner orchestration", () => {
     assert.equal(failed.complete, false);
     assert.equal(retried.complete, true);
     assert.deepEqual(scannedRanges, [[10, 20], [21, 30], [21, 30]]);
-    assert.deepEqual(cursorWrites, [20, 30]);
+    assert.deepEqual(cursorWrites, []);
   });
 
   it("processes one-shot candidates without persistent or Telegram dependencies", async () => {
@@ -338,6 +468,78 @@ describe("scanner orchestration", () => {
       log: () => {},
     }), /Pons identity unknown.*RPC timeout/);
     assert.equal(analyzed, 0);
+  });
+
+  it("routes one-shot discovery to discovery RPC and analysis to analysis RPC", async () => {
+    const discoveryProvider = { role: "discovery" };
+    const analysisProvider = { role: "analysis" };
+    const token = "0x1000000000000000000000000000000000000001";
+    const event = {
+      source: "onchain",
+      venue: "uniswap-v2",
+      token,
+      pool: "0x2000000000000000000000000000000000000002",
+      createdAt: Date.now(),
+    };
+    let analyzedWith;
+
+    await scanOnce({
+      timeoutMs: 2_000,
+      now: () => Date.now(),
+      settings: {
+        onchainScan: true,
+        geckoScan: false,
+        confirmationBlocks: 0,
+        ponsConfirmations: 0,
+        maxAgeMinutes: 30,
+        maxQueueSize: 10,
+        minScore: 70,
+      },
+      discoveryProvider,
+      analysisProvider,
+      verifyPonsDeployment: async (provider) => assert.equal(provider, discoveryProvider),
+      previewPonsRange: async ({ provider }) => {
+        assert.equal(provider, discoveryProvider);
+        return { transitions: [] };
+      },
+      getBlockNumber: async (provider) => {
+        assert.equal(provider, discoveryProvider);
+        return 100;
+      },
+      findFirstBlockAtOrAfter: async (_target, _head, provider) => {
+        assert.equal(provider, discoveryProvider);
+        return 90;
+      },
+      scanOnchain: async (_from, _to, { provider }) => {
+        assert.equal(provider, discoveryProvider);
+        return [event];
+      },
+      geckoNewPools: async () => [],
+      classifyCandidate: async (candidate, { provider }) => {
+        assert.equal(provider, discoveryProvider);
+        return { ...candidate, identity: "not_pons", pad: "ordinary" };
+      },
+      analyze: async (_candidate, { provider }) => {
+        analyzedWith = provider;
+        return {
+          token,
+          pool: event.pool,
+          poolId: null,
+          venue: event.venue,
+          meta: { symbol: "TEST" },
+          score: 60,
+          verdict: "skip",
+          honeypot: { honeypot: null },
+          sellability: { status: "unknown", reason: "unsupported-venue" },
+          errorSources: [],
+        };
+      },
+      consoleAlert: async () => {},
+      consolePons: async () => {},
+      log: () => {},
+    });
+
+    assert.equal(analyzedWith, analysisProvider);
   });
 
   it("keeps scanOnce free of persistent and Telegram calls", async () => {
@@ -704,6 +906,67 @@ describe("scanner orchestration", () => {
     assert.equal(state.lastBlock, 8);
     assert.equal(result.errors.length, 1);
     assert.match(result.errors[0].message, /gecko unavailable/i);
+  });
+
+  it("restarts onchain discovery from the committed cursor at the fallback head", async () => {
+    const official = { name: "official", head: 102 };
+    const analysis = { name: "analysis", head: 98 };
+    const scans = [];
+    let cursor = 90;
+    const state = { lastBlock: 90, lastGecko: 0 };
+    await runWatchIteration(state, {
+      settings: {
+        onchainScan: true,
+        geckoScan: false,
+        confirmationBlocks: 0,
+        maxAgeMinutes: 30,
+      },
+      runDiscoverySession: async (work) => {
+        await assert.rejects(() => work(official), /official logs failed/);
+        return work(analysis);
+      },
+      now: () => 1_000,
+      getBlockNumber: async (provider) => provider.head,
+      getOnchainCursor: () => cursor,
+      findFirstBlockAtOrAfter: async () => 0,
+      scanOnchain: async (from, to, provider) => {
+        scans.push([provider.name, from, to]);
+        if (provider === official) throw new Error("official logs failed");
+        return [];
+      },
+      handleEvents: async () => ({ accepted: 0, handled: 0, failed: 0 }),
+      setOnchainCursor: (value) => { cursor = value; },
+      geckoNewPools: async () => [],
+      log: () => {},
+    });
+    assert.deepEqual(scans, [["official", 91, 102], ["analysis", 91, 98]]);
+    assert.equal(cursor, 98);
+    assert.equal(state.lastBlock, 98);
+  });
+
+  it("keeps both onchain cursors unchanged when candidate handling fails", async () => {
+    let cursor = 90;
+    const state = { lastBlock: 90, lastGecko: 0 };
+    await runWatchIteration(state, {
+      settings: {
+        onchainScan: true,
+        geckoScan: false,
+        confirmationBlocks: 0,
+        maxAgeMinutes: 30,
+      },
+      runDiscoverySession: (work) => work({ name: "official", head: 92 }),
+      now: () => 1_000,
+      getBlockNumber: async (provider) => provider.head,
+      getOnchainCursor: () => cursor,
+      findFirstBlockAtOrAfter: async () => 0,
+      scanOnchain: async () => [{ token: "0x1" }],
+      handleEvents: async () => ({ accepted: 1, handled: 0, failed: 1 }),
+      setOnchainCursor: (value) => { cursor = value; },
+      geckoNewPools: async () => [],
+      log: () => {},
+    });
+    assert.equal(cursor, 90);
+    assert.equal(state.lastBlock, 90);
   });
 
   it("does not use RPC in watch iterations when onchain discovery is disabled", async () => {

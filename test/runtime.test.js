@@ -339,7 +339,7 @@ describe("scanner runtime", () => {
     assert.equal(alerted, 1);
   });
 
-  it("alerts confirmed sellability on review below the score floor", async () => {
+  it("keeps confirmed review candidates silent below the score floor", async () => {
     let alerted = 0;
     await handleCandidate(
       { venue: "uniswap-v2", pool: "0xA", token: "0x1", createdAt: null, source: "test" },
@@ -363,7 +363,7 @@ describe("scanner runtime", () => {
         log: () => {},
       }
     );
-    assert.equal(alerted, 1);
+    assert.equal(alerted, 0);
   });
 
   it("does not mark a candidate seen when its alert ultimately fails", async () => {
@@ -396,7 +396,7 @@ describe("scanner runtime", () => {
     assert.equal(seen, 0);
   });
 
-  it("marks an alerted confirmed green candidate below the score floor only after delivery succeeds", async () => {
+  it("marks a confirmed green candidate seen without alerting below the score floor", async () => {
     const order = [];
     await handleCandidate(
       { venue: "uniswap-v2", pool: "0xA", token: "0x1", createdAt: null, source: "test" },
@@ -420,7 +420,7 @@ describe("scanner runtime", () => {
         log: () => {},
       }
     );
-    assert.deepEqual(order, ["alert", "seen"]);
+    assert.deepEqual(order, ["seen"]);
   });
 
   it("skips candidates immediately after the configured age window", async () => {

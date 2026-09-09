@@ -6,8 +6,13 @@ import { ADDR } from "../src/config.js";
 import {
   attachBlockTimes,
   bytecodeFlags,
+  createChainRpcContext,
   findFirstBlockAtOrAfter,
+  getAnalysisProvider,
+  getDiscoveryProvider,
   getLogsChunked,
+  getProvider,
+  isDiscoveryFallbackError,
   isRateLimitError,
   readOwnerFromContract,
   readV2PoolFromContract,
@@ -15,6 +20,160 @@ import {
   scanOnchain,
   withRetry,
 } from "../src/chain.js";
+
+describe("dual RPC providers", () => {
+  it("keeps getProvider as the analysis alias and reuses the default shared endpoint", () => {
+    assert.equal(getProvider(), getAnalysisProvider());
+    assert.equal(getDiscoveryProvider(), getAnalysisProvider());
+  });
+
+  it("shares one provider and disables fallback for the same normalized URL", () => {
+    const made = [];
+    const context = createChainRpcContext({
+      chain: {
+        id: 4663,
+        discoveryRpc: "https://rpc.example/x/",
+        analysisRpc: "https://RPC.example:443/x",
+      },
+      settings: {
+        discoveryRpcCups: 150,
+        analysisRpcCups: 250,
+        discoveryRpcCooldownMs: 60_000,
+      },
+      createProvider: (url, cups) => {
+        const provider = { url, cups };
+        made.push(provider);
+        return provider;
+      },
+      shouldFallback: () => true,
+      log: () => {},
+    });
+    assert.equal(made.length, 1);
+    assert.equal(made[0].cups, 150);
+    assert.equal(context.analysisProvider, context.discoveryPrimary);
+    assert.equal(context.discoveryFallback, null);
+  });
+
+  it("restarts a discovery session on the existing analysis provider", async () => {
+    const made = [];
+    const context = createChainRpcContext({
+      chain: {
+        id: 4663,
+        discoveryRpc: "https://official.example",
+        analysisRpc: "https://analysis.example/key",
+      },
+      settings: {
+        discoveryRpcCups: 150,
+        analysisRpcCups: 250,
+        discoveryRpcCooldownMs: 60_000,
+      },
+      createProvider: (url, cups) => {
+        const provider = { url, cups };
+        made.push(provider);
+        return provider;
+      },
+      shouldFallback: () => true,
+      log: () => {},
+    });
+    const seen = [];
+    const value = await context.discoverySessions.run(async (provider) => {
+      seen.push(provider);
+      if (provider === context.discoveryPrimary) throw new Error("temporary");
+      return 42;
+    });
+    assert.equal(value, 42);
+    assert.deepEqual(seen, [context.discoveryPrimary, context.analysisProvider]);
+    assert.equal(context.discoveryFallback, context.analysisProvider);
+    assert.equal(made.length, 2);
+  });
+
+  it("surfaces HTTP throttling to the outer retry and failover layers promptly", async () => {
+    for (const provider of [getDiscoveryProvider(), getAnalysisProvider()]) {
+      const request = await provider._getConnection();
+      assert.equal(request.timeout, 15_000);
+      assert.equal(typeof request.retryFunc, "function");
+      assert.equal(await request.retryFunc(request, { statusCode: 429 }, 0), false);
+    }
+  });
+
+  for (const error of [
+    { status: 408, message: "request timeout" },
+    { status: 503, message: "service unavailable" },
+    { status: 522, message: "connection timed out" },
+    { code: "NETWORK_ERROR", message: "socket closed" },
+    { code: "TIMEOUT", message: "request timed out" },
+    { error: { code: 429, message: "throughput exceeded" } },
+  ]) {
+    it(`falls back for transient discovery failure ${error.status || error.code || "nested"}`, () => {
+      assert.equal(isDiscoveryFallbackError(error), true);
+    });
+  }
+
+  for (const error of [
+    { code: "CALL_EXCEPTION", message: "execution reverted" },
+    { code: "INVALID_ARGUMENT", message: "invalid address" },
+    { code: -32601, message: "method not found" },
+    new Error("token metadata missing"),
+  ]) {
+    it(`does not fall back for permanent discovery failure ${error.code || error.message}`, () => {
+      assert.equal(isDiscoveryFallbackError(error), false);
+    });
+  }
+
+  it("does not fall back for an ethers HTTP 400 server error", () => {
+    const error = Object.assign(new Error("server response 400 Bad Request"), {
+      code: "SERVER_ERROR",
+      info: { responseStatus: "400 Bad Request" },
+    });
+    assert.equal(isDiscoveryFallbackError(error), false);
+  });
+
+  it("keeps an HTTP 400 authoritative over rate-limit message text", () => {
+    const error = Object.assign(new Error("server response 400: too many requests"), {
+      code: "SERVER_ERROR",
+      info: { responseStatus: "400 Bad Request" },
+    });
+    assert.equal(isDiscoveryFallbackError(error), false);
+  });
+
+  for (const error of [
+    { code: "CALL_EXCEPTION", message: "execution reverted: connection disabled" },
+    { code: "INVALID_ARGUMENT", message: "invalid connection option" },
+    { code: -32601, message: "connection method not found" },
+    { code: "CALL_EXCEPTION", message: "execution reverted: rate limit exceeded" },
+    { code: "INVALID_ARGUMENT", message: "invalid throughput option" },
+    { code: -32601, message: "too many requests for unsupported method" },
+  ]) {
+    it(`keeps permanent ${error.code} authoritative over message keywords`, () => {
+      assert.equal(isDiscoveryFallbackError(error), false);
+    });
+  }
+
+  it("falls back for an ethers HTTP 503 server error", () => {
+    const error = Object.assign(new Error("server response 503 Service Unavailable"), {
+      code: "SERVER_ERROR",
+      info: { responseStatus: "503 Service Unavailable" },
+    });
+    assert.equal(isDiscoveryFallbackError(error), true);
+  });
+
+  it("passes one explicit provider through every onchain discovery read", async () => {
+    const discoveryProvider = { role: "discovery" };
+    const seen = [];
+    await scanOnchain(10, 11, {
+      provider: discoveryProvider,
+      getLogs: async (request) => {
+        seen.push(request.provider);
+        return [];
+      },
+      attachTimes: async (events, provider) => {
+        seen.push(provider);
+        return events;
+      },
+    });
+    assert.deepEqual(seen, [discoveryProvider, discoveryProvider, discoveryProvider, discoveryProvider]);
+  });
+});
 
 describe("withRetry backoff", () => {
   it("uses one- and two-second backoff for nested rate limits", async () => {
@@ -33,6 +192,18 @@ describe("withRetry backoff", () => {
     const waits = [];
     const limited = Object.assign(new Error("request failed"), {
       error: { code: 429, message: "request failed" },
+    });
+    await assert.rejects(
+      () => withRetry(async () => { throw limited; }, 3, async (ms) => waits.push(ms)),
+      (error) => error === limited
+    );
+    assert.deepEqual(waits, [1000, 2000]);
+  });
+
+  it("uses rate-limit backoff for a nested HTTP response status 429", async () => {
+    const waits = [];
+    const limited = Object.assign(new Error("request failed"), {
+      response: { status: 429 },
     });
     await assert.rejects(
       () => withRetry(async () => { throw limited; }, 3, async (ms) => waits.push(ms)),
@@ -192,6 +363,30 @@ describe("getLogsChunked", () => {
     assert.equal(logs.length, 12);
     assert.equal(new Set(logs.map(({ blockNumber }) => blockNumber)).size, 12);
     assert.ok(ranges.some(([fromBlock, toBlock]) => fromBlock === toBlock));
+  });
+
+  it("splits the active fallback range error despite a stale primary transport error", async () => {
+    const primaryError = Object.assign(new Error("official unavailable"), {
+      code: "SERVER_ERROR",
+      status: 503,
+    });
+    const logs = await getLogsChunked({
+      address: ADDR.V2_FACTORY,
+      topics: [],
+      fromBlock: 1,
+      toBlock: 2,
+      chunk: 2,
+      provider: {
+        getLogs: async ({ fromBlock, toBlock }) => {
+          if (fromBlock !== toBlock) {
+            throw new AggregateError([primaryError, new Error("block range too large")]);
+          }
+          return [{ blockNumber: fromBlock }];
+        },
+      },
+      retry: async (fn) => fn(),
+    });
+    assert.deepEqual(logs.map(({ blockNumber }) => blockNumber), [1, 2]);
   });
 
   it("enforces one maxLogs budget across ordinary chunks", async () => {

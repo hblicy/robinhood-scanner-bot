@@ -27,6 +27,7 @@ import {
   validateV2PoolBinding,
 } from "./sellability.js";
 import { loadWalletLabels, normalizeWalletSignals } from "./wallet-labels.js";
+import { scoreCandidate } from "./core/score.js";
 
 const BUY_ETH = parseEther("0.001");
 
@@ -89,6 +90,7 @@ function requireCore(source, result, token) {
 const DEFAULT_ANALYZE_DEPENDENCIES = {
   now: Date.now,
   minScore: SETTINGS.minScore,
+  scoreThresholds: SETTINGS,
   readTokenMeta,
   readOwner,
   bytecodeFlags,
@@ -104,122 +106,37 @@ const DEFAULT_ANALYZE_DEPENDENCIES = {
   walletCatalog: loadWalletLabels(path.join(DATA_DIR, "wallet-labels.json")),
 };
 
-export function scoreFromFacts(f) {
-  const checks = [];
-  const red = [];
-  let score = 0;
-
-  const age = Number.isFinite(f.ageMinutes) ? f.ageMinutes : null;
-  if (age === null) {
-    checks.push({ key: "age", ok: false, pts: 0, detail: "年龄未知" });
-  } else if (age <= SETTINGS.maxAgeMinutes) {
-    score += 15;
-    checks.push({ key: "age", ok: true, pts: 15, detail: `${age.toFixed(1)} 分钟` });
-  } else if (age <= SETTINGS.maxAgeMinutes * 2) {
-    score += 5;
-    checks.push({ key: "age", ok: false, pts: 5, detail: `${age.toFixed(1)} 分钟（偏老）` });
-  } else {
-    checks.push({ key: "age", ok: false, pts: 0, detail: `${age.toFixed(1)} 分钟（太老）` });
-    red.push("年龄超过窗口，机会很小");
+export function scoreFromFacts(f, thresholds = SETTINGS) {
+  const scored = scoreCandidate(f, thresholds);
+  const checks = Object.values(scored.categories)
+    .flatMap((category) => category.checks)
+    .map(({ points, ...check }) => ({ ...check, pts: points }));
+  const knownChecks = new Set(checks.map((check) => check.key));
+  const unknownChecks = {
+    age: "年龄未知",
+    social: "社交信息未知",
+    narrative: "叙事信息未知",
+    flow: "成交数据未知",
+    mcap: "市值未知",
+    liq: "流动性未知",
+    holders: "持仓分布未知",
+    creator: "创建者或持仓未知",
+    lp: "LP 状态未知",
+    mint: "增发/权限状态未知",
+    deployer: "创建者历史未知",
+    smart_money: "标签信号未知",
+  };
+  for (const [key, detail] of Object.entries(unknownChecks)) {
+    if (!knownChecks.has(key)) checks.push({ key, ok: false, pts: 0, detail });
   }
-
-  if (f.hasTwitter || f.hasTelegram) {
-    score += 10;
-    checks.push({
-      key: "social",
-      ok: true,
-      pts: 10,
-      detail: [f.hasTwitter ? "Twitter" : null, f.hasTelegram ? "TG" : null].filter(Boolean).join(" + "),
-    });
-  } else {
-    checks.push({ key: "social", ok: false, pts: 0, detail: "无社交链接" });
-    if (SETTINGS.requireSocial) red.push("无 Twitter/TG");
-  }
-
-  if ((f.narrativeHits || []).length) {
-    score += 5;
-    checks.push({ key: "narrative", ok: true, pts: 5, detail: f.narrativeHits.join(", ") });
-  } else {
-    checks.push({ key: "narrative", ok: false, pts: 0, detail: "名称无热门叙事词" });
-  }
-
-  const buys = f.buys5m || 0;
-  const sells = f.sells5m || 0;
-  const vol = f.volume5m || f.volume1h || 0;
-  if (vol > 0 && buys >= sells && buys > 0) {
-    score += 15;
-    checks.push({ key: "flow", ok: true, pts: 15, detail: `买 ${buys} / 卖 ${sells} · $${fmt(vol)}` });
-  } else if (vol > 0) {
-    score += 5;
-    checks.push({ key: "flow", ok: false, pts: 5, detail: `买 ${buys} / 卖 ${sells} · $${fmt(vol)}（卖压偏多）` });
-  } else {
-    checks.push({ key: "flow", ok: false, pts: 0, detail: "几乎无成交" });
-  }
-
-  const mcap = f.mcapUsd || 0;
-  if (mcap > 0 && mcap <= 80_000) {
-    score += 8;
-    checks.push({ key: "mcap", ok: true, pts: 8, detail: `$${fmt(mcap)} 早期低市值` });
-  } else if (mcap > 0 && mcap <= SETTINGS.maxMcapUsd) {
-    score += 4;
-    checks.push({ key: "mcap", ok: true, pts: 4, detail: `$${fmt(mcap)}` });
-  } else if (mcap > SETTINGS.maxMcapUsd) {
-    checks.push({ key: "mcap", ok: false, pts: 0, detail: `$${fmt(mcap)} 已偏高` });
-    red.push("市值已过筛选上限");
-  } else {
-    checks.push({ key: "mcap", ok: false, pts: 0, detail: "市值未知" });
-  }
-
-  const liq = f.liquidityUsd || 0;
-  const ratio = mcap > 0 ? liq / mcap : 0;
-  if (liq >= SETTINGS.minLiquidityUsd && ratio >= 0.2) {
-    score += 10;
-    checks.push({ key: "liq", ok: true, pts: 10, detail: `$${fmt(liq)}  (liq/mc ${(ratio * 100).toFixed(0)}%)` });
-  } else if (liq >= SETTINGS.minLiquidityUsd) {
-    score += 5;
-    checks.push({ key: "liq", ok: false, pts: 5, detail: `$${fmt(liq)}  (liq/mc ${(ratio * 100).toFixed(0)}%，偏薄)` });
-  } else {
-    checks.push({ key: "liq", ok: false, pts: 0, detail: `$${fmt(liq)} 流动性不足` });
-    red.push("流动性过低");
-  }
-
-  const top10 = f.top10Pct ?? null;
-  if (top10 !== null && top10 <= 30) {
-    score += 15;
-    checks.push({ key: "holders", ok: true, pts: 15, detail: `前10 ${top10.toFixed(1)}% · ${f.holderCount ?? "?"} 人` });
-  } else if (top10 !== null && top10 <= SETTINGS.maxTop10Pct) {
-    score += 8;
-    checks.push({ key: "holders", ok: false, pts: 8, detail: `前10 ${top10.toFixed(1)}% · ${f.holderCount ?? "?"} 人` });
-  } else if (top10 !== null) {
-    checks.push({ key: "holders", ok: false, pts: 0, detail: `前10 ${top10.toFixed(1)}% 过度集中` });
-    red.push("持仓过度集中");
-  } else {
-    checks.push({ key: "holders", ok: false, pts: 0, detail: "持仓分布未知" });
-  }
-
-  if (!f.creatorKnown || !Number.isFinite(f.creatorPct)) {
-    checks.push({ key: "creator", ok: false, pts: 0, detail: "创建者或持仓未知" });
-  } else if (f.creatorPct <= 5) {
-    score += 10;
-    checks.push({ key: "creator", ok: true, pts: 10, detail: `创建者持仓 ${f.creatorPct.toFixed(1)}%` });
-  } else if (f.creatorPct <= 15) {
-    score += 4;
-    checks.push({ key: "creator", ok: false, pts: 4, detail: `创建者持仓 ${f.creatorPct.toFixed(1)}%` });
-  } else {
-    checks.push({ key: "creator", ok: false, pts: 0, detail: `创建者持仓 ${f.creatorPct?.toFixed(1)}%` });
-    red.push("创建者持仓过高");
-  }
-
   if (f.honeypot === true) {
     checks.push({ key: "honeypot", ok: false, pts: 0, detail: f.honeypotReason || "无法卖出" });
-    red.push("蜜罐 / 无法卖出");
   } else if (f.honeypot === false) {
-    score += 10;
     const taxesKnown = Number.isFinite(f.buyTaxBps) && Number.isFinite(f.sellTaxBps);
     checks.push({
       key: "honeypot",
       ok: true,
-      pts: 10,
+      pts: 0,
       detail: taxesKnown
         ? `买税 ${f.buyTaxBps}bps / 卖税 ${f.sellTaxBps}bps`
         : "已确认卖出证据，税率未知",
@@ -227,68 +144,6 @@ export function scoreFromFacts(f) {
   } else {
     checks.push({ key: "honeypot", ok: false, pts: 0, detail: "模拟未完成，勿当通过" });
   }
-
-  const tax = Math.max(f.buyTaxBps || 0, f.sellTaxBps || 0);
-  if (tax > SETTINGS.maxTaxBps) red.push(`税率 ${tax}bps 过高`);
-
-  if (f.lpUnknown) {
-    checks.push({ key: "lp", ok: false, pts: 0, detail: "未验证 V2 LP 销毁比例" });
-  } else if (f.lpBurnedPct >= 90) {
-    score += 10;
-    checks.push({ key: "lp", ok: true, pts: 10, detail: `LP 已烧 ${f.lpBurnedPct.toFixed(0)}%` });
-  } else if (f.lpBurnedPct > 0) {
-    score += 3;
-    checks.push({ key: "lp", ok: false, pts: 3, detail: `LP 仅烧 ${f.lpBurnedPct.toFixed(0)}%，可撤池` });
-    red.push("流动性随时可撤");
-  } else {
-    checks.push({ key: "lp", ok: false, pts: 0, detail: "LP 未锁未烧" });
-    red.push("流动性随时可撤");
-  }
-
-  if (!f.privilegesKnown) {
-    checks.push({ key: "mint", ok: false, pts: 0, detail: "增发/权限状态未知" });
-  } else if (f.mintable && f.owner && f.owner !== ZeroAddress) {
-    checks.push({ key: "mint", ok: false, pts: 0, detail: "可铸造且 owner 未放弃" });
-    red.push("可增发");
-  } else {
-    score += 5;
-    checks.push({
-      key: "mint",
-      ok: true,
-      pts: 5,
-      detail: f.mintable ? `可铸造但 owner=${short(f.owner)}` : "未见 mint / owner 已弃",
-    });
-  }
-
-  const prev = f.deployerTokens;
-  if (!f.deployerHistoryKnown || !Number.isFinite(prev)) {
-    checks.push({ key: "deployer", ok: false, pts: 0, detail: "创建者历史未知" });
-  } else if (prev <= 2) {
-    score += 7;
-    checks.push({ key: "deployer", ok: true, pts: 7, detail: `历史发币 ${prev}` });
-  } else if (prev <= SETTINGS.maxDeployerTokens) {
-    score += 2;
-    checks.push({ key: "deployer", ok: false, pts: 2, detail: `历史发币 ${prev}` });
-  } else {
-    checks.push({ key: "deployer", ok: false, pts: 0, detail: `历史发币 ${prev}，像串子` });
-    red.push("创建者大量发垃圾币");
-  }
-
-  const walletCount = f.walletSignalsStatus === "known" && Number.isInteger(f.walletSignalCount)
-    ? Math.max(0, f.walletSignalCount)
-    : 0;
-  const walletPoints = walletCount >= 2 ? 8 : walletCount === 1 ? 5 : 0;
-  score += walletPoints;
-  checks.push({
-    key: "smart_money",
-    ok: walletPoints > 0,
-    pts: walletPoints,
-    detail: f.walletSignalsStatus !== "known"
-      ? "标签未配置"
-      : walletCount > 0 ? `命中 ${walletCount} 个已标记买家` : "未命中",
-  });
-
-  score = Math.max(0, Math.min(100, score) - red.length * 12);
   checks.push({
     key: "market",
     ok: f.marketBound === true,
@@ -296,25 +151,28 @@ export function scoreFromFacts(f) {
     detail: f.marketBound === true ? "市场数据与事件池一致" : "市场数据未绑定事件池",
   });
 
-  const hardFail = red.some((r) => /蜜罐|无法卖出|税率/.test(r));
-  let verdict = "watch";
-  if (hardFail) verdict = "skip";
-  else if (
-    score >= 75 &&
-    red.length === 0 &&
-    f.honeypot === false &&
-    f.marketBound === true &&
-    f.securityComplete === true
-  ) verdict = "green";
-  else if (score >= SETTINGS.minScore) verdict = "review";
-  else verdict = "skip";
-
-  return { score, checks, red, verdict };
+  const red = scored.redFlags;
+  const hardFail = red.some((reason) => /蜜罐|无法卖出|税率/.test(reason));
+  let verdict = "skip";
+  if (!hardFail && scored.score >= 75 && red.length === 0 && f.honeypot === false
+      && f.marketBound === true && f.securityComplete === true) {
+    verdict = "green";
+  } else if (!hardFail && scored.score >= (thresholds.minScore ?? SETTINGS.minScore)) {
+    verdict = "review";
+  }
+  return { ...scored, checks, red, verdict };
 }
 
 export async function analyze(event, overrides = {}) {
   const dependencies = { ...DEFAULT_ANALYZE_DEPENDENCIES, ...overrides };
+  const scoreThresholds = { ...dependencies.scoreThresholds, minScore: dependencies.minScore };
   const token = getAddress(event.token);
+  const profile = dependencies.profile ?? {
+    key: "robinhood",
+    name: "Robinhood Chain",
+    explorer: "https://robinhoodchain.blockscout.com",
+    dexScreenerSlug: "robinhood",
+  };
   const [metaResult, ownerResult, flagsResult, dexResult, bsTokenResult, holdersResult, creatorResult] = await Promise.all([
     settled(dependencies.readTokenMeta(token)),
     settled(dependencies.readOwner(token)),
@@ -339,7 +197,11 @@ export async function analyze(event, overrides = {}) {
   let lpBurnedPct = null;
   let poolInfo = null;
   let poolResult = { ok: true, value: null, error: null };
-  if (event.venue === "uniswap-v2" && event.pool) {
+  const isV2Venue = event.venue === "uniswap-v2"
+    || event.venue === "uniswap-v2-robinhood"
+    || event.venue === "uniswap-v2-ethereum"
+    || event.venue === "pancakeswap-v2-bsc";
+  if (isV2Venue && event.pool) {
     poolResult = await settled(dependencies.readV2Pool(event.pool));
     poolInfo = poolResult.value;
     lpBurnedPct = poolInfo?.burnedPct ?? null;
@@ -406,7 +268,7 @@ export async function analyze(event, overrides = {}) {
     walletSignalsStatus: sellability.walletSignals.status,
     walletSignalCount: sellability.walletSignals.count,
     lpBurnedPct,
-    lpUnknown: event.venue !== "uniswap-v2" || lpBurnedPct === null,
+    lpUnknown: !isV2Venue || lpBurnedPct === null,
     mintable: Boolean(flags.mintable),
     owner,
     privilegesKnown,
@@ -434,10 +296,11 @@ export async function analyze(event, overrides = {}) {
     buyTaxBps: null,
     sellTaxBps: null,
   }, prefilterSellability);
-  const preliminary = scoreFromFacts(buildFacts(prefilterHp, prefilterSellability));
+  const preliminary = scoreFromFacts(buildFacts(prefilterHp, prefilterSellability), scoreThresholds);
   const inspectDeeply = preliminary.score >= Math.max(0, Number(dependencies.minScore) - 10);
   const hpResult = inspectDeeply
     ? await settled(dependencies.honeypotCheck({
+      chain: event.chain ?? "robinhood",
       token,
       quote: event.quote,
       venue: event.venue,
@@ -447,6 +310,7 @@ export async function analyze(event, overrides = {}) {
       pairCreatedAt: dex?.pairCreatedAt ?? event.createdAt ?? null,
       decimals: meta.decimals,
       walletCatalog: dependencies.walletCatalog,
+      metadata: event.metadata ?? {},
     }))
     : { ok: true, value: prefilterHp, error: null, cause: null };
   const hpRaw = hpResult.value || {
@@ -467,10 +331,12 @@ export async function analyze(event, overrides = {}) {
   const facts = buildFacts(hp, sellability);
   const securityComplete = facts.securityComplete;
 
-  const scored = scoreFromFacts(facts);
+  const scored = scoreFromFacts(facts, scoreThresholds);
 
   return {
     ...event,
+    chain: event.chain ?? profile.key,
+    chainName: profile.name,
     token,
     meta: {
       name: meta.name || dex?.name || "",
@@ -504,15 +370,16 @@ export async function analyze(event, overrides = {}) {
     ].filter(([, result]) => !result.ok).map(([source, result]) => ({ source, error: result.error })),
     ...scored,
     links: {
-      dex: dex?.url || `https://dexscreener.com/robinhood/${token}`,
-      explorer: `https://robinhoodchain.blockscout.com/token/${token}`,
-      gmgn: `https://gmgn.ai/robinhood/token/${token}`,
+      dex: dex?.url || `https://dexscreener.com/${profile.dexScreenerSlug}/${token}`,
+      explorer: `${profile.explorer}/token/${token}`,
+      gmgn: `https://gmgn.ai/${profile.dexScreenerSlug}/token/${token}`,
     },
   };
 }
 
 export async function honeypotCheck(
   {
+    chain = "robinhood",
     token,
     quote,
     venue,
@@ -522,6 +389,7 @@ export async function honeypotCheck(
     pairCreatedAt = null,
     decimals,
     walletCatalog,
+    metadata = {},
   },
   dependencies = {}
 ) {
@@ -530,6 +398,41 @@ export async function honeypotCheck(
     count: 0,
     matches: [],
   });
+  if (dependencies.securityRegistry) {
+    const provider = dependencies.provider || getProvider();
+    const readBlockNumber = dependencies.getBlockNumber || (() => provider.getBlockNumber());
+    const analysisBlock = await readBlockNumber();
+    if (!Number.isInteger(analysisBlock) || analysisBlock < 0) throw new Error("analysis block unavailable");
+    const inspected = await dependencies.securityRegistry.inspect({
+      chain,
+      venue,
+      token,
+      quoteToken: quote,
+      pool,
+      blockNumber,
+      blockOrSlot: blockNumber,
+      pairCreatedAt,
+      decimals,
+      metadata,
+      analysisBlock,
+    }, {
+      ...dependencies,
+      provider,
+      walletCatalog,
+    });
+    const sellability = normalizeSellabilityEvidence(inspected, false);
+    return normalizeHoneypotSellability({
+      honeypot: null,
+      complete: false,
+      reason: sellability.reason,
+      buyOk: null,
+      sellOk: null,
+      buyTaxBps: null,
+      sellTaxBps: null,
+      flags: null,
+      sellability,
+    }, sellability, false);
+  }
   let poolAddress;
   try {
     poolAddress = getAddress(pool);
@@ -731,18 +634,6 @@ export async function rawCall(
     if (!isContractCallRevert(err)) throw err;
     return { ok: false, error: msg };
   }
-}
-
-function short(addr) {
-  if (!addr) return "-";
-  return `${addr.slice(0, 6)}…${addr.slice(-4)}`;
-}
-
-function fmt(n) {
-  if (!n) return "0";
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
-  return n.toFixed(0);
 }
 
 export { formatEther, getAddress };

@@ -124,28 +124,31 @@ function sameAddress(a, b) {
   return Boolean(a && b) && String(a).toLowerCase() === String(b).toLowerCase();
 }
 
-export function selectDexPair(pairs, { token, pool = null, quote = null } = {}) {
+export function selectDexPair(pairs, { token, pool = null, quote = null, chain = "robinhood" } = {}) {
+  const sameIdentity = String(chain).toLowerCase() === "solana"
+    ? (left, right) => Boolean(left && right) && String(left) === String(right)
+    : sameAddress;
   const matchingToken = (Array.isArray(pairs) ? pairs : []).filter(
     (p) =>
-      String(p.chainId).toLowerCase() === "robinhood" &&
-      sameAddress(p.baseToken?.address, token)
+      String(p.chainId).toLowerCase() === String(chain).toLowerCase() &&
+      sameIdentity(p.baseToken?.address, token)
   );
   if (pool || quote) {
     if (!pool || !quote) return null;
     return (
       matchingToken.find(
-        (p) => sameAddress(p.pairAddress, pool) && sameAddress(p.quoteToken?.address, quote)
+        (p) => sameIdentity(p.pairAddress, pool) && sameIdentity(p.quoteToken?.address, quote)
       ) || null
     );
   }
   return matchingToken.sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0))[0] || null;
 }
 
-export async function dexScreener(token, binding = {}) {
-  const url = `https://api.dexscreener.com/tokens/v1/${CHAIN.geckoNetwork}/${token}`;
-  const json = await getJson(url);
+export async function dexScreener(token, binding = {}, { profile = CHAIN, fetchImpl = fetch } = {}) {
+  const url = `https://api.dexscreener.com/tokens/v1/${profile.dexScreenerSlug || profile.geckoNetwork}/${token}`;
+  const json = await getJson(url, { fetchImpl });
   const pairs = Array.isArray(json) ? json : json?.pairs || [];
-  const p = selectDexPair(pairs, { token, ...binding });
+  const p = selectDexPair(pairs, { token, chain: profile.dexScreenerSlug || profile.geckoNetwork, ...binding });
   if (!p) return null;
   const socials = p.info?.socials || [];
   const websites = p.info?.websites || [];

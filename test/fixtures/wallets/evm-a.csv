@@ -1,0 +1,6 @@
+address,source,tags,chain,has_detail,has_holdings,note
+0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f,gmgn,"kol,smart_degen",base,true,true,"quoted ""value"", first line
+second line"
+0x5c69bee701ef814a2b6a3edd4b1652cb9cc5aa6f,gmgn,launchpad_smart,bsc,true,false,
+0x9999999999999999999999999999999999999999,gmgn,smart_degen,bsc,true,true,
+not-an-address,gmgn,kol,base,false,false,

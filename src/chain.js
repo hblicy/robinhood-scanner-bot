@@ -1,17 +1,74 @@
-import { Contract, Interface, JsonRpcProvider, id, getAddress, ZeroAddress } from "ethers";
-import { ADDR, CHAIN, isQuote } from "./config.js";
+import { Contract, FetchRequest, Interface, JsonRpcProvider, id, getAddress, ZeroAddress } from "ethers";
+import { ADDR, CHAIN, SETTINGS, isQuote } from "./config.js";
 import { ERC20_ABI, PAIR_V2_ABI, V2_FACTORY_ABI, V3_FACTORY_ABI, V4_PM_ABI } from "./abis.js";
 import { createBudgetedProvider, createRpcScheduler } from "./rpc-budget.js";
+import { createRoleProviders } from "./rpc-endpoints.js";
+import { createDiscoverySessionRunner } from "./discovery-session.js";
 
-let httpProvider;
-const scheduleRpc = createRpcScheduler();
+let rpcContext;
+
+function createBudgetedJsonRpcProvider(url, cuPerSecond, chainId = CHAIN.id) {
+  const request = new FetchRequest(url);
+  request.timeout = 15_000;
+  request.retryFunc = async () => false;
+  const provider = new JsonRpcProvider(request, chainId, { staticNetwork: true });
+  return createBudgetedProvider(provider, createRpcScheduler({ cuPerSecond }));
+}
+
+export function createChainRpcContext({
+  chain,
+  settings,
+  createProvider = null,
+  shouldFallback = isDiscoveryFallbackError,
+  log = console.warn,
+}) {
+  const buildProvider = createProvider ?? ((url, cups) =>
+    createBudgetedJsonRpcProvider(url, cups, chain.id));
+  const providers = createRoleProviders({
+    discoveryUrl: chain.discoveryRpc,
+    analysisUrl: chain.analysisRpc,
+    discoveryCups: settings.discoveryRpcCups,
+    analysisCups: settings.analysisRpcCups,
+    createProvider: buildProvider,
+  });
+  return {
+    analysisProvider: providers.analysis,
+    discoveryPrimary: providers.discoveryPrimary,
+    discoveryFallback: providers.discoveryFallback,
+    discoverySessions: createDiscoverySessionRunner({
+      primary: providers.discoveryPrimary,
+      fallback: providers.discoveryFallback,
+      shouldFallback,
+      cooldownMs: settings.discoveryRpcCooldownMs,
+      log,
+    }),
+  };
+}
+
+function getRpcContext() {
+  if (!rpcContext) {
+    rpcContext = createChainRpcContext({
+      chain: CHAIN,
+      settings: SETTINGS,
+    });
+  }
+  return rpcContext;
+}
+
+export function getAnalysisProvider() {
+  return getRpcContext().analysisProvider;
+}
+
+export function getDiscoveryProvider() {
+  return getRpcContext().discoveryPrimary;
+}
+
+export function getDiscoverySessions() {
+  return getRpcContext().discoverySessions;
+}
 
 export function getProvider() {
-  if (!httpProvider) {
-    const provider = new JsonRpcProvider(CHAIN.rpc, CHAIN.id, { staticNetwork: true });
-    httpProvider = createBudgetedProvider(provider, scheduleRpc);
-  }
-  return httpProvider;
+  return getAnalysisProvider();
 }
 
 export async function withRetry(fn, tries = 3, sleepImpl = sleep) {
@@ -49,6 +106,7 @@ function errorDetails(error) {
     values.push(current);
     if (typeof current === "object") {
       pending.push(current.cause, current.error, current.info?.error);
+      if (Array.isArray(current.errors)) pending.push(...current.errors);
     }
   }
   return values;
@@ -56,14 +114,59 @@ function errorDetails(error) {
 
 export function isRateLimitError(error) {
   return errorDetails(error).some((value) => {
-    const status = Number(typeof value === "object" ? value.status || value.statusCode : NaN);
+    const statuses = typeof value === "object"
+      ? [
+        value.status,
+        value.statusCode,
+        value.response?.status,
+        value.response?.statusCode,
+        value.info?.responseStatus,
+      ].map((status) => Number.parseInt(String(status), 10)).filter(Number.isInteger)
+      : [];
     const rawCode = typeof value === "object" ? value.code : undefined;
     const numericCode = Number(rawCode);
     const code = String(rawCode ?? "");
     const message = typeof value === "string"
       ? value
       : `${value.shortMessage || ""} ${value.message || ""}`;
-    return status === 429 || numericCode === 429 || /rate[_\s-]?limit(?:ed)?|too many requests|compute units?|throughput/i.test(`${code} ${message}`);
+    return statuses.includes(429) || numericCode === 429 || /rate[_\s-]?limit(?:ed)?|too many requests|compute units?|throughput/i.test(`${code} ${message}`);
+  });
+}
+
+export function isDiscoveryFallbackError(error) {
+  const details = errorDetails(error);
+  const statuses = details.flatMap((value) => {
+    if (typeof value !== "object") return [];
+    return [
+      value.status,
+      value.statusCode,
+      value.response?.status,
+      value.response?.statusCode,
+      value.info?.responseStatus,
+    ].map((status) => Number.parseInt(String(status), 10)).filter(Number.isInteger);
+  });
+  if (statuses.some((status) => status === 408 || status === 429 || (status >= 500 && status <= 599))) return true;
+  if (statuses.length > 0) return false;
+
+  const codes = details.map((value) =>
+    typeof value === "object" ? String(value.code || "").toUpperCase() : ""
+  );
+  if (codes.some((code) => [
+    "CALL_EXCEPTION",
+    "INVALID_ARGUMENT",
+    "UNSUPPORTED_OPERATION",
+    "BAD_DATA",
+    "-32601",
+  ].includes(code))) return false;
+  if (codes.some((code) => ["NETWORK_ERROR", "TIMEOUT"].includes(code))) return true;
+  if (isRateLimitError(error)) return true;
+  if (codes.includes("SERVER_ERROR")) return true;
+
+  return details.some((value) => {
+    const message = typeof value === "string"
+      ? value
+      : `${value.shortMessage || ""} ${value.message || ""}`;
+    return /\b(?:timed?\s*out|connection|socket|econnreset|econnrefused|enotfound|eai_again|service unavailable|bad gateway|gateway timeout)\b/i.test(message);
   });
 }
 
@@ -85,7 +188,10 @@ export function isContractCallRevert(error) {
 }
 
 export function isLogRangeLimitError(error) {
-  const details = errorDetails(error);
+  const activeError = error instanceof AggregateError && error.errors.length
+    ? error.errors.at(-1)
+    : error;
+  const details = errorDetails(activeError);
   if (details.some((value) => {
     const status = Number(typeof value === "object" ? value.status || value.statusCode : NaN);
     const code = typeof value === "object" ? String(value.code || "").toUpperCase() : "";
@@ -99,8 +205,8 @@ export function isLogRangeLimitError(error) {
   });
 }
 
-export async function getBlockNumber() {
-  return withRetry(() => getProvider().getBlockNumber());
+export async function getBlockNumber(provider = getAnalysisProvider()) {
+  return withRetry(() => provider.getBlockNumber());
 }
 
 export async function findFirstBlockAtOrAfter(
@@ -247,28 +353,30 @@ function parseFactoryLog(log, venue, parser) {
 export async function scanOnchain(
   fromBlock,
   toBlock,
-  { getLogs = getLogsChunked, attachTimes = attachBlockTimes } = {}
+  {
+    provider = getAnalysisProvider(),
+    getLogs = getLogsChunked,
+    attachTimes = attachBlockTimes,
+  } = {}
 ) {
   const events = [];
+  const common = { fromBlock, toBlock, provider };
 
   const [v2logs, v3logs, v4logs] = await Promise.all([
     getLogs({
+      ...common,
       address: ADDR.V2_FACTORY,
       topics: [TOPICS.pairCreated],
-      fromBlock,
-      toBlock,
     }),
     getLogs({
+      ...common,
       address: ADDR.V3_FACTORY,
       topics: [TOPICS.poolCreated],
-      fromBlock,
-      toBlock,
     }),
     getLogs({
+      ...common,
       address: ADDR.V4_POOL_MANAGER,
       topics: [TOPICS.initialize],
-      fromBlock,
-      toBlock,
     }),
   ]);
 
@@ -314,7 +422,7 @@ export async function scanOnchain(
     if (event) events.push(event);
   }
 
-  return attachTimes(events);
+  return attachTimes(events, provider);
 }
 
 export async function attachBlockTimes(
@@ -338,8 +446,8 @@ export async function attachBlockTimes(
   }));
 }
 
-export async function readTokenMeta(token) {
-  const c = new Contract(token, ERC20_ABI, getProvider());
+export async function readTokenMeta(token, { provider = getProvider() } = {}) {
+  const c = new Contract(token, ERC20_ABI, provider);
   const [name, symbol, decimals, totalSupply] = await Promise.all([
     c.name(),
     c.symbol(),
@@ -363,8 +471,8 @@ export async function readOwnerFromContract(c) {
   }
 }
 
-export async function readOwner(token) {
-  return readOwnerFromContract(new Contract(token, ERC20_ABI, getProvider()));
+export async function readOwner(token, { provider = getProvider() } = {}) {
+  return readOwnerFromContract(new Contract(token, ERC20_ABI, provider));
 }
 
 export async function readV2PoolFromContract(c) {
@@ -389,8 +497,8 @@ export async function readV2PoolFromContract(c) {
   };
 }
 
-export async function readV2Pool(pool) {
-  return readV2PoolFromContract(new Contract(pool, PAIR_V2_ABI, getProvider()));
+export async function readV2Pool(pool, { provider = getProvider() } = {}) {
+  return readV2PoolFromContract(new Contract(pool, PAIR_V2_ABI, provider));
 }
 
 export async function bytecodeFlags(token, { provider = getProvider(), blockTag = null } = {}) {

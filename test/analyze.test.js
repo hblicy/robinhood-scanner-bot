@@ -50,6 +50,21 @@ function dependencies(overrides = {}) {
 }
 
 describe("analyze data completeness", () => {
+  it("uses the selected chain scoring thresholds", async () => {
+    const report = await analyze(event, dependencies({
+      scoreThresholds: {
+        maxAgeMinutes: 3,
+        minLiquidityUsd: 1_500,
+        maxMcapUsd: 1_500_000,
+        maxTop10Pct: 55,
+        maxTaxBps: 500,
+        maxDeployerTokens: 8,
+        requireSocial: false,
+      },
+    }));
+    assert.equal(report.categories.age.points, 5);
+  });
+
   it("skips deep sellability inspection when the preliminary score cannot reach the final floor", async () => {
     let honeypotCalls = 0;
     const report = await analyze(event, dependencies({
@@ -69,14 +84,14 @@ describe("analyze data completeness", () => {
   it("runs deep inspection at exactly ten points below the final floor", async () => {
     let honeypotCalls = 0;
     const report = await analyze(event, dependencies({
-      minScore: 31,
+      minScore: 50,
       honeypotCheck: async () => {
         honeypotCalls += 1;
         return { honeypot: null, complete: false, reason: "insufficient evidence" };
       },
     }));
 
-    assert.equal(report.score, 21);
+    assert.equal(report.score, 40);
     assert.equal(honeypotCalls, 1);
     assert.equal(report.sellability.reason, "insufficient evidence");
   });
@@ -124,7 +139,7 @@ describe("analyze data completeness", () => {
   it("does not use wallet labels to cross the deep-inspection prefilter", async () => {
     let honeypotCalls = 0;
     await analyze(event, dependencies({
-      minScore: 32,
+      minScore: 51,
       walletCatalog: {
         status: "known",
         labels: new Map([[TOKEN.toLowerCase(), { label: "Alpha", type: "kol", source: "manual" }]]),
@@ -217,6 +232,7 @@ describe("analyze data completeness", () => {
       })
     );
     assert.deepEqual(honeypotInput, {
+      chain: "robinhood",
       token: TOKEN,
       quote: QUOTE,
       venue: "uniswap-v2",
@@ -226,6 +242,7 @@ describe("analyze data completeness", () => {
       pairCreatedAt,
       decimals: 18,
       walletCatalog: WALLET_CATALOG,
+      metadata: {},
     });
   });
 
@@ -375,7 +392,7 @@ describe("analyze data completeness", () => {
     assert.ok(report.red.includes("蜜罐 / 无法卖出"));
   });
 
-  it("allows confirmed sellability to preserve the honeypot safety score", async () => {
+  it("keeps confirmed sellability as a gate instead of awarding score points", async () => {
     const report = await analyze(event, dependencies({
       honeypotCheck: async () => ({
         honeypot: false,
@@ -396,7 +413,7 @@ describe("analyze data completeness", () => {
     }));
     const honeypotCheck = report.checks.find((check) => check.key === "honeypot");
     assert.equal(report.facts.honeypot, false);
-    assert.equal(honeypotCheck.pts, 10);
+    assert.equal(honeypotCheck.pts, 0);
     assert.match(honeypotCheck.detail, /税率未知/);
     assert.doesNotMatch(honeypotCheck.detail, /0bps/);
   });

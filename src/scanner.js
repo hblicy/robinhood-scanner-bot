@@ -1,12 +1,21 @@
 import { SETTINGS, CHAIN, DATA_DIR, isQuote } from "./config.js";
 import { getDefaultStore, getOnchainCursor, hasSeen, markSeen, setOnchainCursor } from "./store.js";
-import { findFirstBlockAtOrAfter, getBlockNumber, getProvider, scanOnchain, sleep } from "./chain.js";
+import {
+  findFirstBlockAtOrAfter,
+  getAnalysisProvider,
+  getBlockNumber,
+  getDiscoveryProvider,
+  getDiscoverySessions,
+  isDiscoveryFallbackError,
+  scanOnchain,
+  sleep,
+} from "./chain.js";
 import { geckoNewPools, getDexPaprikaTopPools } from "./market.js";
 import { analyze } from "./analyze.js";
 import { alertReport, formatAlert, formatLifecycleNotification, sendTelegram } from "./notify.js";
 import { CandidateQueue, createSerialExecutor } from "./queue.js";
 import { candidateKey, handleCandidate } from "./runtime.js";
-import { safeErrorMessage, sanitizeRpcUrl } from "./safety.js";
+import { safeErrorMessage } from "./safety.js";
 import { acquireInstanceLock } from "./instance-lock.js";
 import { createPonsTokenState, reducePonsEvent } from "./lifecycle.js";
 import { classifyPonsRecord, readPonsLaunch, scanPonsRange, verifyPonsDeployment } from "./pons.js";
@@ -174,6 +183,7 @@ export function createCandidateRecheckHandler({
   analyze: analyzeCandidate = analyze,
   alertReport: sendAlert = alertReport,
   log = console.log,
+  mode = "live",
 }) {
   if (typeof executeCandidate !== "function") {
     throw new Error("candidate recheck handler requires a shared executor");
@@ -191,6 +201,7 @@ export function createCandidateRecheckHandler({
         now,
         maxAgeMinutes,
         minScore,
+        mode,
         analyze: analyzeCandidate,
         markSeen: () => {},
         alertReport: sendAlert,
@@ -210,6 +221,7 @@ export function createInspectionCheckHandlers({
   now = Date.now,
   inspect = inspectToken,
   timeoutMs = 90_000,
+  notificationsEnabled = true,
 }) {
   const handle = async (check) => {
     const previous = store.snapshot().tokens[String(check.token).toLowerCase()];
@@ -245,12 +257,14 @@ export function createInspectionCheckHandlers({
     let transitionType = null;
     if (previous.monitorState !== "killed" && nextToken.monitorState === "killed") transitionType = "hard_kill";
     else if (previous.marketReady !== true && nextToken.marketReady === true) transitionType = "market_ready";
-    const notification = transitionType ? {
+    const notification = notificationsEnabled && transitionType ? {
       id: `${check.id}:${transitionType}`,
       eventId: check.eventId,
       transitionType,
       token: check.token,
       reason: report.reasons?.[0] || (transitionType === "market_ready" ? "Hook 与双向市场证据已确认" : "风险硬门槛触发"),
+      watchlisted: previous.watchlist === true,
+      evidenceConfirmed: transitionType === "hard_kill",
     } : null;
     if (notification) notification.text = formatLifecycleNotification(notification);
     return { token: check.token, nextToken, notification };
@@ -290,7 +304,7 @@ export async function refreshMarketHeat({
   const at = now();
   const [launchesResult, poolsResult] = await Promise.allSettled([
     (async () => {
-      const head = await readHead();
+      const head = await readHead(provider);
       const from = await findStart(at - 86_400_000, head, provider);
       const events = await scanRange(provider, from, head);
       return events.filter((event) => event.kind === "token_launched").length;
@@ -329,6 +343,7 @@ export async function reconcilePonsWatchlist({
   store,
   readLaunch = readPonsLaunch,
   now = Date.now,
+  notificationsEnabled = true,
 }) {
   const snapshot = store.snapshot();
   let updated = 0;
@@ -347,13 +362,14 @@ export async function reconcilePonsWatchlist({
     };
     const nextToken = reducePonsEvent(previous, event, record, now());
     let notification = null;
-    if (phase === "rescued") {
+    if (notificationsEnabled && phase === "rescued") {
       notification = {
         id: `${event.eventId}:rescued`,
         eventId: event.eventId,
         transitionType: "rescued",
         token: address,
         reason: `Factory getter 阶段为 ${phase}`,
+        watchlisted: previous.watchlist === true,
       };
       notification.text = formatLifecycleNotification(notification);
     }
@@ -465,7 +481,6 @@ export async function processOnchainRange({ from, head }, dependencies) {
   const events = await dependencies.scanOnchain(from, head);
   const result = await dependencies.handleEvents(events);
   const complete = result.failed === 0;
-  if (complete) dependencies.setOnchainCursor(head);
   return { events, ...result, complete };
 }
 
@@ -488,37 +503,52 @@ export async function runWatchIteration(state, dependencies) {
   const runOnchain = async () => {
     if (!settings.onchainScan) return;
     try {
-      const latestHead = await dependencies.getBlockNumber();
-      const safeHead = latestHead - (settings.confirmationBlocks ?? 0);
-      if (safeHead >= 0 && state.lastBlock == null) {
-        state.lastBlock = await initialOnchainCursor({
-          head: safeHead,
-          savedCursor: dependencies.getOnchainCursor(),
-          maxAgeMinutes: settings.maxAgeMinutes,
-          now: dependencies.now,
-          findFirstBlockAtOrAfter: dependencies.findFirstBlockAtOrAfter,
-        });
-      }
-      if (safeHead >= 0 && safeHead > state.lastBlock) {
-        const from = state.lastBlock + 1;
-        const result = await processOnchainRange(
+      const runDiscoverySession = dependencies.runDiscoverySession ??
+        ((work) => work(dependencies.provider));
+      const result = await runDiscoverySession(async (provider) => {
+        const latestHead = await dependencies.getBlockNumber(provider);
+        const safeHead = latestHead - (settings.confirmationBlocks ?? 0);
+        let lastBlock = state.lastBlock;
+        if (safeHead >= 0 && lastBlock == null) {
+          lastBlock = await initialOnchainCursor({
+            head: safeHead,
+            savedCursor: dependencies.getOnchainCursor(),
+            maxAgeMinutes: settings.maxAgeMinutes,
+            now: dependencies.now,
+            findFirstBlockAtOrAfter: (target, head) =>
+              dependencies.findFirstBlockAtOrAfter(target, head, provider),
+          });
+        }
+        if (safeHead < 0 || safeHead <= lastBlock) {
+          return { safeHead, lastBlock, scanned: null };
+        }
+        const from = lastBlock + 1;
+        const scanned = await processOnchainRange(
           { from, head: safeHead },
           {
-            scanOnchain: dependencies.scanOnchain,
+            scanOnchain: (start, end) => dependencies.scanOnchain(start, end, provider),
             handleEvents: (events) => dependencies.handleEvents(
               events.map((event) => ({ ...event, observedAt: event.observedAt ?? observedAt })),
               "onchain"
             ),
-            setOnchainCursor: dependencies.setOnchainCursor,
           }
         );
-        if (result.events.length) {
-          dependencies.log(
-            `onchain ${from}-${safeHead}: ${result.events.length} pools, ${result.accepted} new`
-          );
-        }
-        if (result.complete) state.lastBlock = safeHead;
-        else dependencies.log(`onchain ${from}-${safeHead}: ${result.failed} failed; cursor not advanced`);
+        return { safeHead, lastBlock, from, scanned };
+      });
+      if (result.scanned?.events.length) {
+        dependencies.log(
+          `onchain ${result.from}-${result.safeHead}: ${result.scanned.events.length} pools, ${result.scanned.accepted} new`
+        );
+      }
+      if (result.scanned?.complete) {
+        dependencies.setOnchainCursor(result.safeHead);
+        state.lastBlock = result.safeHead;
+      } else if (result.scanned) {
+        dependencies.log(
+          `onchain ${result.from}-${result.safeHead}: ${result.scanned.failed} failed; cursor not advanced`
+        );
+      } else if (state.lastBlock == null) {
+        state.lastBlock = result.lastBlock;
       }
     } catch (cause) {
       const error = new Error(`onchain watch failed: ${safeErrorMessage(cause)}`, { cause });
@@ -551,32 +581,46 @@ export async function runWatchIteration(state, dependencies) {
 }
 
 export async function runPonsWatchIteration(state, dependencies) {
-  const safeHead = (await dependencies.getBlockNumber()) - (dependencies.settings.ponsConfirmations ?? 0);
-  if (safeHead < 0) return { complete: true, events: [], transitions: [] };
-  let recovering = false;
-  if (state.lastBlock == null) {
-    const savedCursor = dependencies.store.getPonsCursor();
-    recovering = savedCursor == null;
-    const boundary = await dependencies.findFirstBlockAtOrAfter(
-      dependencies.now() - dependencies.settings.lineAMaxAgeMinutes * 60_000,
-      safeHead
-    );
-    state.lastBlock = Math.min(safeHead, Math.max(savedCursor ?? -1, boundary - 1));
-  }
-  if (safeHead <= state.lastBlock) return { complete: true, events: [], transitions: [] };
-  const fromBlock = state.lastBlock + 1;
-  const result = await watchPonsRange({
-    provider: dependencies.provider,
-    store: dependencies.store,
-    fromBlock,
-    toBlock: safeHead,
-    now: dependencies.now,
-    scanRange: dependencies.scanRange,
-    readLaunch: dependencies.readLaunch,
-    scheduleChecks: !recovering,
+  const runDiscoverySession = dependencies.runDiscoverySession
+    ?? ((work) => work(dependencies.provider));
+  const iteration = await runDiscoverySession(async (provider) => {
+    const safeHead = (await dependencies.getBlockNumber(provider))
+      - (dependencies.settings.ponsConfirmations ?? 0);
+    if (safeHead < 0) {
+      return { complete: true, events: [], transitions: [], lastBlock: state.lastBlock };
+    }
+
+    let recovering = false;
+    let lastBlock = state.lastBlock;
+    if (lastBlock == null) {
+      const savedCursor = dependencies.store.getPonsCursor();
+      recovering = savedCursor == null;
+      const boundary = await dependencies.findFirstBlockAtOrAfter(
+        dependencies.now() - dependencies.settings.lineAMaxAgeMinutes * 60_000,
+        safeHead,
+        provider
+      );
+      lastBlock = Math.min(safeHead, Math.max(savedCursor ?? -1, boundary - 1));
+    }
+    if (safeHead <= lastBlock) {
+      return { complete: true, events: [], transitions: [], lastBlock };
+    }
+
+    const result = await watchPonsRange({
+      provider,
+      store: dependencies.store,
+      fromBlock: lastBlock + 1,
+      toBlock: safeHead,
+      now: dependencies.now,
+      scanRange: dependencies.scanRange,
+      readLaunch: dependencies.readLaunch,
+      scheduleChecks: !recovering,
+    });
+    return { ...result, complete: true, lastBlock: safeHead };
   });
-  state.lastBlock = safeHead;
-  return { ...result, complete: true };
+  state.lastBlock = iteration.lastBlock;
+  delete iteration.lastBlock;
+  return iteration;
 }
 
 export async function runPonsWatchLoop(state, dependencies) {
@@ -655,19 +699,101 @@ export async function runReadOnlyCandidates(events, dependencies) {
   return reports;
 }
 
-async function watch() {
+export async function runWatchStartupChecks({
+  provider,
+  runDiscoverySession = (work) => work(provider),
+  store,
+  retryMs = Math.max(SETTINGS.pollMs, 5_000),
+  verify = verifyPonsDeployment,
+  reconcile = reconcilePonsWatchlist,
+  wait = sleep,
+  isRecoverable = isDiscoveryFallbackError,
+  logError = console.error,
+  notificationsEnabled = true,
+}) {
+  while (true) {
+    try {
+      await runDiscoverySession(async (activeProvider) => {
+        await verify(activeProvider);
+        await reconcile({ provider: activeProvider, store, notificationsEnabled });
+      });
+      return;
+    } catch (cause) {
+      if (!isRecoverable(currentFailoverError(cause))) throw cause;
+      logError(`watch startup RPC check failed: ${safeErrorMessage(cause)}; retrying`);
+      await wait(retryMs);
+    }
+  }
+}
+
+export function createWatchRpcBindings({
+  analysisProvider = getAnalysisProvider(),
+  discoverySessions = getDiscoverySessions(),
+  getBlockNumberImpl = getBlockNumber,
+  findFirstBlockAtOrAfterImpl = findFirstBlockAtOrAfter,
+  scanOnchainImpl = scanOnchain,
+  analyzeImpl = analyze,
+  classifyCandidateImpl = classifyAuxiliaryCandidate,
+} = {}) {
+  const runDiscoverySession = (work) => discoverySessions.run(work);
+  const getDiscoveryBlockNumber = (provider) => getBlockNumberImpl(provider);
+  const findDiscoveryStart = (target, head, provider) =>
+    findFirstBlockAtOrAfterImpl(target, head, provider);
+  const scanDiscovery = (from, to, provider) =>
+    scanOnchainImpl(from, to, { provider });
+  const discovery = {
+    runDiscoverySession,
+    getBlockNumber: getDiscoveryBlockNumber,
+    findFirstBlockAtOrAfter: findDiscoveryStart,
+  };
+  return {
+    analysisProvider,
+    startup: { runDiscoverySession },
+    onchain: { ...discovery, scanOnchain: scanDiscovery },
+    pons: { ...discovery },
+    analyzeCandidate: (event) => analyzeImpl(event, { provider: analysisProvider }),
+    classifyCandidate: (event) => classifyCandidateImpl(event, { provider: analysisProvider }),
+  };
+}
+
+function currentFailoverError(error) {
+  const pending = [error];
+  const visited = new Set();
+  while (pending.length) {
+    const current = pending.shift();
+    if (!current || visited.has(current)) continue;
+    if (typeof current === "object") visited.add(current);
+    if (current instanceof AggregateError && current.errors.length) {
+      return currentFailoverError(current.errors.at(-1));
+    }
+    if (typeof current === "object") {
+      pending.push(current.cause, current.error, current.info?.error);
+    }
+  }
+  return error;
+}
+
+export function notificationsEnabledForMode(mode) {
+  if (mode === "live") return true;
+  if (mode === "recovery" || mode === "shadow") return false;
+  throw new Error(`unknown watch mode: ${mode}`);
+}
+
+async function watch({ mode = "live" } = {}) {
+  const notificationsEnabled = notificationsEnabledForMode(mode);
+  const sendCandidateAlert = notificationsEnabled ? alertReport : async () => {};
   const releaseLock = await acquireInstanceLock(DATA_DIR);
   const releaseOnExit = () => releaseLock();
   process.once("exit", releaseOnExit);
   try {
     banner();
-    const provider = getProvider();
+    const rpc = createWatchRpcBindings();
+    const { analysisProvider } = rpc;
     const store = getDefaultStore();
     if (SETTINGS.onchainScan) {
-      await verifyPonsDeployment(provider);
-      await reconcilePonsWatchlist({ provider, store });
+      await runWatchStartupChecks({ ...rpc.startup, store, notificationsEnabled });
     }
-    if (SETTINGS.telegramToken) {
+    if (notificationsEnabled && SETTINGS.telegramToken) {
       await sendTelegram(
         `🤖 Robinhood 扫链机器人已启动\n仅扫描和报警，不包含交易功能\n年龄 &lt; ${SETTINGS.maxAgeMinutes} 分钟 · 最低分 ${SETTINGS.minScore}`
       ).catch((error) => console.error("startup telegram:", safeErrorMessage(error)));
@@ -679,15 +805,20 @@ async function watch() {
     const executeCandidate = createSerialExecutor();
     const scheduleCandidateRecheck = createCandidateRetryScheduler({ store, now: Date.now });
     const pendingHandlers = {
-      ...createInspectionCheckHandlers({ provider, store }),
+      ...createInspectionCheckHandlers({
+        provider: analysisProvider,
+        store,
+        notificationsEnabled,
+      }),
       candidate_recheck: createCandidateRecheckHandler({
         executeCandidate,
         now: Date.now,
         maxAgeMinutes: SETTINGS.maxAgeMinutes,
         minScore: SETTINGS.minScore,
-        analyze,
-        alertReport,
+        analyze: rpc.analyzeCandidate,
+        alertReport: sendCandidateAlert,
         log: console.log,
+        mode,
       }),
     };
     const createSourceProcessor = () => {
@@ -715,7 +846,7 @@ async function watch() {
         DEFAULT_ANALYSIS_CONCURRENCY,
         async (event) => executeCandidate(async () => {
           try {
-            const classified = await classifyAuxiliaryCandidate(event, { provider });
+            const classified = await rpc.classifyCandidate(event);
             if (classified.identity === "pons-v2") return;
             if (classified.identity === "unknown") {
               throw new Error(`Pons identity unknown for ${event.token}: ${classified.error}`);
@@ -727,9 +858,10 @@ async function watch() {
                 now: Date.now,
                 maxAgeMinutes: SETTINGS.maxAgeMinutes,
                 minScore: SETTINGS.minScore,
-                analyze,
+                mode,
+                analyze: analyzeCandidate,
                 markSeen,
-                alertReport,
+                alertReport: sendCandidateAlert,
                 log: console.log,
                 onAnalyzed: scheduleCandidateRecheck,
               }
@@ -742,11 +874,9 @@ async function watch() {
       ));
     };
     const common = {
+        ...rpc.onchain,
         now: Date.now,
-        getBlockNumber,
         getOnchainCursor,
-        findFirstBlockAtOrAfter,
-        scanOnchain,
         setOnchainCursor,
         geckoNewPools,
         log: console.log,
@@ -754,11 +884,9 @@ async function watch() {
     const loops = [];
     if (SETTINGS.onchainScan) {
       loops.push(runPonsWatchLoop(ponsState, {
-        provider,
+        ...rpc.pons,
         store,
         settings: SETTINGS,
-        getBlockNumber,
-        findFirstBlockAtOrAfter,
         scanRange: scanPonsRange,
         readLaunch: readPonsLaunch,
         now: Date.now,
@@ -778,16 +906,18 @@ async function watch() {
         }
       })());
     }
-    loops.push((async () => {
-      while (true) {
-        const result = await drainOutbox({
-          store,
-          send: (text) => sendTelegram(text),
-        });
-        if (result.failed) console.error(`outbox: ${result.failed} notifications exhausted retries`);
-        await sleep(SETTINGS.outboxPollMs);
-      }
-    })());
+    if (notificationsEnabled) {
+      loops.push((async () => {
+        while (true) {
+          const result = await drainOutbox({
+            store,
+            send: (text) => sendTelegram(text),
+          });
+          if (result.failed) console.error(`outbox: ${result.failed} notifications exhausted retries`);
+          await sleep(SETTINGS.outboxPollMs);
+        }
+      })());
+    }
     loops.push((async () => {
       while (true) {
         const result = await runPendingChecks({ store, handlers: pendingHandlers });
@@ -798,7 +928,7 @@ async function watch() {
     if (SETTINGS.dexPaprikaScan) {
       loops.push((async () => {
         while (true) {
-          const heat = await refreshMarketHeat({ provider, store });
+          const heat = await refreshMarketHeat({ provider: analysisProvider, store });
           console.log(`market heat: ${heat.decision} level=${heat.level} launches24h=${heat.launches24h ?? "unknown"} cap=${heat.admissionCap}`);
           const hour = Math.floor(Date.now() / 3_600_000);
           await sleep(Math.max(1, (hour + 1) * 3_600_000 - Date.now()));
@@ -829,7 +959,8 @@ async function watch() {
 async function scanOnceCore(supplied = null) {
   const dependencies = supplied || {
     settings: SETTINGS,
-    provider: getProvider(),
+    discoveryProvider: getDiscoveryProvider(),
+    analysisProvider: getAnalysisProvider(),
     getBlockNumber,
     findFirstBlockAtOrAfter,
     scanOnchain,
@@ -837,7 +968,7 @@ async function scanOnceCore(supplied = null) {
     previewPonsRange,
     verifyPonsDeployment,
     analyze,
-    classifyCandidate: (event) => classifyAuxiliaryCandidate(event, { provider: dependencies.provider }),
+    classifyCandidate: classifyAuxiliaryCandidate,
     consoleAlert: async (report) => {
       console.log(formatAlert(report).replace(/<[^>]+>/g, ""));
     },
@@ -846,6 +977,8 @@ async function scanOnceCore(supplied = null) {
     },
     log: console.log,
   };
+  const discoveryProvider = dependencies.discoveryProvider || dependencies.provider;
+  const analysisProvider = dependencies.analysisProvider || dependencies.provider || getAnalysisProvider();
   const settings = dependencies.settings;
   banner();
   const sources = [];
@@ -854,16 +987,17 @@ async function scanOnceCore(supplied = null) {
       sources.push({
         name: "pons",
         run: async () => {
-          if (dependencies.verifyPonsDeployment) await dependencies.verifyPonsDeployment(dependencies.provider);
-          const latestHead = await dependencies.getBlockNumber();
+          if (dependencies.verifyPonsDeployment) await dependencies.verifyPonsDeployment(discoveryProvider);
+          const latestHead = await dependencies.getBlockNumber(discoveryProvider);
           const head = latestHead - (settings.ponsConfirmations ?? settings.confirmationBlocks ?? 0);
           if (head < 0) return [];
           const from = await dependencies.findFirstBlockAtOrAfter(
             (dependencies.now || Date.now)() - settings.maxAgeMinutes * 60_000,
-            head
+            head,
+            discoveryProvider
           );
           const preview = await dependencies.previewPonsRange({
-            provider: dependencies.provider,
+            provider: discoveryProvider,
             fromBlock: from,
             toBlock: head,
             now: dependencies.now || Date.now,
@@ -875,15 +1009,16 @@ async function scanOnceCore(supplied = null) {
     sources.push({
       name: "onchain",
       run: async () => {
-        const latestHead = await dependencies.getBlockNumber();
+        const latestHead = await dependencies.getBlockNumber(discoveryProvider);
         const head = latestHead - (settings.confirmationBlocks ?? 0);
         if (head < 0) return [];
         const from = await dependencies.findFirstBlockAtOrAfter(
           (dependencies.now || Date.now)() - settings.maxAgeMinutes * 60_000,
-          head
+          head,
+          discoveryProvider
         );
         dependencies.log(`one-shot read-only scan blocks ${from}-${head}`);
-        return dependencies.scanOnchain(from, head);
+        return dependencies.scanOnchain(from, head, { provider: discoveryProvider });
       },
     });
   }
@@ -920,8 +1055,10 @@ async function scanOnceCore(supplied = null) {
       maxAgeMinutes: settings.maxAgeMinutes,
       minScore: settings.minScore,
       now: dependencies.now || Date.now,
-      analyze: dependencies.analyze,
-      classifyCandidate: dependencies.classifyCandidate,
+      analyze: (event) => dependencies.analyze(event, { provider: analysisProvider }),
+      classifyCandidate: dependencies.classifyCandidate
+        ? (event) => dependencies.classifyCandidate(event, { provider: discoveryProvider })
+        : undefined,
       consoleAlert: dependencies.consoleAlert,
       log: dependencies.log,
     });
@@ -961,11 +1098,20 @@ async function checkOne(token, supplied = null) {
   return report;
 }
 
+function normalizedRpcEndpoint(value) {
+  const url = new URL(value);
+  url.hash = "";
+  return url.href;
+}
+
 function banner() {
   console.log("====================================================");
   console.log(" Robinhood Chain scanner");
   console.log(` ${CHAIN.name}  chainId=${CHAIN.id}`);
-  console.log(` RPC ${sanitizeRpcUrl(CHAIN.rpc)}`);
+  const sharedRpc = normalizedRpcEndpoint(CHAIN.discoveryRpc)
+    === normalizedRpcEndpoint(CHAIN.analysisRpc);
+  console.log(` Discovery RPC ${sharedRpc ? "shared endpoint" : "official primary + analysis fallback"}`);
+  console.log(` Analysis RPC configured${sharedRpc ? " (same endpoint; no CU separation)" : ""}`);
   console.log(" mode=push-only");
   console.log(` maxAge=${SETTINGS.maxAgeMinutes}m  minScore=${SETTINGS.minScore}`);
   console.log(" Scanner and alerts only. Transaction functionality is not included.");

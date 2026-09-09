@@ -222,6 +222,23 @@ describe("sellability evidence normalization", () => {
     assert.equal(normalizeSellabilityEvidence(blocked, false).status, SELLABILITY.BLOCKED);
     assert.equal(normalizeSellabilityEvidence(blocked, true).status, SELLABILITY.BLOCKED);
   });
+
+  it("confirms bound observed-sell evidence without inventing V2 ladder samples", () => {
+    const observed = sellabilityResult(SELLABILITY.CONFIRMED, null, {
+      evidenceMode: "observed-sells",
+      bindingVerified: true,
+      meaningfulSellers: 3,
+      quoteOutflowReceipts: 3,
+    });
+
+    const result = normalizeSellabilityEvidence(observed, false);
+    assert.equal(result.status, SELLABILITY.CONFIRMED);
+    assert.equal(result.evidenceMode, "observed-sells");
+    assert.equal(result.bindingVerified, true);
+    assert.equal(result.quoteOutflowReceipts, 3);
+    assert.equal(result.buyerSamples, 0);
+    assert.equal(result.ladderSamples, 0);
+  });
 });
 
 describe("sellability core", () => {
