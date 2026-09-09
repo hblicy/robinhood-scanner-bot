@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { getAddress } from "ethers";
+import { PublicKey } from "@solana/web3.js";
 
 export const REQUIRED_COLUMNS = new Set([
   "address",
@@ -80,7 +81,7 @@ function compareText(left, right) {
 }
 
 export function importWalletCsvFiles(files, { family } = {}) {
-  if (family !== "evm") throw new Error(`unsupported wallet family: ${String(family || "")}`);
+  if (!new Set(["evm", "solana"]).has(family)) throw new Error(`unsupported wallet family: ${String(family || "")}`);
   if (!Array.isArray(files) || files.length === 0) throw new Error("at least one wallet CSV file is required");
   const merged = new Map();
   const rejected = [];
@@ -101,17 +102,19 @@ export function importWalletCsvFiles(files, { family } = {}) {
       const chain = normalizeChain(row[column.chain]);
       let address;
       try {
-        address = getAddress(String(row[column.address] || "").trim());
+        const rawAddress = String(row[column.address] || "").trim();
+        address = family === "evm" ? getAddress(rawAddress) : new PublicKey(rawAddress).toBase58();
       } catch {
         rejected.push({ file: path.basename(file), row: index + 1, reason: "invalid-address" });
         continue;
       }
-      if (!EVM_CHAINS.has(chain)) {
+      const validChain = family === "evm" ? EVM_CHAINS.has(chain) : chain === "solana";
+      if (!validChain) {
         rejected.push({ file: path.basename(file), row: index + 1, reason: "invalid-chain" });
         continue;
       }
 
-      const key = address.toLowerCase();
+      const key = family === "evm" ? address.toLowerCase() : address;
       const current = merged.get(key) || {
         address,
         tags: new Set(),
@@ -134,7 +137,10 @@ export function importWalletCsvFiles(files, { family } = {}) {
       sources: [...wallet.sources].sort(compareText),
       sourceChains: [...wallet.sourceChains].sort(compareText),
     };
-  }).sort((left, right) => compareText(left.address.toLowerCase(), right.address.toLowerCase()));
+  }).sort((left, right) => compareText(
+    family === "evm" ? left.address.toLowerCase() : left.address,
+    family === "evm" ? right.address.toLowerCase() : right.address
+  ));
 
   rejected.sort((left, right) => compareText(left.file, right.file) || left.row - right.row || compareText(left.reason, right.reason));
   return { schemaVersion: 1, family, wallets, rejected };

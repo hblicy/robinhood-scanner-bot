@@ -15,7 +15,7 @@ function parseArgs(argv) {
     else files.push(arg);
   }
   if (!family || !output || files.length === 0) {
-    throw new Error("usage: --family evm --output <file> <csv...>");
+    throw new Error("usage: --family evm|solana --output <file> <csv...>");
   }
   return { family, output, files };
 }
