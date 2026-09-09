@@ -27,8 +27,21 @@ import {
   decideCandidateRecheck,
   shouldScheduleCandidateRecheck,
 } from "./candidate-retry.js";
+import {
+  RetryableCandidateError,
+  activeCandidateRecoveryKeys,
+  createCandidateRecovery,
+  isRetryableCandidateFailure,
+} from "./candidate-recovery.js";
 
 const DEFAULT_ANALYSIS_CONCURRENCY = 1;
+class NonRetryablePendingCheckError extends Error {
+  constructor(message, options) {
+    super(message, options);
+    this.name = "NonRetryablePendingCheckError";
+  }
+}
+
 const candidates = new CandidateQueue({
   maxSize: SETTINGS.maxQueueSize,
   hasSeen,
@@ -141,6 +154,7 @@ export async function runPendingChecks({
       }
       result.completed += 1;
     } catch (cause) {
+      if (cause instanceof NonRetryablePendingCheckError) throw cause.cause || cause;
       const attempts = Number(check.attempts || 0) + 1;
       const allowedAttempts = Number.isInteger(check.maxAttempts) && check.maxAttempts > 0
         ? check.maxAttempts
@@ -387,6 +401,7 @@ export async function classifyAuxiliaryCandidate(event, {
   try {
     record = await readLaunch(provider, event.token);
   } catch (cause) {
+    if (!isDiscoveryFallbackError(cause)) throw cause;
     return { ...event, pad: "unknown", identity: "unknown", error: safeErrorMessage(cause) };
   }
   const classification = classifyPonsRecord(event.token, record);
@@ -756,6 +771,157 @@ export function createWatchRpcBindings({
   };
 }
 
+export function buildWatchCandidateDependencies({
+  rpc,
+  mode = "live",
+  onAnalyzed,
+  alertReport: sendAlert = alertReport,
+  now = Date.now,
+  markSeen: persistSeen = markSeen,
+  log = console.log,
+  settings = SETTINGS,
+}) {
+  if (typeof rpc?.analyzeCandidate !== "function") {
+    throw new Error("watch candidate analysis RPC binding is required");
+  }
+  return {
+    now,
+    maxAgeMinutes: settings.maxAgeMinutes,
+    minScore: settings.minScore,
+    mode,
+    analyze: rpc.analyzeCandidate,
+    markSeen: persistSeen,
+    alertReport: sendAlert,
+    log,
+    onAnalyzed,
+  };
+}
+
+export async function processWatchCandidate(event, {
+  classifyCandidate,
+  candidateDependencies,
+}) {
+  const classified = await classifyCandidate(event);
+  if (classified.identity === "pons-v2") {
+    candidateDependencies.markSeen(candidateKey(event), {
+      token: event.token,
+      skipped: "pons-v2",
+    });
+    return null;
+  }
+  if (classified.identity === "unknown") {
+    throw new RetryableCandidateError(
+      `Pons identity unknown for ${event.token}: ${classified.error || "Factory read failed"}`
+    );
+  }
+  return handleCandidate(classified, { persistSeen: true }, candidateDependencies);
+}
+
+export function createCandidateRecoveryScheduler({ store, recoveryKeys, now = Date.now }) {
+  if (!store || typeof store.scheduleCheck !== "function") {
+    throw new Error("candidate recovery scheduler requires a store");
+  }
+  if (!(recoveryKeys instanceof Set)) {
+    throw new Error("candidate recovery scheduler requires a recovery key set");
+  }
+  return async (event, error) => {
+    const check = store.scheduleCheck(createCandidateRecovery(event, now(), error));
+    recoveryKeys.add(candidateKey(event));
+    return check;
+  };
+}
+
+export function createCandidateRecoveryHandler({
+  executeCandidate,
+  classifyCandidate,
+  candidateDependencies,
+}) {
+  if (typeof executeCandidate !== "function") {
+    throw new Error("candidate recovery handler requires a shared executor");
+  }
+  if (typeof classifyCandidate !== "function") {
+    throw new Error("candidate recovery handler requires a classifier");
+  }
+  if (typeof candidateDependencies?.now !== "function") {
+    throw new Error("candidate recovery handler requires a clock");
+  }
+  return async (check) => {
+    if (!check?.event?.token) throw new Error("candidate recovery check requires an event");
+    const event = {
+      ...structuredClone(check.event),
+      observedAt: candidateDependencies.now(),
+    };
+    return executeCandidate(async () => {
+      try {
+        return await processWatchCandidate(event, {
+          classifyCandidate,
+          candidateDependencies,
+        });
+      } catch (cause) {
+        if (isRetryableCandidateFailure(cause)) throw cause;
+        throw new NonRetryablePendingCheckError(
+          `candidate recovery failed unexpectedly for ${event.token}`,
+          { cause }
+        );
+      }
+    });
+  };
+}
+
+export function createWatchSourceProcessor({
+  maxQueueSize,
+  hasSeen: isSeen,
+  claimed,
+  recoveryKeys,
+  executeCandidate,
+  classifyCandidate,
+  candidateDependencies,
+  scheduleRecovery,
+  logError = console.error,
+}) {
+  const inner = new CandidateQueue({
+    maxSize: maxQueueSize,
+    hasSeen: (key) => isSeen(key) || claimed.has(key) || recoveryKeys.has(key),
+    keyOf: candidateKey,
+  });
+  const queue = {
+    get size() { return inner.size; },
+    get isFull() { return inner.isFull; },
+    enqueue(event) {
+      const accepted = inner.enqueue(event);
+      if (accepted) claimed.add(candidateKey(event));
+      return accepted;
+    },
+    take: () => inner.take(),
+    finish(event) {
+      inner.finish(event);
+      claimed.delete(candidateKey(event));
+    },
+  };
+  return (events) => processEvents(events, queue, () => drainQueue(
+    queue,
+    DEFAULT_ANALYSIS_CONCURRENCY,
+    async (event) => executeCandidate(async () => {
+      try {
+        return await processWatchCandidate(event, { classifyCandidate, candidateDependencies });
+      } catch (error) {
+        if (!isRetryableCandidateFailure(error)) {
+          logError(`handle failed ${event.token} ${safeErrorMessage(error)}`);
+          throw error;
+        }
+        try {
+          await scheduleRecovery(event, error);
+        } catch (persistenceError) {
+          logError(`candidate recovery persistence failed ${event.token} ${safeErrorMessage(persistenceError)}`);
+          throw persistenceError;
+        }
+        logError(`candidate deferred ${event.token} ${safeErrorMessage(error)}`);
+        return null;
+      }
+    })
+  ));
+}
+
 function currentFailoverError(error) {
   const pending = [error];
   const visited = new Set();
@@ -802,8 +968,20 @@ async function watch({ mode = "live" } = {}) {
     const state = { lastBlock: null, lastGecko: 0 };
     const ponsState = { lastBlock: null };
     const claimed = new Set();
+    const recoveryKeys = activeCandidateRecoveryKeys(store.snapshot());
     const executeCandidate = createSerialExecutor();
     const scheduleCandidateRecheck = createCandidateRetryScheduler({ store, now: Date.now });
+    const scheduleCandidateRecovery = createCandidateRecoveryScheduler({
+      store,
+      recoveryKeys,
+      now: Date.now,
+    });
+    const candidateDependencies = buildWatchCandidateDependencies({
+      rpc,
+      mode,
+      onAnalyzed: scheduleCandidateRecheck,
+      alertReport: sendCandidateAlert,
+    });
     const pendingHandlers = {
       ...createInspectionCheckHandlers({
         provider: analysisProvider,
@@ -820,59 +998,23 @@ async function watch({ mode = "live" } = {}) {
         log: console.log,
         mode,
       }),
+      candidate_recovery: createCandidateRecoveryHandler({
+        executeCandidate,
+        classifyCandidate: rpc.classifyCandidate,
+        candidateDependencies,
+      }),
     };
-    const createSourceProcessor = () => {
-      const inner = new CandidateQueue({
-        maxSize: SETTINGS.maxQueueSize,
-        hasSeen: (key) => hasSeen(key) || claimed.has(key),
-        keyOf: candidateKey,
-      });
-      const queue = {
-        get size() { return inner.size; },
-        get isFull() { return inner.isFull; },
-        enqueue(event) {
-          const accepted = inner.enqueue(event);
-          if (accepted) claimed.add(candidateKey(event));
-          return accepted;
-        },
-        take: () => inner.take(),
-        finish(event) {
-          inner.finish(event);
-          claimed.delete(candidateKey(event));
-        },
-      };
-      return (events) => processEvents(events, queue, () => drainQueue(
-        queue,
-        DEFAULT_ANALYSIS_CONCURRENCY,
-        async (event) => executeCandidate(async () => {
-          try {
-            const classified = await rpc.classifyCandidate(event);
-            if (classified.identity === "pons-v2") return;
-            if (classified.identity === "unknown") {
-              throw new Error(`Pons identity unknown for ${event.token}: ${classified.error}`);
-            }
-            await handleCandidate(
-              classified,
-              { persistSeen: true },
-              {
-                now: Date.now,
-                maxAgeMinutes: SETTINGS.maxAgeMinutes,
-                minScore: SETTINGS.minScore,
-                mode,
-                analyze: analyzeCandidate,
-                markSeen,
-                alertReport: sendCandidateAlert,
-                log: console.log,
-                onAnalyzed: scheduleCandidateRecheck,
-              }
-            );
-          } catch (error) {
-            console.error("handle failed", event.token, safeErrorMessage(error));
-            throw error;
-          }
-        })
-      ));
-    };
+    const createSourceProcessor = () => createWatchSourceProcessor({
+      maxQueueSize: SETTINGS.maxQueueSize,
+      hasSeen,
+      claimed,
+      recoveryKeys,
+      executeCandidate,
+      classifyCandidate: rpc.classifyCandidate,
+      candidateDependencies,
+      scheduleRecovery: scheduleCandidateRecovery,
+      logError: console.error,
+    });
     const common = {
         ...rpc.onchain,
         now: Date.now,

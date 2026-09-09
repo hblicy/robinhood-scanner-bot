@@ -73,6 +73,21 @@ describe("createStore", () => {
     assert.equal(saved.nextAttemptAt, 301_000);
   });
 
+  it("preserves the initial pending-check error", () => {
+    const store = openStore(tempDir());
+    store.scheduleCheck({
+      id: "candidate-recovery:test",
+      type: "candidate_recovery",
+      dueAt: 120_000,
+      lastError: "server response 429 Too Many Requests",
+    });
+
+    assert.match(
+      store.snapshot().pendingChecks["candidate-recovery:test"].lastError,
+      /429/
+    );
+  });
+
   it("preserves historical positions and trades as opaque data", () => {
     const dir = tempDir();
     const positions = {
