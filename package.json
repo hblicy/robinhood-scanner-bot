@@ -20,7 +20,12 @@
     "node": ">=18"
   },
   "dependencies": {
+    "@solana/spl-token": "^0.4.15",
+    "@solana/web3.js": "^1.99.0",
     "dotenv": "^16.4.7",
     "ethers": "^6.13.5"
+  },
+  "overrides": {
+    "rpc-websockets": "9.2.0"
   }
 }
