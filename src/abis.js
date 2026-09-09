@@ -32,6 +32,18 @@ export const V4_PM_ABI = [
   "event Initialize(bytes32 indexed id, address indexed currency0, address indexed currency1, uint24 fee, int24 tickSpacing, address hooks, uint160 sqrtPriceX96, int24 tick)",
 ];
 
+export const AERODROME_CLASSIC_FACTORY_ABI = [
+  "event PoolCreated(address indexed token0,address indexed token1,bool indexed stable,address pool,uint256)",
+];
+
+export const AERODROME_SLIPSTREAM_FACTORY_ABI = [
+  "event PoolCreated(address indexed token0,address indexed token1,int24 indexed tickSpacing,address pool)",
+];
+
+export const CLANKER_V4_ABI = [
+  "event TokenCreated(address msgSender,address indexed tokenAddress,address indexed tokenAdmin,string tokenImage,string tokenName,string tokenSymbol,string tokenMetadata,string tokenContext,int24 startingTick,address poolHook,bytes32 poolId,address pairedToken,address locker,address mevModule,uint256 extensionsSupply,address[] extensions)",
+];
+
 export const V2_ROUTER_ABI = [
   "function getAmountsOut(uint256 amountIn, address[] path) view returns (uint256[] amounts)",
 ];
