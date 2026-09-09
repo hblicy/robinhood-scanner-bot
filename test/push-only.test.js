@@ -47,7 +47,7 @@ function sourceText(directory = path.join(root, "src")) {
 describe("push-only command surface", () => {
   it("exposes only scanner scripts", () => {
     const pkg = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
-    assert.deepEqual(Object.keys(pkg.scripts).sort(), ["check", "scan", "start", "test", "watch"]);
+    assert.deepEqual(Object.keys(pkg.scripts).sort(), ["check", "import-wallets", "scan", "start", "test", "watch"]);
   });
 
   it("collects nested source files deterministically", () => {
