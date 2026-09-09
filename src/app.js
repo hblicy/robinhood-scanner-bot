@@ -1,7 +1,9 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { Contract } from "ethers";
 import { createChainRpcContext } from "./chain.js";
+import { bytecodeFlags, readOwner, readTokenMeta, readV2Pool } from "./chain.js";
 import { loadChainConfig } from "./chains/load-chain.js";
 import { getStoreFor } from "./store.js";
 import { instanceLockPort } from "./instance-lock.js";
@@ -12,6 +14,11 @@ import { createPancakeInfinityAdapter, createPancakeV2Adapter, createPancakeV3Ad
 import { createPonsAdapter } from "./venues/evm/pons.js";
 import { createUniswapV2Adapter, createUniswapV3Adapter, createUniswapV4Adapter } from "./venues/evm/uniswap.js";
 import { createEvmSecurityRegistry, createV2SecurityEntry } from "./security/evm/index.js";
+import { analyze, honeypotCheck } from "./analyze.js";
+import { ERC20_ABI } from "./abis.js";
+import { dexScreener } from "./market.js";
+import { formatAlert, sendTelegramWith } from "./notify.js";
+import { loadWalletLabels } from "./wallet-labels.js";
 
 const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const LEGACY_STATE_FILES = Object.freeze([
@@ -55,14 +62,25 @@ function rpcOptions(config) {
 function defaultCommands() {
   return {
     async watch(context) {
+      if (context.config.profile.key !== "robinhood") {
+        const { watchEvm } = await import("./evm/runner.js");
+        return watchEvm(context.config);
+      }
       const { runCommand } = await import("./scanner.js");
       return runCommand("watch", null, context);
     },
     async scan(context) {
+      if (context.config.profile.key !== "robinhood") {
+        const { runEvmRangeOnce } = await import("./evm/runner.js");
+        return runEvmRangeOnce(context.config, { persist: false });
+      }
       const { runCommand } = await import("./scanner.js");
       return runCommand("scan", null, context);
     },
     async check(token, context) {
+      if (context.config.profile.key !== "robinhood") {
+        return context.config.services.check(token);
+      }
       const { runCommand } = await import("./scanner.js");
       return runCommand("check", token, context);
     },
@@ -131,6 +149,60 @@ function securityRegistry(profile) {
   return createEvmSecurityRegistry(entries);
 }
 
+function createServices({ loaded, rpcContext, registry, projectRoot, dependencies }) {
+  if (dependencies.services) return dependencies.services;
+  const provider = rpcContext.analysisProvider;
+  const profile = loaded.profile;
+  const walletCatalog = loadWalletLabels(path.join(projectRoot, "data", "wallets", "evm.json"));
+  const unavailable = (source) => async () => {
+    throw new Error(`${source} adapter unavailable for ${profile.key}`);
+  };
+  const analyzeCandidate = (event) => analyze(event, {
+    minScore: loaded.settings.minScore,
+    scoreThresholds: { ...loaded.settings, maxAgeMinutes: loaded.settings.maxAgeMinutes ?? 30 },
+    profile,
+    readTokenMeta: (token) => readTokenMeta(token, { provider }),
+    readOwner: (token) => readOwner(token, { provider }),
+    bytecodeFlags: (token) => bytecodeFlags(token, { provider }),
+    dexScreener: (token, binding) => dexScreener(token, binding, { profile }),
+    blockscoutToken: unavailable("explorer token"),
+    blockscoutHolders: unavailable("explorer holders"),
+    blockscoutCreator: unavailable("explorer creator"),
+    readV2Pool: (pool) => readV2Pool(pool, { provider }),
+    readCreatorBalance: (token, creator) => new Contract(token, ERC20_ABI, provider).balanceOf(creator),
+    deployerHistory: unavailable("deployer history"),
+    honeypotCheck: (input) => honeypotCheck(input, {
+      provider,
+      securityRegistry: registry,
+    }),
+    walletCatalog,
+  });
+  const alertReport = async (report) => {
+    const text = formatAlert({ ...report, chain: profile.key, chainName: profile.name });
+    console.log(`[${profile.key}] ${report.verdict} ${report.meta.symbol} ${report.score}/100`);
+    return sendTelegramWith(text, {
+      settings: {
+        telegramToken: loaded.telegram.token,
+        telegramChat: loaded.telegram.chatId,
+      },
+    });
+  };
+  return Object.freeze({
+    analyze: analyzeCandidate,
+    alertReport,
+    async check(token) {
+      const [meta, owner, flags] = await Promise.all([
+        readTokenMeta(token, { provider }),
+        readOwner(token, { provider }),
+        bytecodeFlags(token, { provider }),
+      ]);
+      const report = { chain: profile.key, token, meta, owner, flags };
+      console.log(JSON.stringify(report, (_key, value) => typeof value === "bigint" ? value.toString() : value, 2));
+      return report;
+    },
+  });
+}
+
 async function assertRpcChain(rpcContext, expectedChainId) {
   const rawChainId = await rpcContext.analysisProvider.send("eth_chainId", []);
   let actualChainId;
@@ -155,6 +227,8 @@ export function createApp({ chainKey, env = process.env, dependencies = {} }) {
   const store = getStoreFor(dataDir, dependencies.storeSettings);
   const venues = loaded.profile.venues.map((venue) => instantiateVenue(loaded.profile, venue));
   if (chainKey === "robinhood") venues.push(createPonsAdapter());
+  const registry = securityRegistry(loaded.profile);
+  const services = createServices({ loaded, rpcContext, registry, projectRoot, dependencies });
   const commands = dependencies.commands ?? defaultCommands();
   const verifyChain = dependencies.assertChain ?? assertRpcChain;
   const config = Object.freeze({
@@ -168,7 +242,8 @@ export function createApp({ chainKey, env = process.env, dependencies = {} }) {
     lockPort: instanceLockPort(dataDir),
     venues: Object.freeze(venues),
     venueIds: Object.freeze(venues.map((venue) => venue.id)),
-    securityRegistry: securityRegistry(loaded.profile),
+    securityRegistry: registry,
+    services,
   });
   const context = Object.freeze({ config });
   let chainVerification;

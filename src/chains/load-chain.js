@@ -25,6 +25,22 @@ function integer(name, value, { min, max = Number.MAX_SAFE_INTEGER }) {
   return parsed;
 }
 
+function finiteNumber(name, value, { min = 0, max = Number.MAX_VALUE, exclusiveMin = false } = {}) {
+  const parsed = Number(value);
+  const below = exclusiveMin ? parsed <= min : parsed < min;
+  if (!Number.isFinite(parsed) || below || parsed > max) {
+    throw new Error(`${name} must be a finite number between ${min} and ${max}`);
+  }
+  return parsed;
+}
+
+function booleanValue(name, value, fallback) {
+  if (value === undefined || value === "") return fallback;
+  if (/^(1|true|yes|on)$/i.test(String(value))) return true;
+  if (/^(0|false|no|off)$/i.test(String(value))) return false;
+  throw new Error(`${name} must be true or false`);
+}
+
 function rpcUrl(name, value) {
   let parsed;
   try {
@@ -87,6 +103,37 @@ export function loadChainConfig(chainKey, envSource = process.env) {
       ),
     }),
     settings: Object.freeze({
+      maxAgeMinutes: finiteNumber(
+        "MAX_AGE_MINUTES",
+        firstValue(envSource, ["MAX_AGE_MINUTES"], 30),
+        { min: 0, exclusiveMin: true }
+      ),
+      minLiquidityUsd: finiteNumber(
+        "MIN_LIQUIDITY_USD",
+        firstValue(envSource, ["MIN_LIQUIDITY_USD"], 1_500)
+      ),
+      maxMcapUsd: finiteNumber(
+        "MAX_MCAP_USD",
+        firstValue(envSource, ["MAX_MCAP_USD"], 1_500_000),
+        { min: 0, exclusiveMin: true }
+      ),
+      maxTop10Pct: finiteNumber(
+        "MAX_TOP10_PCT",
+        firstValue(envSource, ["MAX_TOP10_PCT"], 55),
+        { min: 0, max: 100 }
+      ),
+      maxTaxBps: finiteNumber(
+        "MAX_TAX_BPS",
+        firstValue(envSource, ["MAX_TAX_BPS"], 500),
+        { min: 0, max: 10_000 }
+      ),
+      maxDeployerTokens: integer(
+        "MAX_DEPLOYER_TOKENS",
+        firstValue(envSource, ["MAX_DEPLOYER_TOKENS"], 8),
+        { min: 0 }
+      ),
+      requireSocial: booleanValue("REQUIRE_SOCIAL", envSource.REQUIRE_SOCIAL, false),
+      pollMs: integer("POLL_MS", firstValue(envSource, ["POLL_MS"], 2_500), { min: 1 }),
       minScore: integer(
         minScoreName,
         firstValue(envSource, [minScoreName, "MIN_SCORE"], 55),

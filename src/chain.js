@@ -446,8 +446,8 @@ export async function attachBlockTimes(
   }));
 }
 
-export async function readTokenMeta(token) {
-  const c = new Contract(token, ERC20_ABI, getProvider());
+export async function readTokenMeta(token, { provider = getProvider() } = {}) {
+  const c = new Contract(token, ERC20_ABI, provider);
   const [name, symbol, decimals, totalSupply] = await Promise.all([
     c.name(),
     c.symbol(),
@@ -471,8 +471,8 @@ export async function readOwnerFromContract(c) {
   }
 }
 
-export async function readOwner(token) {
-  return readOwnerFromContract(new Contract(token, ERC20_ABI, getProvider()));
+export async function readOwner(token, { provider = getProvider() } = {}) {
+  return readOwnerFromContract(new Contract(token, ERC20_ABI, provider));
 }
 
 export async function readV2PoolFromContract(c) {
@@ -497,8 +497,8 @@ export async function readV2PoolFromContract(c) {
   };
 }
 
-export async function readV2Pool(pool) {
-  return readV2PoolFromContract(new Contract(pool, PAIR_V2_ABI, getProvider()));
+export async function readV2Pool(pool, { provider = getProvider() } = {}) {
+  return readV2PoolFromContract(new Contract(pool, PAIR_V2_ABI, provider));
 }
 
 export async function bytecodeFlags(token, { provider = getProvider(), blockTag = null } = {}) {

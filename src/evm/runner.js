@@ -1,0 +1,115 @@
+import { acquireInstanceLock } from "../instance-lock.js";
+import { candidateKey } from "../core/candidate.js";
+import { handleCandidate } from "../runtime.js";
+import {
+  findFirstBlockAtOrAfter,
+  getBlockNumber,
+  getLogsChunked,
+  sleep,
+  withRetry,
+} from "../chain.js";
+import { scanEvmRange } from "./discovery.js";
+
+async function blockTimes({ provider, blockNumbers }) {
+  const values = await Promise.all(blockNumbers.map(async (blockNumber) => {
+    const block = await withRetry(() => provider.getBlock(blockNumber));
+    const timestamp = Number(block?.timestamp);
+    if (!Number.isFinite(timestamp)) throw new Error(`block ${blockNumber} timestamp unavailable`);
+    return [blockNumber, timestamp * 1000];
+  }));
+  return new Map(values);
+}
+
+function defaultDependencies(config) {
+  return {
+    now: Date.now,
+    getBlockNumber,
+    findFirstBlockAtOrAfter,
+    scanRange: ({ provider, fromBlock, toBlock }) => scanEvmRange({
+      chain: config.profile,
+      provider,
+      fromBlock,
+      toBlock,
+      adapters: config.venues.filter((venue) => Array.isArray(venue.addresses)),
+      getLogs: (request) => getLogsChunked(request),
+      getBlockTimes: blockTimes,
+    }),
+    analyze: config.services?.analyze,
+    alertReport: config.services?.alertReport,
+    log: console.log,
+    sleep,
+  };
+}
+
+function validateDependencies(dependencies) {
+  for (const name of ["getBlockNumber", "findFirstBlockAtOrAfter", "scanRange", "analyze", "alertReport", "log"]) {
+    if (typeof dependencies[name] !== "function") throw new Error(`EVM runner dependency ${name} is required`);
+  }
+}
+
+export async function runEvmRangeOnce(config, { persist = true } = {}, supplied = {}) {
+  const dependencies = { ...defaultDependencies(config), ...supplied };
+  validateDependencies(dependencies);
+  const store = config.store;
+  const savedCursor = store.getOnchainCursor();
+  const configuredMode = config.settings.alertMode;
+  const mode = persist && savedCursor == null ? "recovery" : configuredMode;
+
+  return config.rpcContext.discoverySessions.run(async (provider) => {
+    const latest = await dependencies.getBlockNumber(provider);
+    const confirmations = config.settings.confirmationBlocks ?? config.profile.confirmations ?? 0;
+    const head = latest - confirmations;
+    if (head < 0) return { mode, fromBlock: null, toBlock: head, candidates: 0, reports: [] };
+    const maxAgeMinutes = config.settings.maxAgeMinutes ?? 30;
+    const fromBlock = savedCursor == null
+      ? await dependencies.findFirstBlockAtOrAfter(
+        dependencies.now() - maxAgeMinutes * 60_000,
+        head,
+        provider
+      )
+      : savedCursor + 1;
+    if (fromBlock > head) return { mode, fromBlock, toBlock: head, candidates: 0, reports: [] };
+
+    const candidates = await dependencies.scanRange({ provider, fromBlock, toBlock: head, config });
+    const reports = [];
+    for (const candidate of candidates) {
+      const key = candidateKey(candidate);
+      if (persist && store.hasSeen(key)) continue;
+      const event = {
+        ...candidate,
+        source: candidate.source || candidate.sourceKind,
+        quote: candidate.quote ?? candidate.quoteToken,
+        blockNumber: candidate.blockNumber ?? candidate.blockOrSlot,
+      };
+      const report = await handleCandidate(event, { persistSeen: persist }, {
+        now: dependencies.now,
+        maxAgeMinutes,
+        minScore: config.settings.minScore,
+        mode,
+        analyze: dependencies.analyze,
+        markSeen: (seenKey, payload) => store.markSeen(seenKey, payload),
+        alertReport: dependencies.alertReport,
+        log: dependencies.log,
+      });
+      if (report) reports.push(report);
+    }
+    if (persist) store.setOnchainCursor(head);
+    return { mode, fromBlock, toBlock: head, candidates: candidates.length, reports };
+  });
+}
+
+export async function watchEvm(config, supplied = {}) {
+  const dependencies = { ...defaultDependencies(config), ...supplied };
+  const release = await (dependencies.acquireLock ?? acquireInstanceLock)(config.dataDir);
+  try {
+    while (true) {
+      const result = await runEvmRangeOnce(config, { persist: true }, dependencies);
+      dependencies.log(
+        `${config.profile.key}: blocks ${result.fromBlock ?? "none"}-${result.toBlock} candidates=${result.candidates} mode=${result.mode}`
+      );
+      await dependencies.sleep(config.settings.pollMs ?? 5_000);
+    }
+  } finally {
+    await release();
+  }
+}

@@ -167,6 +167,12 @@ export async function analyze(event, overrides = {}) {
   const dependencies = { ...DEFAULT_ANALYZE_DEPENDENCIES, ...overrides };
   const scoreThresholds = { ...dependencies.scoreThresholds, minScore: dependencies.minScore };
   const token = getAddress(event.token);
+  const profile = dependencies.profile ?? {
+    key: "robinhood",
+    name: "Robinhood Chain",
+    explorer: "https://robinhoodchain.blockscout.com",
+    dexScreenerSlug: "robinhood",
+  };
   const [metaResult, ownerResult, flagsResult, dexResult, bsTokenResult, holdersResult, creatorResult] = await Promise.all([
     settled(dependencies.readTokenMeta(token)),
     settled(dependencies.readOwner(token)),
@@ -191,7 +197,11 @@ export async function analyze(event, overrides = {}) {
   let lpBurnedPct = null;
   let poolInfo = null;
   let poolResult = { ok: true, value: null, error: null };
-  if (event.venue === "uniswap-v2" && event.pool) {
+  const isV2Venue = event.venue === "uniswap-v2"
+    || event.venue === "uniswap-v2-robinhood"
+    || event.venue === "uniswap-v2-ethereum"
+    || event.venue === "pancakeswap-v2-bsc";
+  if (isV2Venue && event.pool) {
     poolResult = await settled(dependencies.readV2Pool(event.pool));
     poolInfo = poolResult.value;
     lpBurnedPct = poolInfo?.burnedPct ?? null;
@@ -258,7 +268,7 @@ export async function analyze(event, overrides = {}) {
     walletSignalsStatus: sellability.walletSignals.status,
     walletSignalCount: sellability.walletSignals.count,
     lpBurnedPct,
-    lpUnknown: event.venue !== "uniswap-v2" || lpBurnedPct === null,
+    lpUnknown: !isV2Venue || lpBurnedPct === null,
     mintable: Boolean(flags.mintable),
     owner,
     privilegesKnown,
@@ -325,6 +335,8 @@ export async function analyze(event, overrides = {}) {
 
   return {
     ...event,
+    chain: event.chain ?? profile.key,
+    chainName: profile.name,
     token,
     meta: {
       name: meta.name || dex?.name || "",
@@ -358,9 +370,9 @@ export async function analyze(event, overrides = {}) {
     ].filter(([, result]) => !result.ok).map(([source, result]) => ({ source, error: result.error })),
     ...scored,
     links: {
-      dex: dex?.url || `https://dexscreener.com/robinhood/${token}`,
-      explorer: `https://robinhoodchain.blockscout.com/token/${token}`,
-      gmgn: `https://gmgn.ai/robinhood/token/${token}`,
+      dex: dex?.url || `https://dexscreener.com/${profile.dexScreenerSlug}/${token}`,
+      explorer: `${profile.explorer}/token/${token}`,
+      gmgn: `https://gmgn.ai/${profile.dexScreenerSlug}/token/${token}`,
     },
   };
 }
