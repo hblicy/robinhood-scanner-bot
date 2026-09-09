@@ -370,6 +370,43 @@ test("a saved Pons cursor schedules realtime checks without raw launch notificat
   assert.ok(state.pendingChecks[`${EVENT_ID}:line_a`]);
 });
 
+test("a Pons discovery fallback restarts the whole range and commits only the fallback head", async () => {
+  const store = tempStore();
+  store.commitPonsRange({ toBlock: 90, transitions: [] });
+  const runtime = { lastBlock: 90 };
+  const official = { name: "official", head: 102 };
+  const analysis = { name: "analysis", head: 98 };
+  const ranges = [];
+
+  await runPonsWatchIteration(runtime, {
+    provider: official,
+    store,
+    settings: { ponsConfirmations: 0, lineAMaxAgeMinutes: 20 },
+    runDiscoverySession: async (work) => {
+      await assert.rejects(() => work(official), /official logs failed/);
+      return work(analysis);
+    },
+    getBlockNumber: async (provider) => provider.head,
+    findFirstBlockAtOrAfter: async () => 1,
+    scanRange: async (provider, fromBlock, toBlock) => {
+      ranges.push([provider.name, fromBlock, toBlock]);
+      if (provider === official) throw new Error("official logs failed");
+      return [];
+    },
+    readLaunch: async () => {
+      throw new Error("readLaunch should not be called for an empty range");
+    },
+    now: () => 10_000,
+  });
+
+  assert.deepEqual(ranges, [
+    ["official", 91, 102],
+    ["analysis", 91, 98],
+  ]);
+  assert.equal(store.getPonsCursor(), 98);
+  assert.equal(runtime.lastBlock, 98);
+});
+
 test("the Pons watch loop retries the same range after a transient launch read failure", async () => {
   const { runPonsWatchLoop } = await import("../src/scanner.js");
   assert.equal(typeof runPonsWatchLoop, "function");

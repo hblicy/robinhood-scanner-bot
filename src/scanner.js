@@ -573,32 +573,46 @@ export async function runWatchIteration(state, dependencies) {
 }
 
 export async function runPonsWatchIteration(state, dependencies) {
-  const safeHead = (await dependencies.getBlockNumber()) - (dependencies.settings.ponsConfirmations ?? 0);
-  if (safeHead < 0) return { complete: true, events: [], transitions: [] };
-  let recovering = false;
-  if (state.lastBlock == null) {
-    const savedCursor = dependencies.store.getPonsCursor();
-    recovering = savedCursor == null;
-    const boundary = await dependencies.findFirstBlockAtOrAfter(
-      dependencies.now() - dependencies.settings.lineAMaxAgeMinutes * 60_000,
-      safeHead
-    );
-    state.lastBlock = Math.min(safeHead, Math.max(savedCursor ?? -1, boundary - 1));
-  }
-  if (safeHead <= state.lastBlock) return { complete: true, events: [], transitions: [] };
-  const fromBlock = state.lastBlock + 1;
-  const result = await watchPonsRange({
-    provider: dependencies.provider,
-    store: dependencies.store,
-    fromBlock,
-    toBlock: safeHead,
-    now: dependencies.now,
-    scanRange: dependencies.scanRange,
-    readLaunch: dependencies.readLaunch,
-    scheduleChecks: !recovering,
+  const runDiscoverySession = dependencies.runDiscoverySession
+    ?? ((work) => work(dependencies.provider));
+  const iteration = await runDiscoverySession(async (provider) => {
+    const safeHead = (await dependencies.getBlockNumber(provider))
+      - (dependencies.settings.ponsConfirmations ?? 0);
+    if (safeHead < 0) {
+      return { complete: true, events: [], transitions: [], lastBlock: state.lastBlock };
+    }
+
+    let recovering = false;
+    let lastBlock = state.lastBlock;
+    if (lastBlock == null) {
+      const savedCursor = dependencies.store.getPonsCursor();
+      recovering = savedCursor == null;
+      const boundary = await dependencies.findFirstBlockAtOrAfter(
+        dependencies.now() - dependencies.settings.lineAMaxAgeMinutes * 60_000,
+        safeHead,
+        provider
+      );
+      lastBlock = Math.min(safeHead, Math.max(savedCursor ?? -1, boundary - 1));
+    }
+    if (safeHead <= lastBlock) {
+      return { complete: true, events: [], transitions: [], lastBlock };
+    }
+
+    const result = await watchPonsRange({
+      provider,
+      store: dependencies.store,
+      fromBlock: lastBlock + 1,
+      toBlock: safeHead,
+      now: dependencies.now,
+      scanRange: dependencies.scanRange,
+      readLaunch: dependencies.readLaunch,
+      scheduleChecks: !recovering,
+    });
+    return { ...result, complete: true, lastBlock: safeHead };
   });
-  state.lastBlock = safeHead;
-  return { ...result, complete: true };
+  state.lastBlock = iteration.lastBlock;
+  delete iteration.lastBlock;
+  return iteration;
 }
 
 export async function runPonsWatchLoop(state, dependencies) {
