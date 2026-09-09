@@ -51,6 +51,43 @@ describe("wallet labels", () => {
     assert.equal(loadWalletLabels(file).labels.get(A.toLowerCase()).label, "Alpha");
   });
 
+  it("loads a generated schema-v1 wallet catalog", () => {
+    const catalog = normalizeWalletLabels({
+      schemaVersion: 1,
+      family: "evm",
+      wallets: [{
+        address: A,
+        type: "kol",
+        tags: ["kol", "smart_degen"],
+        sources: ["gmgn"],
+        sourceChains: ["base", "ethereum"],
+      }],
+      rejected: [],
+    });
+    assert.deepEqual(catalog.labels.get(A.toLowerCase()), {
+      label: "kol, smart_degen",
+      type: "kol",
+      source: "gmgn",
+    });
+  });
+
+  it("keeps full catalog tags while bounding the derived display label", () => {
+    const tags = Array.from({ length: 20 }, (_, index) => `long_tag_${index}`);
+    const catalog = normalizeWalletLabels({
+      schemaVersion: 1,
+      family: "evm",
+      wallets: [{
+        address: A,
+        type: "smart_money",
+        tags,
+        sources: ["gmgn"],
+        sourceChains: ["base"],
+      }],
+      rejected: [],
+    });
+    assert.equal(catalog.labels.get(A.toLowerCase()).label.length, 80);
+  });
+
   it("rejects invalid addresses, labels, types, sources and duplicates", () => {
     assert.throws(() => normalizeWalletLabels([{ address: "bad", label: "x", type: "kol" }]), /address/i);
     assert.throws(() => normalizeWalletLabels([{ address: A, label: " ", type: "kol" }]), /label/i);

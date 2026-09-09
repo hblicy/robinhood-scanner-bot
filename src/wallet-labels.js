@@ -2,7 +2,7 @@ import fs from "node:fs";
 import { getAddress } from "ethers";
 
 const TYPES = new Set(["kol", "smart_money"]);
-const SOURCES = new Set(["manual", "debot", "okx"]);
+const SOURCES = new Set(["manual", "debot", "okx", "gmgn"]);
 
 function cleanLabel(value) {
   const label = typeof value === "string" ? value.trim() : "";
@@ -47,7 +47,19 @@ function collectDebot(node, output) {
 
 export function normalizeWalletLabels(value) {
   const labels = new Map();
-  if (Array.isArray(value)) {
+  if (value?.schemaVersion === 1 && Array.isArray(value.wallets)) {
+    for (const entry of value.wallets) {
+      if (!Array.isArray(entry.tags) || !Array.isArray(entry.sources)) {
+        throw new Error("wallet catalog entry requires tags and sources arrays");
+      }
+      addEntry(labels, {
+        address: entry.address,
+        label: [...(entry.tags.join(", ") || entry.type)].slice(0, 80).join(""),
+        type: entry.type,
+        source: entry.sources[0] || "manual",
+      });
+    }
+  } else if (Array.isArray(value)) {
     for (const entry of value) {
       if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
         throw new Error("wallet label entry must be an object");

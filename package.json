@@ -9,6 +9,7 @@
     "watch": "node src/index.js watch",
     "scan": "node src/index.js scan",
     "check": "node src/index.js check",
+    "import-wallets": "node scripts/import-wallet-csv.js",
     "test": "node --test test/*.test.js"
   },
   "engines": {

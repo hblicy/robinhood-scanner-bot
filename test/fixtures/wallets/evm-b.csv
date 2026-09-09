@@ -1,0 +1,4 @@
+address,source,tags,chain,has_detail,has_holdings
+0x5c69bee701ef814a2b6a3edd4b1652cb9cc5aa6f,gmgn,kol,eth,true,true
+0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f,gmgn,"kol,gmgn_go",robinhood,true,true
+0x9999999999999999999999999999999999999999,gmgn,launchpad_smart,base,true,true
