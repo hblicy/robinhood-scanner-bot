@@ -290,6 +290,7 @@ export async function analyze(event, overrides = {}) {
   const inspectDeeply = preliminary.score >= Math.max(0, Number(dependencies.minScore) - 10);
   const hpResult = inspectDeeply
     ? await settled(dependencies.honeypotCheck({
+      chain: event.chain ?? "robinhood",
       token,
       quote: event.quote,
       venue: event.venue,
@@ -299,6 +300,7 @@ export async function analyze(event, overrides = {}) {
       pairCreatedAt: dex?.pairCreatedAt ?? event.createdAt ?? null,
       decimals: meta.decimals,
       walletCatalog: dependencies.walletCatalog,
+      metadata: event.metadata ?? {},
     }))
     : { ok: true, value: prefilterHp, error: null, cause: null };
   const hpRaw = hpResult.value || {
@@ -365,6 +367,7 @@ export async function analyze(event, overrides = {}) {
 
 export async function honeypotCheck(
   {
+    chain = "robinhood",
     token,
     quote,
     venue,
@@ -374,6 +377,7 @@ export async function honeypotCheck(
     pairCreatedAt = null,
     decimals,
     walletCatalog,
+    metadata = {},
   },
   dependencies = {}
 ) {
@@ -382,6 +386,41 @@ export async function honeypotCheck(
     count: 0,
     matches: [],
   });
+  if (dependencies.securityRegistry) {
+    const provider = dependencies.provider || getProvider();
+    const readBlockNumber = dependencies.getBlockNumber || (() => provider.getBlockNumber());
+    const analysisBlock = await readBlockNumber();
+    if (!Number.isInteger(analysisBlock) || analysisBlock < 0) throw new Error("analysis block unavailable");
+    const inspected = await dependencies.securityRegistry.inspect({
+      chain,
+      venue,
+      token,
+      quoteToken: quote,
+      pool,
+      blockNumber,
+      blockOrSlot: blockNumber,
+      pairCreatedAt,
+      decimals,
+      metadata,
+      analysisBlock,
+    }, {
+      ...dependencies,
+      provider,
+      walletCatalog,
+    });
+    const sellability = normalizeSellabilityEvidence(inspected, false);
+    return normalizeHoneypotSellability({
+      honeypot: null,
+      complete: false,
+      reason: sellability.reason,
+      buyOk: null,
+      sellOk: null,
+      buyTaxBps: null,
+      sellTaxBps: null,
+      flags: null,
+      sellability,
+    }, sellability, false);
+  }
   let poolAddress;
   try {
     poolAddress = getAddress(pool);

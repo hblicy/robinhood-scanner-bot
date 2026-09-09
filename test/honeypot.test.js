@@ -45,6 +45,41 @@ const confirmedSellability = async () => ({
 });
 
 describe("honeypotCheck", () => {
+  it("routes non-V2 candidates through the exact EVM security registry", async () => {
+    let inspected;
+    const result = await honeypotCheck({
+      ...input,
+      chain: "base",
+      venue: "uniswap-v3-base",
+      metadata: { fee: 3000 },
+    }, {
+      provider: { getBlockNumber: async () => 77 },
+      securityRegistry: {
+        inspect: async (candidate, options) => {
+          inspected = { candidate, options };
+          return {
+            status: "confirmed",
+            reason: null,
+            buyerSamples: 0,
+            ladderSamples: 0,
+            meaningfulSellers: 3,
+            details: [],
+            evidenceMode: "observed-sells",
+            bindingVerified: true,
+            quoteOutflowReceipts: 3,
+          };
+        },
+      },
+    });
+
+    assert.equal(inspected.candidate.chain, "base");
+    assert.equal(inspected.candidate.quoteToken, input.quote);
+    assert.deepEqual(inspected.candidate.metadata, { fee: 3000 });
+    assert.equal(inspected.candidate.analysisBlock, 77);
+    assert.equal(result.sellability.status, "confirmed");
+    assert.equal(result.honeypot, false);
+  });
+
   it("passes the injected wallet catalog into sellability inspection", async () => {
     const walletCatalog = { status: "known", labels: new Map() };
     let receivedCatalog;

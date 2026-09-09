@@ -28,8 +28,8 @@ function sameAddress(a, b) {
   return typeof a === "string" && typeof b === "string" && a.toLowerCase() === b.toLowerCase();
 }
 
-function excludedAddress(address, pool) {
-  return [pool, ADDR.V2_ROUTER, ADDR.V3_ROUTER, ADDR.V4_POOL_MANAGER, ADDR.ZERO, ADDR.DEAD]
+function excludedAddress(address, pool, extra = []) {
+  return [pool, ADDR.V2_ROUTER, ADDR.V3_ROUTER, ADDR.V4_POOL_MANAGER, ADDR.ZERO, ADDR.DEAD, ...extra]
     .some((value) => sameAddress(address, value));
 }
 
@@ -87,8 +87,10 @@ async function readBalance(provider, token, address, head, retry) {
   return BigInt(transferInterface.decodeFunctionResult("balanceOf", data)[0]);
 }
 
-function normalizedQuote(quote) {
-  return sameAddress(quote, ADDR.ZERO) || sameAddress(quote, ADDR.NATIVE) ? ADDR.WETH : quote;
+function normalizedQuote(quote, dependencies = {}) {
+  const nativeAddresses = dependencies.nativeAddresses ?? [ADDR.ZERO, ADDR.NATIVE];
+  const wrappedNative = dependencies.wrappedNative ?? ADDR.WETH;
+  return nativeAddresses.some((value) => sameAddress(quote, value)) ? wrappedNative : quote;
 }
 
 function decodeAddressResult(iface, functionName, data, address) {
@@ -105,13 +107,13 @@ async function readAddressFunction(provider, to, iface, functionName, args, head
   return decodeAddressResult(iface, functionName, result, to);
 }
 
-async function bindV2Pool(context, provider, head, retry) {
+async function bindV2Pool(context, provider, head, retry, dependencies = {}) {
   let token;
   let quote;
   let pool;
   try {
     token = getAddress(context.token);
-    quote = getAddress(normalizedQuote(context.quote));
+    quote = getAddress(normalizedQuote(context.quote, dependencies));
     pool = getAddress(context.pool);
   } catch {
     return null;
@@ -119,7 +121,7 @@ async function bindV2Pool(context, provider, head, retry) {
 
   const factoryPair = await readAddressFunction(
     provider,
-    ADDR.V2_FACTORY,
+    dependencies.factoryAddress ?? ADDR.V2_FACTORY,
     factoryInterface,
     "getPair",
     [token, quote],
@@ -139,14 +141,14 @@ async function bindV2Pool(context, provider, head, retry) {
   return { token, quote, pool, tokenIsToken0, analysisBlock: head };
 }
 
-function matchesBindingContext(context, binding, head) {
+function matchesBindingContext(context, binding, head, dependencies = {}) {
   if (!Number.isInteger(binding?.analysisBlock) || binding.analysisBlock < 0 || binding.analysisBlock !== head) {
     return false;
   }
   if (typeof binding.tokenIsToken0 !== "boolean") return false;
   try {
     return sameAddress(getAddress(binding.token), getAddress(context?.token)) &&
-      sameAddress(getAddress(binding.quote), getAddress(normalizedQuote(context?.quote))) &&
+      sameAddress(getAddress(binding.quote), getAddress(normalizedQuote(context?.quote, dependencies))) &&
       sameAddress(getAddress(binding.pool), getAddress(context?.pool));
   } catch {
     return false;
@@ -154,7 +156,8 @@ function matchesBindingContext(context, binding, head) {
 }
 
 export async function validateV2PoolBinding(context, dependencies = {}) {
-  if (context?.venue !== "uniswap-v2" || !context?.pool) {
+  const expectedVenue = dependencies.expectedVenue ?? "uniswap-v2";
+  if (context?.venue !== expectedVenue || !context?.pool) {
     return { ok: false, reason: "unsupported-venue", binding: null, details: [] };
   }
 
@@ -165,7 +168,7 @@ export async function validateV2PoolBinding(context, dependencies = {}) {
       ? context.analysisBlock
       : await retry(() => provider.getBlockNumber());
     if (!Number.isInteger(head) || head < 0) throw new Error("analysis block unavailable");
-    const binding = await bindV2Pool(context, provider, head, retry);
+    const binding = await bindV2Pool(context, provider, head, retry, dependencies);
     if (!binding) return { ok: false, reason: "pool-binding-mismatch", binding: null, details: [] };
     return { ok: true, reason: null, binding, details: [] };
   } catch (error) {
@@ -250,7 +253,7 @@ export function sellabilityResult(status, reason, evidence = {}) {
     walletSignals,
   } = evidence;
 
-  return {
+  const result = {
     status,
     reason,
     buyerSamples,
@@ -259,6 +262,15 @@ export function sellabilityResult(status, reason, evidence = {}) {
     details: Array.isArray(details) ? [...details] : [],
     walletSignals: normalizeWalletSignals(walletSignals),
   };
+  if (evidence.evidenceMode === "observed-sells") {
+    result.evidenceMode = "observed-sells";
+    result.bindingVerified = evidence.bindingVerified === true;
+    result.quoteOutflowReceipts = Number.isInteger(evidence.quoteOutflowReceipts)
+      && evidence.quoteOutflowReceipts >= 0
+      ? evidence.quoteOutflowReceipts
+      : 0;
+  }
+  return result;
 }
 
 export function normalizeSellabilityEvidence(sellability, legacyHoneypot = null) {
@@ -277,16 +289,26 @@ export function normalizeSellabilityEvidence(sellability, legacyHoneypot = null)
       : 0,
     details: evidence.details,
     walletSignals: evidence.walletSignals,
+    evidenceMode: evidence.evidenceMode,
+    bindingVerified: evidence.bindingVerified,
+    quoteOutflowReceipts: evidence.quoteOutflowReceipts,
   });
+
+  const observedEvidenceComplete = normalized.evidenceMode === "observed-sells"
+    && normalized.bindingVerified === true
+    && normalized.meaningfulSellers >= 3
+    && normalized.quoteOutflowReceipts >= 3;
+  const v2EvidenceComplete = normalized.evidenceMode == null
+    && validCounts
+    && normalized.buyerSamples > 0
+    && normalized.ladderSamples > 0
+    && normalized.meaningfulSellers >= 3;
 
   if (evidence.status === SELLABILITY.BLOCKED) {
     normalized.status = SELLABILITY.BLOCKED;
   } else if (
     evidence.status === SELLABILITY.CONFIRMED &&
-    validCounts &&
-    normalized.buyerSamples > 0 &&
-    normalized.ladderSamples > 0 &&
-    normalized.meaningfulSellers >= 3 &&
+    (observedEvidenceComplete || v2EvidenceComplete) &&
     legacyHoneypot === false
   ) {
     normalized.status = SELLABILITY.CONFIRMED;
@@ -418,7 +440,9 @@ export async function inspectSellability(context, dependencies = {}) {
     walletSignals: evidence.walletSignals ?? walletSignals,
   });
 
-  if (context?.venue !== "uniswap-v2" || !context?.pool) {
+  const expectedVenue = dependencies.expectedVenue ?? "uniswap-v2";
+  const excludedAddresses = dependencies.excludedAddresses ?? [];
+  if (context?.venue !== expectedVenue || !context?.pool) {
     return result(SELLABILITY.UNKNOWN, "unsupported-venue");
   }
 
@@ -434,9 +458,12 @@ export async function inspectSellability(context, dependencies = {}) {
       ? context.analysisBlock
       : await retry(() => provider.getBlockNumber());
     if (!Number.isInteger(head) || head < 0) throw new Error("analysis block unavailable");
-    const bindingEvidence = matchesBindingContext(context, dependencies.poolBinding, head)
+    const bindingEvidence = matchesBindingContext(context, dependencies.poolBinding, head, dependencies)
       ? { ok: true, binding: dependencies.poolBinding }
-      : await validateV2PoolBinding({ ...context, analysisBlock: head }, { provider, retry });
+      : await validateV2PoolBinding(
+        { ...context, analysisBlock: head },
+        { ...dependencies, provider, retry }
+      );
     if (!bindingEvidence.ok) {
       return result(SELLABILITY.UNKNOWN, bindingEvidence.reason || "evidence-unavailable", {
         details: bindingEvidence.details,
@@ -496,7 +523,7 @@ export async function inspectSellability(context, dependencies = {}) {
     const orderedCandidates = [];
     for (const { transfer } of [...buys].reverse()) {
       const key = transfer.to.toLowerCase();
-      if (buyerCandidates.has(key) || excludedAddress(transfer.to, context.pool)) continue;
+      if (buyerCandidates.has(key) || excludedAddress(transfer.to, context.pool, excludedAddresses)) continue;
       buyerCandidates.add(key);
       orderedCandidates.push(transfer.to);
     }
@@ -591,7 +618,7 @@ export async function inspectSellability(context, dependencies = {}) {
     for (const [hash, sources] of receiptCandidates) {
       let hasEligibleSource = false;
       for (const source of sources) {
-        if (sellers.has(source) || excludedAddress(source, binding.pool)) continue;
+        if (sellers.has(source) || excludedAddress(source, binding.pool, excludedAddresses)) continue;
         if (await isEoa(source)) {
           hasEligibleSource = true;
           break;
@@ -603,7 +630,9 @@ export async function inspectSellability(context, dependencies = {}) {
       const receipt = await readReceipt(hash);
       if (Number(receipt?.status) !== 1 || typeof receipt?.from !== "string") continue;
       const seller = receipt.from.toLowerCase();
-      if (!sources.has(seller) || sellers.has(seller) || excludedAddress(receipt.from, binding.pool) || !(await isEoa(receipt.from))) continue;
+      if (!sources.has(seller) || sellers.has(seller)
+        || excludedAddress(receipt.from, binding.pool, excludedAddresses)
+        || !(await isEoa(receipt.from))) continue;
       if (hasMeaningfulSellSegment(receipt, binding, meaningfulThreshold)) sellers.add(seller);
       if (sellers.size >= 3 || receiptReads === MAX_RECEIPTS) break;
     }

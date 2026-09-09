@@ -232,6 +232,7 @@ describe("analyze data completeness", () => {
       })
     );
     assert.deepEqual(honeypotInput, {
+      chain: "robinhood",
       token: TOKEN,
       quote: QUOTE,
       venue: "uniswap-v2",
@@ -241,6 +242,7 @@ describe("analyze data completeness", () => {
       pairCreatedAt,
       decimals: 18,
       walletCatalog: WALLET_CATALOG,
+      metadata: {},
     });
   });
 
