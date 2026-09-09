@@ -219,6 +219,7 @@ export function createInspectionCheckHandlers({
   now = Date.now,
   inspect = inspectToken,
   timeoutMs = 90_000,
+  notificationsEnabled = true,
 }) {
   const handle = async (check) => {
     const previous = store.snapshot().tokens[String(check.token).toLowerCase()];
@@ -254,7 +255,7 @@ export function createInspectionCheckHandlers({
     let transitionType = null;
     if (previous.monitorState !== "killed" && nextToken.monitorState === "killed") transitionType = "hard_kill";
     else if (previous.marketReady !== true && nextToken.marketReady === true) transitionType = "market_ready";
-    const notification = transitionType ? {
+    const notification = notificationsEnabled && transitionType ? {
       id: `${check.id}:${transitionType}`,
       eventId: check.eventId,
       transitionType,
@@ -338,6 +339,7 @@ export async function reconcilePonsWatchlist({
   store,
   readLaunch = readPonsLaunch,
   now = Date.now,
+  notificationsEnabled = true,
 }) {
   const snapshot = store.snapshot();
   let updated = 0;
@@ -356,7 +358,7 @@ export async function reconcilePonsWatchlist({
     };
     const nextToken = reducePonsEvent(previous, event, record, now());
     let notification = null;
-    if (phase === "rescued") {
+    if (notificationsEnabled && phase === "rescued") {
       notification = {
         id: `${event.eventId}:rescued`,
         eventId: event.eventId,
@@ -702,12 +704,13 @@ export async function runWatchStartupChecks({
   wait = sleep,
   isRecoverable = isDiscoveryFallbackError,
   logError = console.error,
+  notificationsEnabled = true,
 }) {
   while (true) {
     try {
       await runDiscoverySession(async (activeProvider) => {
         await verify(activeProvider);
-        await reconcile({ provider: activeProvider, store });
+        await reconcile({ provider: activeProvider, store, notificationsEnabled });
       });
       return;
     } catch (cause) {
@@ -765,7 +768,15 @@ function currentFailoverError(error) {
   return error;
 }
 
-async function watch() {
+export function notificationsEnabledForMode(mode) {
+  if (mode === "live") return true;
+  if (mode === "recovery" || mode === "shadow") return false;
+  throw new Error(`unknown watch mode: ${mode}`);
+}
+
+async function watch({ mode = "live" } = {}) {
+  const notificationsEnabled = notificationsEnabledForMode(mode);
+  const sendCandidateAlert = notificationsEnabled ? alertReport : async () => {};
   const releaseLock = await acquireInstanceLock(DATA_DIR);
   const releaseOnExit = () => releaseLock();
   process.once("exit", releaseOnExit);
@@ -775,9 +786,9 @@ async function watch() {
     const { analysisProvider } = rpc;
     const store = getDefaultStore();
     if (SETTINGS.onchainScan) {
-      await runWatchStartupChecks({ ...rpc.startup, store });
+      await runWatchStartupChecks({ ...rpc.startup, store, notificationsEnabled });
     }
-    if (SETTINGS.telegramToken) {
+    if (notificationsEnabled && SETTINGS.telegramToken) {
       await sendTelegram(
         `🤖 Robinhood 扫链机器人已启动\n仅扫描和报警，不包含交易功能\n年龄 &lt; ${SETTINGS.maxAgeMinutes} 分钟 · 最低分 ${SETTINGS.minScore}`
       ).catch((error) => console.error("startup telegram:", safeErrorMessage(error)));
@@ -789,14 +800,18 @@ async function watch() {
     const executeCandidate = createSerialExecutor();
     const scheduleCandidateRecheck = createCandidateRetryScheduler({ store, now: Date.now });
     const pendingHandlers = {
-      ...createInspectionCheckHandlers({ provider: analysisProvider, store }),
+      ...createInspectionCheckHandlers({
+        provider: analysisProvider,
+        store,
+        notificationsEnabled,
+      }),
       candidate_recheck: createCandidateRecheckHandler({
         executeCandidate,
         now: Date.now,
         maxAgeMinutes: SETTINGS.maxAgeMinutes,
         minScore: SETTINGS.minScore,
         analyze: rpc.analyzeCandidate,
-        alertReport,
+        alertReport: sendCandidateAlert,
         log: console.log,
       }),
     };
@@ -839,7 +854,7 @@ async function watch() {
                 minScore: SETTINGS.minScore,
                 analyze: analyzeCandidate,
                 markSeen,
-                alertReport,
+                alertReport: sendCandidateAlert,
                 log: console.log,
                 onAnalyzed: scheduleCandidateRecheck,
               }
@@ -884,16 +899,18 @@ async function watch() {
         }
       })());
     }
-    loops.push((async () => {
-      while (true) {
-        const result = await drainOutbox({
-          store,
-          send: (text) => sendTelegram(text),
-        });
-        if (result.failed) console.error(`outbox: ${result.failed} notifications exhausted retries`);
-        await sleep(SETTINGS.outboxPollMs);
-      }
-    })());
+    if (notificationsEnabled) {
+      loops.push((async () => {
+        while (true) {
+          const result = await drainOutbox({
+            store,
+            send: (text) => sendTelegram(text),
+          });
+          if (result.failed) console.error(`outbox: ${result.failed} notifications exhausted retries`);
+          await sleep(SETTINGS.outboxPollMs);
+        }
+      })());
+    }
     loops.push((async () => {
       while (true) {
         const result = await runPendingChecks({ store, handlers: pendingHandlers });

@@ -128,6 +128,9 @@ export function createStore({
   appliedEventTtlMs = MIN_APPLIED_EVENT_TTL_MS,
   writeState = atomicWriteState,
 }) {
+  if (typeof dataDir !== "string" || !dataDir.trim()) {
+    throw new Error("store dataDir is required");
+  }
   let state;
   const stateFile = path.join(dataDir, "state.json");
   if (fs.existsSync(stateFile)) {
@@ -511,17 +514,25 @@ export function createStore({
   };
 }
 
-let defaultStore;
+const stores = new Map();
+
+export function getStoreFor(dataDir, settings = SETTINGS) {
+  if (typeof dataDir !== "string" || !dataDir.trim()) {
+    throw new Error("store dataDir is required");
+  }
+  const key = path.resolve(dataDir);
+  if (!stores.has(key)) {
+    stores.set(key, createStore({
+      dataDir: key,
+      maxSeenEntries: settings.maxSeenEntries || 10_000,
+      seenTtlMs: settings.seenTtlMs || 86_400_000,
+    }));
+  }
+  return stores.get(key);
+}
 
 export function getDefaultStore() {
-  if (!defaultStore) {
-    defaultStore = createStore({
-      dataDir: DATA_DIR,
-      maxSeenEntries: SETTINGS.maxSeenEntries || 10_000,
-      seenTtlMs: SETTINGS.seenTtlMs || 86_400_000,
-    });
-  }
-  return defaultStore;
+  return getStoreFor(DATA_DIR, SETTINGS);
 }
 
 export const hasSeen = (...args) => getDefaultStore().hasSeen(...args);
