@@ -130,6 +130,7 @@ export function createStore({
   seenTtlMs = 86_400_000,
   appliedEventTtlMs = MIN_APPLIED_EVENT_TTL_MS,
   writeState = atomicWriteState,
+  readOnly = false,
 }) {
   if (typeof dataDir !== "string" || !dataDir.trim()) {
     throw new Error("store dataDir is required");
@@ -139,7 +140,7 @@ export function createStore({
   if (fs.existsSync(stateFile)) {
     const loaded = readJson(dataDir, "state.json", null);
     state = migrateState(loaded);
-    if (loaded.schemaVersion !== STATE_VERSION) writeState(dataDir, state);
+    if (!readOnly && loaded.schemaVersion !== STATE_VERSION) writeState(dataDir, state);
   } else {
     const seen = readJson(dataDir, "seen.json", {});
     const rawPositions = readJson(dataDir, "positions.json", {});
@@ -156,7 +157,7 @@ export function createStore({
       cursors: { onchain: null, ponsV2: null },
       ...emptyLifecycleState(),
     });
-    writeState(dataDir, state);
+    if (!readOnly) writeState(dataDir, state);
   }
 
   const eventTtlMs = Math.max(MIN_APPLIED_EVENT_TTL_MS, appliedEventTtlMs);
@@ -173,6 +174,7 @@ export function createStore({
   }
 
   function commit(mutator) {
+    if (readOnly) throw new Error("read-only store cannot persist state");
     const draft = structuredClone(state);
     const result = mutator(draft);
     writeState(dataDir, draft);
@@ -547,16 +549,18 @@ export function createStore({
 
 const stores = new Map();
 
-export function getStoreFor(dataDir, settings = SETTINGS) {
+export function getStoreFor(dataDir, settings = SETTINGS, { readOnly = false } = {}) {
   if (typeof dataDir !== "string" || !dataDir.trim()) {
     throw new Error("store dataDir is required");
   }
-  const key = path.resolve(dataDir);
+  const resolved = path.resolve(dataDir);
+  const key = `${resolved}|${readOnly ? "read-only" : "persistent"}`;
   if (!stores.has(key)) {
     stores.set(key, createStore({
-      dataDir: key,
+      dataDir: resolved,
       maxSeenEntries: settings.maxSeenEntries || 10_000,
       seenTtlMs: settings.seenTtlMs || 86_400_000,
+      readOnly,
     }));
   }
   return stores.get(key);

@@ -38,6 +38,7 @@ export async function runSolanaOnce(config, { persist = true } = {}) {
     sessions: config.rpcContext.discoverySessions,
     programs: config.venues,
     cursors,
+    concurrency: config.rpc?.concurrency ?? 4,
     parseTransaction: (context) => adapters.get(context.program.id).parseTransaction(context),
   });
   const mode = persist ? config.settings.alertMode : "shadow";

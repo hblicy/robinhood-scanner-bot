@@ -1,4 +1,5 @@
 import { PublicKey } from "@solana/web3.js";
+import { mapConcurrent } from "./concurrency.js";
 
 function publicKey(value) {
   return value instanceof PublicKey ? value : new PublicKey(value);
@@ -11,6 +12,7 @@ export async function reconcileProgram({
   parseTransaction,
   commitment = "confirmed",
   pageLimit = 1_000,
+  concurrency = 4,
 }) {
   if (!connection || typeof connection.getSlot !== "function") throw new Error("Solana discovery connection is required");
   if (typeof parseTransaction !== "function") throw new Error("Solana transaction parser is required");
@@ -44,9 +46,8 @@ export async function reconcileProgram({
   }
 
   const ordered = newestFirst.reverse();
-  const events = [];
-  for (const entry of ordered) {
-    if (entry.err) continue;
+  const parsedGroups = await mapConcurrent(ordered, concurrency, async (entry) => {
+    if (entry.err) return [];
     const transaction = await connection.getTransaction(entry.signature, {
       commitment,
       maxSupportedTransactionVersion: 0,
@@ -62,8 +63,9 @@ export async function reconcileProgram({
       program,
     });
     if (!Array.isArray(parsed)) throw new Error(`${program.id} parser must return an array`);
-    events.push(...parsed);
-  }
+    return parsed;
+  });
+  const events = parsedGroups.flat();
   const newest = ordered.at(-1) ?? null;
   return {
     programId: program.id,
@@ -73,7 +75,7 @@ export async function reconcileProgram({
   };
 }
 
-export async function reconcilePrograms({ sessions, programs, cursors, parseTransaction, commitment = "confirmed" }) {
+export async function reconcilePrograms({ sessions, programs, cursors, parseTransaction, commitment = "confirmed", concurrency = 4 }) {
   if (!sessions || typeof sessions.run !== "function") throw new Error("Solana discovery session runner is required");
   return sessions.run(async (connection) => {
     const results = [];
@@ -84,6 +86,7 @@ export async function reconcilePrograms({ sessions, programs, cursors, parseTran
         cursor: cursors?.[program.id] ?? null,
         parseTransaction,
         commitment,
+        concurrency,
       }));
     }
     return results;

@@ -13,7 +13,7 @@ export function assertSupportedCommand(command) {
 export async function main() {
   const cli = parseCli(process.argv.slice(2));
   const { createApp } = await import("./app.js");
-  const app = createApp({ chainKey: cli.chain });
+  const app = createApp({ chainKey: cli.chain, command: cli.command });
   if (cli.command === "watch") await app.watch();
   else if (cli.command === "scan") await app.scan();
   else await app.check(cli.argument);

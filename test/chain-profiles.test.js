@@ -52,9 +52,14 @@ describe("EVM chain profiles", () => {
     assert.equal(config.dataDir, path.resolve("data", "base"));
   });
 
-  it("keeps legacy RPC_URL compatibility scoped to Robinhood", () => {
-    const env = { RPC_URL: "https://legacy.example/key" };
+  it("keeps legacy discovery and analysis RPC compatibility scoped to Robinhood", () => {
+    const env = {
+      DISCOVERY_RPC_URL: "https://legacy-discovery.example",
+      RPC_URL: "https://legacy.example/key",
+    };
+    assert.equal(loadChainConfig("robinhood", env).rpc.discoveryUrl, env.DISCOVERY_RPC_URL);
     assert.equal(loadChainConfig("robinhood", env).rpc.analysisUrl, env.RPC_URL);
+    assert.equal(loadChainConfig("base", env).rpc.discoveryUrl, EVM_PROFILES.base.publicRpc);
     assert.equal(loadChainConfig("base", env).rpc.analysisUrl, EVM_PROFILES.base.publicRpc);
   });
 

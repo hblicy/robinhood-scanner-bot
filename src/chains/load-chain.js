@@ -163,9 +163,10 @@ export function loadChainConfig(chainKey, envSource = process.env) {
   const prefix = PREFIXES[chainKey];
   const discoveryName = `${prefix}_DISCOVERY_RPC_URL`;
   const analysisName = `${prefix}_ANALYSIS_RPC_URL`;
+  const legacyDiscoveryNames = chainKey === "robinhood" ? ["DISCOVERY_RPC_URL"] : [];
   const discoveryUrl = rpcUrl(
     discoveryName,
-    firstValue(envSource, [discoveryName], profile.publicRpc)
+    firstValue(envSource, [discoveryName, ...legacyDiscoveryNames], profile.publicRpc)
   );
   const legacyAnalysisNames = chainKey === "robinhood" ? ["ANALYSIS_RPC_URL", "RPC_URL"] : [];
   const analysisUrl = rpcUrl(

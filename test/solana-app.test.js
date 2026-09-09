@@ -55,4 +55,22 @@ describe("Solana application", () => {
     await app.scan();
     assert.deepEqual(calls, ["scan"]);
   });
+
+  it("does not create state for a one-shot scan", async () => {
+    const root = projectRoot();
+    const app = createApp({
+      chainKey: "solana",
+      command: "scan",
+      env: { SOLANA_DISCOVERY_RPC_URL: "https://solana.example" },
+      dependencies: {
+        projectRoot: root,
+        createSolanaRpcContext: () => ({ analysisConnection: {}, discoverySessions: {}, wsConnection: null }),
+        assertSolanaPrograms: async () => {},
+        services: { analyze: async () => {}, alertReport: async () => {}, check: async () => {} },
+        commands: { watch: async () => {}, scan: async () => {}, check: async () => {} },
+      },
+    });
+    await app.scan();
+    assert.equal(fs.existsSync(path.join(root, "data", "solana")), false);
+  });
 });

@@ -246,10 +246,10 @@ function defaultSolanaCommands() {
   };
 }
 
-function createSolanaApplication(loaded, { dependencies, projectRoot }) {
+function createSolanaApplication(loaded, { dependencies, projectRoot, readOnly }) {
   const dataDir = path.join(projectRoot, "data", "solana");
   const rpcContext = (dependencies.createSolanaRpcContext ?? createSolanaRpcContext)(loaded, dependencies.rpcDependencies);
-  const store = getStoreFor(dataDir, dependencies.storeSettings);
+  const store = getStoreFor(dataDir, dependencies.storeSettings, { readOnly });
   const venues = [...createPumpAdapters(loaded.profile), ...createRaydiumAdapters(loaded.profile)];
   const registry = createSolanaSecurityRegistry(loaded.profile);
   const walletCatalog = loadWalletLabels(path.join(projectRoot, "data", "wallets", "solana.json"));
@@ -301,16 +301,17 @@ function createSolanaApplication(loaded, { dependencies, projectRoot }) {
   });
 }
 
-export function createApp({ chainKey, env = process.env, dependencies = {} }) {
+export function createApp({ chainKey, command = "watch", env = process.env, dependencies = {} }) {
   const loaded = loadChainConfig(chainKey, env);
   const projectRoot = path.resolve(dependencies.projectRoot ?? PROJECT_ROOT);
-  if (loaded.family === "solana") return createSolanaApplication(loaded, { dependencies, projectRoot });
+  const readOnly = command !== "watch";
+  if (loaded.family === "solana") return createSolanaApplication(loaded, { dependencies, projectRoot, readOnly });
   const dataDir = path.join(projectRoot, "data", chainKey);
-  if (chainKey === "robinhood") migrateLegacyRobinhoodState(projectRoot, dataDir);
+  if (!readOnly && chainKey === "robinhood") migrateLegacyRobinhoodState(projectRoot, dataDir);
 
   const createRpcContext = dependencies.createRpcContext ?? createChainRpcContext;
   const rpcContext = createRpcContext(rpcOptions(loaded));
-  const store = getStoreFor(dataDir, dependencies.storeSettings);
+  const store = getStoreFor(dataDir, dependencies.storeSettings, { readOnly });
   const venues = loaded.profile.venues.map((venue) => instantiateVenue(loaded.profile, venue));
   if (chainKey === "robinhood") venues.push(createPonsAdapter());
   const registry = securityRegistry(loaded.profile);

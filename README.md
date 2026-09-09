@@ -1,6 +1,6 @@
-# Robinhood Chain 扫链推送机器人
+# 五链扫链推送机器人
 
-把 Robinhood Chain 的 Pons V2 生命周期、新池发现、风险分析和 Telegram 状态告警整合成一个只读机器人。
+覆盖 Ethereum、Base、BNB Chain、Robinhood Chain 和 Solana。EVM 与 Solana 使用独立运行时、RPC、状态、锁和故障边界，共享评分、严格推送门槛与 Telegram 报告；Robinhood 保留 Pons V2 生命周期能力。
 
 本版本只有扫描与推送功能：不读取私钥，不创建钱包，不签名、授权或广播交易，也不维护模拟仓位。Memecoin 风险极高，本工具不是投资建议。
 
@@ -30,14 +30,23 @@ copy .env.example .env
 Telegram 可选；不配置时报告只打印到终端。
 
 ```bash
-# 持续监听、终端输出，并在已配置时发送 Telegram
+# 不带 --chain 时保持兼容，默认 Robinhood
 npm run watch
 
+# 五条链分别启动，建议各放一个 screen/systemd 进程
+npm run watch:ethereum
+npm run watch:base
+npm run watch:bsc
+npm run watch:robinhood
+npm run watch:solana
+
 # 一次性扫描后退出；不写 data/，不发送 Telegram；部分失败时退出码非零
-npm run scan
+npm run scan -- --chain base
+npm run scan -- --chain solana
 
 # 只读检查指定代币；90 秒后仍未完成的数据源会明确标记 unknown
-npm run check -- 0x你的合约地址
+npm run check -- --chain ethereum 0x你的合约地址
+npm run check -- --chain solana 你的Mint地址
 ```
 
 只有 `watch`、`scan`、`check` 三个命令。`paper` 和 `live` 已移除，传入时会在连接 RPC、读取状态或发送通知前直接报错退出。
@@ -51,6 +60,19 @@ npm run watch
 # Ctrl+A，再按 D：退出 screen 但保持机器人运行
 screen -r robinhood
 ```
+
+五个进程必须使用不同的 screen 名称。每条链只允许一个 `watch` 实例，状态分别写入 `data/ethereum`、`data/base`、`data/bsc`、`data/robinhood`、`data/solana`，不会跨链共享游标或已处理记录。
+
+## 多链推送规则
+
+- `recovery`：首次补扫只建立游标和状态，不发送历史 Telegram。
+- `shadow`：正常发现和分析，但不发送 Telegram；Ethereum、Base、BSC、Solana 默认使用此模式。
+- `live`：`blocked` 风险证据立即推送；普通候选必须同时满足 `sellability=confirmed` 和链级 `MIN_SCORE`。
+- `unknown` 即使 100 分也保持静默；发现事件本身不等于可卖、安全或推荐买入。
+- EVM V2 类池可进入完整可卖性检查；没有协议级卖出证据绑定的 V3/V4/集中流动性池保持 `unknown`，只发现不推普通候选。
+- Solana 需要链上池程序、base/quote 金库、mint 权限和至少 3 个独立真实卖家证据一致；Pump 原始发币事件只建候选状态，不直接推送。
+
+链级变量使用 `ETHEREUM_`、`BASE_`、`BSC_`、`ROBINHOOD_`、`SOLANA_` 前缀。完整示例见 `.env.example`；部署与故障语义见 `docs/operations/multichain-evm.md` 和 `docs/operations/multichain-solana.md`。
 
 单个 GeckoTerminal、DexPaprika 或 Blockscout 限流/超时时，对应辅助证据会标记为 `unknown`，不会被当作安全通过。`watch` 会按有上限的退避重试；Factory 原始日志、ABI 解码或状态不变量失败则会保留错误并停止推进该生命周期区间。
 
@@ -91,7 +113,14 @@ copy examples\wallet-labels.json data\wallet-labels.json
 
 `type` 只接受 `kol`、`smart_money`；`source` 只接受 `manual`、`debot`、`okx`。也可以直接使用 DeBot 导出的嵌套 JSON：程序递归读取 EVM 地址键的 `mark`，统一记为 `smart_money/debot`。文件不存在时报告显示“标签未配置”；文件存在但 JSON、地址、字段或重复地址无效时，程序会明确报错退出。修改文件后需要重启 `watch`。
 
-只有现有 V2 卖出检查已经采样、并且在同一固定区块仍持有至少 1 枚代币的钱包才算命中；Telegram 最多显示三个标签，不显示地址。1 个唯一命中加 5 分，2 个及以上加 8 分。该加分不绕过年龄、明确风险、卖出安全确认或最终 `MIN_SCORE` 门槛，也不会扩大 RPC 读取上限。为控制吞吐量，只有原始预评分达到 `MIN_SCORE - 10` 的候选才进入深度检查和标签匹配。
+EVM 标签保存为 `data/wallets/evm.json`，Solana 标签保存为 `data/wallets/solana.json`。EVM 只有现有 V2 卖出检查已经采样、并且在同一固定区块仍持有至少 1 枚代币的钱包才算命中；Solana 只有绑定池真实流出目标代币且标签钱包真实付出报价币/SOL 时才算命中。Telegram 最多显示三个标签，不显示地址。1 个唯一命中加 5 分，2 个及以上加 8 分。该加分不绕过年龄、明确风险、卖出安全确认或最终 `MIN_SCORE` 门槛。
+
+CSV 导入示例：
+
+```bash
+npm run import-wallets -- --family evm --output data/wallets/evm.json wallets-base.csv wallets-eth.csv wallets-bsc.csv wallets-robinhood.csv
+npm run import-wallets -- --family solana --output data/wallets/solana.json wallets-sol.csv
+```
 
 DeBot 当前仅用于手工导出/导入；程序不调用其未公开接口。OKX 的 Smart Money/KOL Signal API 当前不支持 Robinhood Chain `4663`，因此不做实时接入；可以把人工核验后的 OKX 地址写入本地标准文件。
 
@@ -155,10 +184,11 @@ ANALYSIS_RPC_URL=https://robinhood-mainnet.g.alchemy.com/v2/<API_KEY>
 
 ## 扫描恢复与本地状态
 
-`watch` 会以 schema v4 原子写入 `data/state.json`，维护：
+`watch` 会以 schema v5 原子写入对应链目录下的 `state.json`，维护：
 
 - 已处理候选 `seen`，用于去重；
-- `cursors.onchain`，表示最后一个全部候选均处理成功的区块；
+- `cursors.onchain`，表示 EVM 最后一个全部候选均处理成功的区块；
+- `cursors.solanaPrograms`，分别保存六个 Solana 程序的 signature/slot 锚点；
 - `cursors.ponsV2`、`tokens` 和 `watchlist`，保存独立的 Pons 生命周期游标与观察状态；
 - `appliedEvents`、`outbox` 和 `pendingChecks`，用于事件去重、Telegram 可靠投递和辅助数据重试；
 - `heat`，保存当前市场热度快照，不改变已有观察对象的准入决定；
@@ -176,7 +206,7 @@ Pons 链上阶段为 `not_graduated → swept → pool_created`，`rescued` 是�
 
 `scan` 和 `check` 不创建锁、不创建或修改 `data/`，也不发送 Telegram。配置文件通过局部解析读取，旧 `.env` 中的私钥或交易字段不会注入进程配置，也不会被程序访问。
 
-升级前建议先备份 `data/state.json`。程序会从旧 schema v3 迁移到 v4，但不会删除旧版 `positions`、`trades` 或其他历史文件。
+升级前建议先备份 `data/state.json`。Robinhood 旧状态会复制迁移到 `data/robinhood`；程序可从旧 schema v3/v4 迁移到 v5，不会删除旧版 `positions`、`trades` 或其他历史文件。
 
 ## 明确不做
 

@@ -4,6 +4,7 @@ import { dexScreener } from "../market.js";
 import { inspectMintControls } from "../security/solana/mint.js";
 import { observeSolanaWalletBuys } from "../security/solana/flows.js";
 import { normalizeWalletSignals } from "../wallet-labels.js";
+import { mapConcurrent } from "./concurrency.js";
 
 const NARRATIVE = ["ai", "agent", "cat", "dog", "meme", "pepe", "trump", "robinhood", "gme"];
 
@@ -12,22 +13,20 @@ function narrativeHits(symbol, name) {
   return NARRATIVE.filter((word) => text.includes(word));
 }
 
-async function observedTransactions(connection, candidate, limit = 40) {
+async function observedTransactions(connection, candidate, limit = 40, concurrency = 4) {
   const signatures = await connection.getSignaturesForAddress(
     new PublicKey(candidate.pool),
     { limit },
     "finalized"
   );
-  const transactions = [];
-  for (const item of signatures) {
-    if (item.err) continue;
+  const transactions = await mapConcurrent(signatures.filter((item) => !item.err), concurrency, async (item) => {
     const transaction = await connection.getTransaction(item.signature, {
       commitment: "finalized",
       maxSupportedTransactionVersion: 0,
     });
-    if (transaction) transactions.push({ signature: item.signature, transaction });
-  }
-  return transactions;
+    return transaction ? { signature: item.signature, transaction } : null;
+  });
+  return transactions.filter(Boolean);
 }
 
 function checksFrom(categories) {
@@ -55,7 +54,7 @@ export async function analyzeSolanaCandidate(event, dependencies) {
   const mint = await inspectMint(event.token, { connection });
   const readObserved = dependencies.getObservedTransactions
     ?? dependencies.getObservedSellTransactions
-    ?? ((candidate) => observedTransactions(connection, candidate));
+    ?? ((candidate) => observedTransactions(connection, candidate, 40, config.rpc?.concurrency ?? 4));
   let observedPromise;
   const getObserved = () => {
     observedPromise ??= Promise.resolve().then(() => readObserved(event));

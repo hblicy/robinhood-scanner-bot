@@ -96,6 +96,30 @@ describe("Solana discovery", () => {
     }), /transaction unavailable.*middle/i);
   });
 
+  it("bounds concurrent transaction reads while preserving oldest-first events", async () => {
+    let active = 0;
+    let maximum = 0;
+    const connection = {
+      getSlot: async () => 4,
+      getSignaturesForAddress: async () => [4, 3, 2, 1].map((slot) => ({ signature: String(slot), slot, err: null })),
+      getTransaction: async (signature) => {
+        active++;
+        maximum = Math.max(maximum, active);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        active--;
+        return { signature };
+      },
+    };
+    const result = await reconcileProgram({
+      connection,
+      program: { id: "pump", programId: PROGRAM },
+      parseTransaction: ({ signature }) => [{ signature }],
+      concurrency: 2,
+    });
+    assert.equal(maximum, 2);
+    assert.deepEqual(result.events.map(({ signature }) => signature), ["1", "2", "3", "4"]);
+  });
+
   it("deduplicates WebSocket hints and exposes an unsubscribe function", async () => {
     let listener;
     let removed = null;
