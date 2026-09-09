@@ -134,7 +134,7 @@ describe("createStore", () => {
     const original = fs.readFileSync(path.join(dir, "positions.json"), "utf8");
     createStore({ dataDir: dir, now: () => 1, maxSeenEntries: 10, seenTtlMs: 1000 });
     const persisted = JSON.parse(fs.readFileSync(path.join(dir, "state.json"), "utf8"));
-    assert.equal(persisted.schemaVersion, 4);
+    assert.equal(persisted.schemaVersion, 5);
     assert.deepEqual(persisted.positions, positions);
     assert.equal(fs.readFileSync(path.join(dir, "positions.json"), "utf8"), original);
   });
@@ -167,10 +167,10 @@ describe("createStore", () => {
     openStore(dir);
 
     const state = JSON.parse(fs.readFileSync(path.join(dir, "state.json"), "utf8"));
-    assert.equal(state.schemaVersion, 4);
+    assert.equal(state.schemaVersion, 5);
     assert.equal(state.seen.a.token, "a");
     assert.equal(state.trades.length, 1);
-    assert.deepEqual(state.cursors, { onchain: null, ponsV2: null });
+    assert.deepEqual(state.cursors, { onchain: null, ponsV2: null, solanaPrograms: {} });
     assert.deepEqual(state.tokens, {});
     assert.deepEqual(state.watchlist, []);
     assert.equal(state.heat, null);
@@ -196,7 +196,7 @@ describe("createStore", () => {
     assert.throws(() => store.setOnchainCursor(123), /disk full/);
     assert.equal(store.getOnchainCursor(), null);
     const state = JSON.parse(fs.readFileSync(path.join(dir, "state.json"), "utf8"));
-    assert.deepEqual(state.cursors, { onchain: null, ponsV2: null });
+    assert.deepEqual(state.cursors, { onchain: null, ponsV2: null, solanaPrograms: {} });
   });
 
   it("keeps the real token address in a composite seen entry", () => {
@@ -233,7 +233,7 @@ describe("createStore", () => {
     const store = openStore(dir);
     const state = store.snapshot();
 
-    assert.equal(state.schemaVersion, 4);
+    assert.equal(state.schemaVersion, 5);
     assert.deepEqual(state.positions, positions);
     assert.deepEqual(state.trades, trades);
     assert.equal(state.cursors.onchain, 91);
@@ -242,7 +242,39 @@ describe("createStore", () => {
     assert.deepEqual(state.watchlist, []);
     assert.deepEqual(state.outbox, {});
     assert.deepEqual(state.pendingChecks, {});
-    assert.equal(JSON.parse(fs.readFileSync(path.join(dir, "state.json"))).schemaVersion, 4);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(dir, "state.json"))).schemaVersion, 5);
+  });
+
+  it("migrates v4 state and atomically commits a Solana program cursor with applied events", () => {
+    const dir = tempDir();
+    write(dir, "state.json", JSON.stringify({
+      schemaVersion: 4,
+      seen: {},
+      positions: {},
+      trades: [],
+      cursors: { onchain: 91, ponsV2: 92 },
+      tokens: {},
+      watchlist: [],
+      heat: null,
+      appliedEvents: { legacy: { appliedAt: 999 } },
+      outbox: { keep: { id: "keep", status: "delivered" } },
+      pendingChecks: {},
+    }));
+
+    const store = openStore(dir);
+    store.commitSolanaProgramRange({
+      programId: "pump",
+      cursor: { signature: "sig", slot: 101, finalized: false, updatedAt: 1_000 },
+      events: [{ eventId: "solana|sig|0", slot: 101 }],
+    });
+    const state = store.snapshot();
+    assert.equal(state.schemaVersion, 5);
+    assert.equal(state.cursors.onchain, 91);
+    assert.equal(state.cursors.ponsV2, 92);
+    assert.equal(state.cursors.solanaPrograms.pump.signature, "sig");
+    assert.ok(state.appliedEvents.legacy);
+    assert.ok(state.appliedEvents["solana|sig|0"]);
+    assert.ok(state.outbox.keep);
   });
 
   it("atomically commits a Pons range and deduplicates replayed events", () => {
