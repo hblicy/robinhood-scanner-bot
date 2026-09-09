@@ -5,10 +5,12 @@ import {
   findFirstBlockAtOrAfter,
   getBlockNumber,
   getLogsChunked,
+  isDiscoveryFallbackError,
   sleep,
   withRetry,
 } from "../chain.js";
 import { scanEvmRange } from "./discovery.js";
+import { safeErrorMessage } from "../safety.js";
 
 async function blockTimes({ provider, blockNumbers }) {
   const values = await Promise.all(blockNumbers.map(async (blockNumber) => {
@@ -103,10 +105,15 @@ export async function watchEvm(config, supplied = {}) {
   const release = await (dependencies.acquireLock ?? acquireInstanceLock)(config.dataDir);
   try {
     while (true) {
-      const result = await runEvmRangeOnce(config, { persist: true }, dependencies);
-      dependencies.log(
-        `${config.profile.key}: blocks ${result.fromBlock ?? "none"}-${result.toBlock} candidates=${result.candidates} mode=${result.mode}`
-      );
+      try {
+        const result = await runEvmRangeOnce(config, { persist: true }, dependencies);
+        dependencies.log(
+          `${config.profile.key}: blocks ${result.fromBlock ?? "none"}-${result.toBlock} candidates=${result.candidates} mode=${result.mode}`
+        );
+      } catch (error) {
+        if (!isDiscoveryFallbackError(error)) throw error;
+        dependencies.log(`${config.profile.key} discovery retry: ${safeErrorMessage(error)}`);
+      }
       await dependencies.sleep(config.settings.pollMs ?? 5_000);
     }
   } finally {

@@ -23,7 +23,7 @@ function ensureProgram(context, adapter, instructions) {
   }
 }
 
-function pumpAdapter(profile, program) {
+function pumpAdapter(profile, program, poolProgram) {
   const adapter = Object.freeze({ ...program, version: 1, parseTransaction(context) {
     const instructions = programInstructions(context.transaction, program.programId);
     ensureProgram(context, program, instructions);
@@ -37,7 +37,7 @@ function pumpAdapter(profile, program) {
         events.push(candidate(context, program, instruction, { token: a[0], quoteToken: profile.wrappedNative, pool: a[2], creator: a[5], lifecyclePhase: "new_launch", metadata: { bondingCurve: a[2] } }));
       } else if (matchesDiscriminator(instruction.data, DISC.migrate)) {
         const a = requireAccounts(context, instruction, 25, program.id);
-        events.push(candidate(context, program, instruction, { token: a[2], quoteToken: a[14], pool: a[9], creator: a[5], lifecyclePhase: "graduated", metadata: { bondingCurve: a[3], authority: a[10], baseVault: a[17], quoteVault: a[18] } }));
+        events.push(candidate(context, program, instruction, { token: a[2], quoteToken: a[14], pool: a[9], creator: a[5], lifecyclePhase: "graduated", metadata: { bondingCurve: a[3], authority: a[10], baseVault: a[17], quoteVault: a[18], poolProgramId: poolProgram.programId } }));
       }
     }
     return events;
@@ -56,7 +56,7 @@ function pumpSwapAdapter(profile, program) {
       const a = requireAccounts(context, instruction, 18, program.id);
       const pair = chooseTargetPair(a[3], a[4], quoteMints);
       if (!pair) continue;
-      events.push(candidate(context, program, instruction, { ...pair, pool: a[0], creator: a[2], lifecyclePhase: "new_pool", metadata: { baseMint: a[3], quoteMint: a[4], baseVault: a[9], quoteVault: a[10] } }));
+      events.push(candidate(context, program, instruction, { ...pair, pool: a[0], creator: a[2], lifecyclePhase: "new_pool", metadata: { baseMint: a[3], quoteMint: a[4], baseVault: pair.targetIsA ? a[9] : a[10], quoteVault: pair.targetIsA ? a[10] : a[9], poolProgramId: program.programId } }));
     }
     return events;
   } });
@@ -66,5 +66,5 @@ export function createPumpAdapters(profile) {
   const pump = profile.programs.find((program) => program.id === "pump-bonding-curve");
   const swap = profile.programs.find((program) => program.id === "pumpswap");
   if (!pump || !swap) throw new Error("Solana profile is missing Pump programs");
-  return Object.freeze([pumpAdapter(profile, pump), pumpSwapAdapter(profile, swap)]);
+  return Object.freeze([pumpAdapter(profile, pump, swap), pumpSwapAdapter(profile, swap)]);
 }

@@ -125,16 +125,19 @@ function sameAddress(a, b) {
 }
 
 export function selectDexPair(pairs, { token, pool = null, quote = null, chain = "robinhood" } = {}) {
+  const sameIdentity = String(chain).toLowerCase() === "solana"
+    ? (left, right) => Boolean(left && right) && String(left) === String(right)
+    : sameAddress;
   const matchingToken = (Array.isArray(pairs) ? pairs : []).filter(
     (p) =>
       String(p.chainId).toLowerCase() === String(chain).toLowerCase() &&
-      sameAddress(p.baseToken?.address, token)
+      sameIdentity(p.baseToken?.address, token)
   );
   if (pool || quote) {
     if (!pool || !quote) return null;
     return (
       matchingToken.find(
-        (p) => sameAddress(p.pairAddress, pool) && sameAddress(p.quoteToken?.address, quote)
+        (p) => sameIdentity(p.pairAddress, pool) && sameIdentity(p.quoteToken?.address, quote)
       ) || null
     );
   }

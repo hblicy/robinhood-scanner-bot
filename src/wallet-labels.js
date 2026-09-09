@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import { getAddress } from "ethers";
+import { PublicKey } from "@solana/web3.js";
 
 const TYPES = new Set(["kol", "smart_money"]);
 const SOURCES = new Set(["manual", "debot", "okx", "gmgn"]);
@@ -12,10 +13,12 @@ function cleanLabel(value) {
   return label;
 }
 
-function addEntry(output, entry) {
+function addEntry(output, entry, family = "evm") {
   let address;
   try {
-    address = getAddress(entry.address).toLowerCase();
+    address = family === "solana"
+      ? new PublicKey(entry.address).toBase58()
+      : getAddress(entry.address).toLowerCase();
   } catch {
     throw new Error(`wallet label address is invalid: ${String(entry.address || "")}`);
   }
@@ -48,6 +51,7 @@ function collectDebot(node, output) {
 export function normalizeWalletLabels(value) {
   const labels = new Map();
   if (value?.schemaVersion === 1 && Array.isArray(value.wallets)) {
+    const family = value.family ?? "evm";
     for (const entry of value.wallets) {
       if (!Array.isArray(entry.tags) || !Array.isArray(entry.sources)) {
         throw new Error("wallet catalog entry requires tags and sources arrays");
@@ -57,7 +61,7 @@ export function normalizeWalletLabels(value) {
         label: [...(entry.tags.join(", ") || entry.type)].slice(0, 80).join(""),
         type: entry.type,
         source: entry.sources[0] || "manual",
-      });
+      }, family);
     }
   } else if (Array.isArray(value)) {
     for (const entry of value) {

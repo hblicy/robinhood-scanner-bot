@@ -58,6 +58,7 @@ describe("push-only command surface", () => {
       "watch:bsc",
       "watch:ethereum",
       "watch:robinhood",
+      "watch:solana",
     ]);
   });
 

@@ -28,7 +28,7 @@ function createAdapter(profile, program) {
         transactionId: context.signature, eventIndex: instruction.instructionIndex,
         createdAt: context.blockTime == null ? null : context.blockTime * 1_000,
         lifecyclePhase: layout.lifecyclePhase, sourceProvenance: `${program.id}@${program.idlRevision}`,
-        metadata: { authority: layout.authority == null ? null : a[layout.authority], baseMint: a[layout.mintA], quoteMint: a[layout.mintB], baseVault: a[layout.vaultA], quoteVault: a[layout.vaultB] },
+        metadata: { authority: layout.authority == null ? null : a[layout.authority], baseMint: a[layout.mintA], quoteMint: a[layout.mintB], baseVault: pair.targetIsA ? a[layout.vaultA] : a[layout.vaultB], quoteVault: pair.targetIsA ? a[layout.vaultB] : a[layout.vaultA], poolProgramId: program.programId },
       }));
     }
     return events;

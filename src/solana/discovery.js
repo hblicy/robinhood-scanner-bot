@@ -36,7 +36,7 @@ export async function reconcileProgram({
         reachedAnchor = true;
         break;
       }
-      if (!entry.err) newestFirst.push(entry);
+      newestFirst.push(entry);
     }
     if (reachedAnchor || page.length < pageLimit || page.length === 0) break;
     before = page.at(-1)?.signature;
@@ -46,11 +46,14 @@ export async function reconcileProgram({
   const ordered = newestFirst.reverse();
   const events = [];
   for (const entry of ordered) {
+    if (entry.err) continue;
     const transaction = await connection.getTransaction(entry.signature, {
       commitment,
       maxSupportedTransactionVersion: 0,
     });
-    if (!transaction) continue;
+    if (!transaction) {
+      throw new Error(`${program.id} transaction unavailable: ${entry.signature}`);
+    }
     const parsed = await parseTransaction({
       transaction,
       signature: entry.signature,

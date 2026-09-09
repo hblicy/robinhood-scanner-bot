@@ -19,6 +19,13 @@ import { ERC20_ABI } from "./abis.js";
 import { dexScreener } from "./market.js";
 import { formatAlert, sendTelegramWith } from "./notify.js";
 import { loadWalletLabels } from "./wallet-labels.js";
+import { PublicKey } from "@solana/web3.js";
+import { createSolanaRpcContext } from "./solana/rpc.js";
+import { createPumpAdapters } from "./venues/solana/pump.js";
+import { createRaydiumAdapters } from "./venues/solana/raydium.js";
+import { createSolanaSecurityRegistry } from "./security/solana/index.js";
+import { inspectMintControls } from "./security/solana/mint.js";
+import { analyzeSolanaCandidate } from "./solana/analyze.js";
 
 const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const LEGACY_STATE_FILES = Object.freeze([
@@ -216,9 +223,88 @@ async function assertRpcChain(rpcContext, expectedChainId) {
   }
 }
 
+async function assertSolanaPrograms(rpcContext, programs) {
+  for (const program of programs) {
+    const account = await rpcContext.analysisConnection.getAccountInfo(new PublicKey(program.programId), "finalized");
+    if (!account?.executable) throw new Error(`Solana program is not executable: ${program.id}`);
+  }
+}
+
+function defaultSolanaCommands() {
+  return {
+    async watch(context) {
+      const { watchSolana } = await import("./solana/runner.js");
+      return watchSolana(context.config);
+    },
+    async scan(context) {
+      const { runSolanaOnce } = await import("./solana/runner.js");
+      return runSolanaOnce(context.config, { persist: false });
+    },
+    async check(token, context) {
+      return context.config.services.check(token);
+    },
+  };
+}
+
+function createSolanaApplication(loaded, { dependencies, projectRoot }) {
+  const dataDir = path.join(projectRoot, "data", "solana");
+  const rpcContext = (dependencies.createSolanaRpcContext ?? createSolanaRpcContext)(loaded, dependencies.rpcDependencies);
+  const store = getStoreFor(dataDir, dependencies.storeSettings);
+  const venues = [...createPumpAdapters(loaded.profile), ...createRaydiumAdapters(loaded.profile)];
+  const registry = createSolanaSecurityRegistry(loaded.profile);
+  const walletCatalog = loadWalletLabels(path.join(projectRoot, "data", "wallets", "solana.json"));
+  const services = dependencies.services ?? Object.freeze({
+    analyze: (event) => analyzeSolanaCandidate(event, {
+      config: loaded,
+      connection: rpcContext.analysisConnection,
+      securityRegistry: registry,
+      walletCatalog,
+    }),
+    async alertReport(report) {
+      const text = formatAlert({ ...report, chain: "solana", chainName: loaded.profile.name });
+      console.log(`[solana] ${report.verdict} ${report.meta.symbol} ${report.score}/100`);
+      return sendTelegramWith(text, { settings: { telegramToken: loaded.telegram.token, telegramChat: loaded.telegram.chatId } });
+    },
+    async check(token) {
+      const result = await inspectMintControls(token, { connection: rpcContext.analysisConnection });
+      console.log(JSON.stringify({ chain: "solana", token, mint: result }, null, 2));
+      return result;
+    },
+  });
+  const config = Object.freeze({
+    ...loaded,
+    dataDir,
+    notificationsEnabled: loaded.settings.alertMode === "live",
+    rpcContext,
+    store,
+    telegramTitle: loaded.profile.name,
+    telegram: loaded.telegram,
+    lockPort: instanceLockPort(dataDir),
+    venues: Object.freeze(venues),
+    venueIds: Object.freeze(venues.map((venue) => venue.id)),
+    securityRegistry: registry,
+    services,
+  });
+  const context = Object.freeze({ config });
+  const commands = dependencies.commands ?? defaultSolanaCommands();
+  const verifyPrograms = dependencies.assertSolanaPrograms ?? assertSolanaPrograms;
+  let verification;
+  const ensurePrograms = () => {
+    verification ??= Promise.resolve().then(() => verifyPrograms(rpcContext, loaded.profile.programs));
+    return verification;
+  };
+  return Object.freeze({
+    config,
+    watch: async () => { await ensurePrograms(); return commands.watch(context); },
+    scan: async () => { await ensurePrograms(); return commands.scan(context); },
+    check: async (token) => { await ensurePrograms(); return commands.check(token, context); },
+  });
+}
+
 export function createApp({ chainKey, env = process.env, dependencies = {} }) {
   const loaded = loadChainConfig(chainKey, env);
   const projectRoot = path.resolve(dependencies.projectRoot ?? PROJECT_ROOT);
+  if (loaded.family === "solana") return createSolanaApplication(loaded, { dependencies, projectRoot });
   const dataDir = path.join(projectRoot, "data", chainKey);
   if (chainKey === "robinhood") migrateLegacyRobinhoodState(projectRoot, dataDir);
 

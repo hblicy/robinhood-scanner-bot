@@ -1,6 +1,41 @@
 import { sellabilityResult } from "../../sellability.js";
 import { inspectMintControls } from "./mint.js";
 import { observeSolanaSellTransactions } from "./flows.js";
+import { PublicKey } from "@solana/web3.js";
+import { TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID, unpackAccount } from "@solana/spl-token";
+
+function keyString(value) {
+  return value?.toBase58?.() ?? String(value);
+}
+
+function tokenProgramFor(account) {
+  const owner = keyString(account.owner);
+  if (owner === TOKEN_PROGRAM_ID.toBase58()) return TOKEN_PROGRAM_ID;
+  if (owner === TOKEN_2022_PROGRAM_ID.toBase58()) return TOKEN_2022_PROGRAM_ID;
+  return null;
+}
+
+export async function validateSolanaPoolBinding(candidate, { connection }) {
+  if (!connection?.getMultipleAccountsInfo) throw new Error("Solana binding connection is required");
+  const metadata = candidate.metadata ?? {};
+  if (!metadata.poolProgramId) return { verified: false, reason: "pool-program-missing" };
+  const keys = [candidate.pool, metadata.baseVault, metadata.quoteVault].map((value) => new PublicKey(value));
+  const [pool, baseVault, quoteVault] = await connection.getMultipleAccountsInfo(keys, "finalized");
+  if (!pool || !baseVault || !quoteVault) return { verified: false, reason: "pool-account-missing" };
+  if (keyString(pool.owner) !== metadata.poolProgramId) return { verified: false, reason: "pool-program-mismatch" };
+  const baseProgram = tokenProgramFor(baseVault);
+  const quoteProgram = tokenProgramFor(quoteVault);
+  if (!baseProgram || !quoteProgram) return { verified: false, reason: "vault-program-mismatch" };
+  try {
+    const base = unpackAccount(keys[1], baseVault, baseProgram);
+    const quote = unpackAccount(keys[2], quoteVault, quoteProgram);
+    if (base.mint.toBase58() !== candidate.token) return { verified: false, reason: "base-vault-mint-mismatch" };
+    if (quote.mint.toBase58() !== candidate.quoteToken) return { verified: false, reason: "quote-vault-mint-mismatch" };
+  } catch {
+    return { verified: false, reason: "vault-account-undecodable" };
+  }
+  return { verified: true };
+}
 
 export function createSolanaSecurityRegistry(profile) {
   const programs = new Map(profile.programs.map((program) => [program.id, program]));
@@ -23,6 +58,15 @@ export function createSolanaSecurityRegistry(profile) {
       if (dependencies.restrictionEvidence?.blocked === true) {
         return sellabilityResult("blocked", dependencies.restrictionEvidence.reason || "program-transfer-restriction");
       }
+      const validateBinding = dependencies.validateBinding ?? validateSolanaPoolBinding;
+      const validation = await validateBinding(candidate, { connection: dependencies.connection });
+      if (validation?.verified !== true) {
+        return sellabilityResult("unknown", "pool-binding-mismatch", {
+          evidenceMode: "observed-sells",
+          bindingVerified: false,
+          details: validation?.reason ? [validation.reason] : [],
+        });
+      }
       if (typeof dependencies.getObservedSellTransactions !== "function") {
         return sellabilityResult("unknown", "evidence-unavailable", { details: ["Solana observed sell reader unavailable"] });
       }
@@ -34,6 +78,7 @@ export function createSolanaSecurityRegistry(profile) {
         quoteVault: metadata.quoteVault,
         authority: metadata.authority ?? null,
         programId: program.programId,
+        nativeQuote: candidate.quoteToken === profile.wrappedNative,
       };
       const transactions = await dependencies.getObservedSellTransactions(candidate, binding);
       const observed = observeSolanaSellTransactions({

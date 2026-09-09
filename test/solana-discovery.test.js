@@ -69,6 +69,33 @@ describe("Solana discovery", () => {
     assert.equal(results[0].safeSlot, 103);
   });
 
+  it("advances past failed signatures without fetching their transactions", async () => {
+    const connection = fakeConnection();
+    connection.getSignaturesForAddress = async () => [
+      { signature: "failed", slot: 103, err: { InstructionError: [0, "Custom"] } },
+      { signature: "old", slot: 101, err: null },
+    ];
+    const result = await reconcileProgram({
+      connection,
+      program: { id: "pump", programId: PROGRAM },
+      cursor: { signature: "old", slot: 101 },
+      parseTransaction: () => [],
+    });
+    assert.deepEqual(result.newestProcessed, { signature: "failed", slot: 103 });
+    assert.equal(connection.calls.some((call) => call === "tx:failed"), false);
+  });
+
+  it("does not advance the cursor when a confirmed transaction is temporarily unavailable", async () => {
+    const connection = fakeConnection();
+    connection.getTransaction = async () => null;
+    await assert.rejects(() => reconcileProgram({
+      connection,
+      program: { id: "pump", programId: PROGRAM },
+      cursor: { signature: "old", slot: 101 },
+      parseTransaction: () => [],
+    }), /transaction unavailable.*middle/i);
+  });
+
   it("deduplicates WebSocket hints and exposes an unsubscribe function", async () => {
     let listener;
     let removed = null;

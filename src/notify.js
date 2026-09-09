@@ -80,7 +80,7 @@ export function formatAlert(report) {
   lines.push("");
   lines.push([
     safeHttpLink("DexScreener", links.dex),
-    safeHttpLink("Blockscout", links.explorer),
+    safeHttpLink(report.chain === "solana" ? "Solscan" : "Blockscout", links.explorer),
     safeHttpLink("GMGN", links.gmgn),
   ].join(" · "));
   lines.push("");

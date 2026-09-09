@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { runEvmRangeOnce } from "../src/evm/runner.js";
+import { runEvmRangeOnce, watchEvm } from "../src/evm/runner.js";
 
 const candidate = {
   chain: "base",
@@ -118,5 +118,31 @@ describe("generic EVM range runner", () => {
     assert.equal(value.cursor(), 99);
     assert.equal(value.seen.size, 0);
     assert.deepEqual(value.alerts, [candidate.token]);
+  });
+
+  it("retries a recoverable discovery failure without exiting the watcher", async () => {
+    const value = setup({ cursor: 99 });
+    let runs = 0;
+    let released = 0;
+    const stop = new Error("stop-test");
+    value.dependencies.getBlockNumber = async () => {
+      runs++;
+      if (runs === 1) throw Object.assign(new Error("429 rate limited https://secret.example/key"), { status: 429 });
+      return 102;
+    };
+    value.dependencies.acquireLock = async () => async () => { released++; };
+    let sleeps = 0;
+    value.dependencies.sleep = async () => {
+      sleeps++;
+      if (sleeps === 2) throw stop;
+    };
+    const logs = [];
+    value.dependencies.log = (message) => logs.push(message);
+
+    await assert.rejects(() => watchEvm(value.config, value.dependencies), (error) => error === stop);
+    assert.equal(runs, 2);
+    assert.equal(released, 1);
+    assert.match(logs[0], /discovery retry/i);
+    assert.doesNotMatch(logs[0], /secret\.example/);
   });
 });
