@@ -27,6 +27,7 @@ import {
   decideCandidateRecheck,
   shouldScheduleCandidateRecheck,
 } from "./candidate-retry.js";
+import { RetryableCandidateError } from "./candidate-recovery.js";
 
 const DEFAULT_ANALYSIS_CONCURRENCY = 1;
 const candidates = new CandidateQueue({
@@ -780,6 +781,26 @@ export function buildWatchCandidateDependencies({
     log,
     onAnalyzed,
   };
+}
+
+export async function processWatchCandidate(event, {
+  classifyCandidate,
+  candidateDependencies,
+}) {
+  const classified = await classifyCandidate(event);
+  if (classified.identity === "pons-v2") {
+    candidateDependencies.markSeen(candidateKey(event), {
+      token: event.token,
+      skipped: "pons-v2",
+    });
+    return null;
+  }
+  if (classified.identity === "unknown") {
+    throw new RetryableCandidateError(
+      `Pons identity unknown for ${event.token}: ${classified.error || "Factory read failed"}`
+    );
+  }
+  return handleCandidate(classified, { persistSeen: true }, candidateDependencies);
 }
 
 function currentFailoverError(error) {

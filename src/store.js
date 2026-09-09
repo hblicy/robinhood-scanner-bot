@@ -3,6 +3,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { DATA_DIR, SETTINGS } from "./config.js";
 import { advanceProgramCursor, createSolanaCursorState } from "./solana/cursor.js";
+import { safeErrorMessage } from "./safety.js";
 
 const STATE_VERSION = 5;
 const MIN_APPLIED_EVENT_TTL_MS = 7 * 86_400_000;
@@ -448,7 +449,7 @@ export function createStore({
           nextAttemptAt: check.dueAt,
           createdAt: now(),
           completedAt: null,
-          lastError: null,
+          lastError: check.lastError == null ? null : safeErrorMessage(check.lastError),
         };
         return draft.pendingChecks[check.id];
       });

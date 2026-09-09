@@ -22,19 +22,48 @@ const CONFIRMED_SELLABILITY = {
 };
 
 describe("scanner orchestration", () => {
-  it("binds live candidate analysis to the watch RPC analysis function", async () => {
+  it("executes classify, analyze and markSeen through the live candidate path", async () => {
     const scanner = await import("../src/scanner.js");
-    assert.equal(typeof scanner.buildWatchCandidateDependencies, "function");
+    assert.equal(typeof scanner.processWatchCandidate, "function");
+    const calls = [];
+    const event = {
+      chain: "robinhood",
+      token: "0x1000000000000000000000000000000000000001",
+      pool: "0x2000000000000000000000000000000000000002",
+      source: "gecko",
+      venue: "uniswap-v2",
+      createdAt: 1_000,
+      observedAt: 2_000,
+    };
 
-    const analyzeCandidate = async () => ({ score: 80 });
-    const dependencies = scanner.buildWatchCandidateDependencies({
-      rpc: { analyzeCandidate },
-      mode: "live",
-      onAnalyzed: async () => {},
+    await scanner.processWatchCandidate(event, {
+      classifyCandidate: async (value) => {
+        calls.push("classify");
+        return { ...value, identity: "not_pons" };
+      },
+      candidateDependencies: {
+        now: () => 2_000,
+        maxAgeMinutes: 30,
+        minScore: 70,
+        mode: "live",
+        analyze: async (value) => {
+          calls.push("analyze");
+          return {
+            ...value,
+            score: 80,
+            verdict: "review",
+            meta: { symbol: "TEST" },
+            honeypot: { honeypot: false },
+            sellability: CONFIRMED_SELLABILITY,
+          };
+        },
+        markSeen: () => calls.push("seen"),
+        alertReport: async () => calls.push("alert"),
+        log: () => {},
+      },
     });
 
-    assert.equal(dependencies.analyze, analyzeCandidate);
-    assert.equal(dependencies.mode, "live");
+    assert.deepEqual(calls, ["classify", "analyze", "alert", "seen"]);
   });
 
   it("shares one discovery session runner across watch loops and keeps candidate calls on analysis RPC", async () => {
