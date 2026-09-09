@@ -183,6 +183,7 @@ export function createCandidateRecheckHandler({
   analyze: analyzeCandidate = analyze,
   alertReport: sendAlert = alertReport,
   log = console.log,
+  mode = "live",
 }) {
   if (typeof executeCandidate !== "function") {
     throw new Error("candidate recheck handler requires a shared executor");
@@ -200,6 +201,7 @@ export function createCandidateRecheckHandler({
         now,
         maxAgeMinutes,
         minScore,
+        mode,
         analyze: analyzeCandidate,
         markSeen: () => {},
         alertReport: sendAlert,
@@ -261,6 +263,8 @@ export function createInspectionCheckHandlers({
       transitionType,
       token: check.token,
       reason: report.reasons?.[0] || (transitionType === "market_ready" ? "Hook 与双向市场证据已确认" : "风险硬门槛触发"),
+      watchlisted: previous.watchlist === true,
+      evidenceConfirmed: transitionType === "hard_kill",
     } : null;
     if (notification) notification.text = formatLifecycleNotification(notification);
     return { token: check.token, nextToken, notification };
@@ -365,6 +369,7 @@ export async function reconcilePonsWatchlist({
         transitionType: "rescued",
         token: address,
         reason: `Factory getter 阶段为 ${phase}`,
+        watchlisted: previous.watchlist === true,
       };
       notification.text = formatLifecycleNotification(notification);
     }
@@ -813,6 +818,7 @@ async function watch({ mode = "live" } = {}) {
         analyze: rpc.analyzeCandidate,
         alertReport: sendCandidateAlert,
         log: console.log,
+        mode,
       }),
     };
     const createSourceProcessor = () => {
@@ -852,6 +858,7 @@ async function watch({ mode = "live" } = {}) {
                 now: Date.now,
                 maxAgeMinutes: SETTINGS.maxAgeMinutes,
                 minScore: SETTINGS.minScore,
+                mode,
                 analyze: analyzeCandidate,
                 markSeen,
                 alertReport: sendCandidateAlert,

@@ -118,6 +118,7 @@ test("Telegram failure leaves a critical notification retryable without rolling 
         id: `${EVENT_ID}:hard_kill`,
         eventId: EVENT_ID,
         transitionType: "hard_kill",
+        evidenceConfirmed: true,
         token: TOKEN,
         text: "hard kill",
       }],
