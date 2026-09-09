@@ -473,7 +473,6 @@ export async function processOnchainRange({ from, head }, dependencies) {
   const events = await dependencies.scanOnchain(from, head);
   const result = await dependencies.handleEvents(events);
   const complete = result.failed === 0;
-  if (complete) dependencies.setOnchainCursor(head);
   return { events, ...result, complete };
 }
 
@@ -496,37 +495,52 @@ export async function runWatchIteration(state, dependencies) {
   const runOnchain = async () => {
     if (!settings.onchainScan) return;
     try {
-      const latestHead = await dependencies.getBlockNumber();
-      const safeHead = latestHead - (settings.confirmationBlocks ?? 0);
-      if (safeHead >= 0 && state.lastBlock == null) {
-        state.lastBlock = await initialOnchainCursor({
-          head: safeHead,
-          savedCursor: dependencies.getOnchainCursor(),
-          maxAgeMinutes: settings.maxAgeMinutes,
-          now: dependencies.now,
-          findFirstBlockAtOrAfter: dependencies.findFirstBlockAtOrAfter,
-        });
-      }
-      if (safeHead >= 0 && safeHead > state.lastBlock) {
-        const from = state.lastBlock + 1;
-        const result = await processOnchainRange(
+      const runDiscoverySession = dependencies.runDiscoverySession ??
+        ((work) => work(dependencies.provider));
+      const result = await runDiscoverySession(async (provider) => {
+        const latestHead = await dependencies.getBlockNumber(provider);
+        const safeHead = latestHead - (settings.confirmationBlocks ?? 0);
+        let lastBlock = state.lastBlock;
+        if (safeHead >= 0 && lastBlock == null) {
+          lastBlock = await initialOnchainCursor({
+            head: safeHead,
+            savedCursor: dependencies.getOnchainCursor(),
+            maxAgeMinutes: settings.maxAgeMinutes,
+            now: dependencies.now,
+            findFirstBlockAtOrAfter: (target, head) =>
+              dependencies.findFirstBlockAtOrAfter(target, head, provider),
+          });
+        }
+        if (safeHead < 0 || safeHead <= lastBlock) {
+          return { safeHead, lastBlock, scanned: null };
+        }
+        const from = lastBlock + 1;
+        const scanned = await processOnchainRange(
           { from, head: safeHead },
           {
-            scanOnchain: dependencies.scanOnchain,
+            scanOnchain: (start, end) => dependencies.scanOnchain(start, end, provider),
             handleEvents: (events) => dependencies.handleEvents(
               events.map((event) => ({ ...event, observedAt: event.observedAt ?? observedAt })),
               "onchain"
             ),
-            setOnchainCursor: dependencies.setOnchainCursor,
           }
         );
-        if (result.events.length) {
-          dependencies.log(
-            `onchain ${from}-${safeHead}: ${result.events.length} pools, ${result.accepted} new`
-          );
-        }
-        if (result.complete) state.lastBlock = safeHead;
-        else dependencies.log(`onchain ${from}-${safeHead}: ${result.failed} failed; cursor not advanced`);
+        return { safeHead, lastBlock, from, scanned };
+      });
+      if (result.scanned?.events.length) {
+        dependencies.log(
+          `onchain ${result.from}-${result.safeHead}: ${result.scanned.events.length} pools, ${result.scanned.accepted} new`
+        );
+      }
+      if (result.scanned?.complete) {
+        dependencies.setOnchainCursor(result.safeHead);
+        state.lastBlock = result.safeHead;
+      } else if (result.scanned) {
+        dependencies.log(
+          `onchain ${result.from}-${result.safeHead}: ${result.scanned.failed} failed; cursor not advanced`
+        );
+      } else if (state.lastBlock == null) {
+        state.lastBlock = result.lastBlock;
       }
     } catch (cause) {
       const error = new Error(`onchain watch failed: ${safeErrorMessage(cause)}`, { cause });

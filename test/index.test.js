@@ -298,7 +298,7 @@ describe("scanner orchestration", () => {
     assert.deepEqual(result, { accepted: 2, handled: 1, failed: 1 });
   });
 
-  it("advances the persisted onchain cursor only after a fully successful range", async () => {
+  it("reports range completeness without persisting the cursor itself", async () => {
     const cursorWrites = [];
     const scannedRanges = [];
     const success = await processOnchainRange(
@@ -339,7 +339,7 @@ describe("scanner orchestration", () => {
     assert.equal(failed.complete, false);
     assert.equal(retried.complete, true);
     assert.deepEqual(scannedRanges, [[10, 20], [21, 30], [21, 30]]);
-    assert.deepEqual(cursorWrites, [20, 30]);
+    assert.deepEqual(cursorWrites, []);
   });
 
   it("processes one-shot candidates without persistent or Telegram dependencies", async () => {
@@ -855,6 +855,67 @@ describe("scanner orchestration", () => {
     assert.equal(state.lastBlock, 8);
     assert.equal(result.errors.length, 1);
     assert.match(result.errors[0].message, /gecko unavailable/i);
+  });
+
+  it("restarts onchain discovery from the committed cursor at the fallback head", async () => {
+    const official = { name: "official", head: 102 };
+    const analysis = { name: "analysis", head: 98 };
+    const scans = [];
+    let cursor = 90;
+    const state = { lastBlock: 90, lastGecko: 0 };
+    await runWatchIteration(state, {
+      settings: {
+        onchainScan: true,
+        geckoScan: false,
+        confirmationBlocks: 0,
+        maxAgeMinutes: 30,
+      },
+      runDiscoverySession: async (work) => {
+        await assert.rejects(() => work(official), /official logs failed/);
+        return work(analysis);
+      },
+      now: () => 1_000,
+      getBlockNumber: async (provider) => provider.head,
+      getOnchainCursor: () => cursor,
+      findFirstBlockAtOrAfter: async () => 0,
+      scanOnchain: async (from, to, provider) => {
+        scans.push([provider.name, from, to]);
+        if (provider === official) throw new Error("official logs failed");
+        return [];
+      },
+      handleEvents: async () => ({ accepted: 0, handled: 0, failed: 0 }),
+      setOnchainCursor: (value) => { cursor = value; },
+      geckoNewPools: async () => [],
+      log: () => {},
+    });
+    assert.deepEqual(scans, [["official", 91, 102], ["analysis", 91, 98]]);
+    assert.equal(cursor, 98);
+    assert.equal(state.lastBlock, 98);
+  });
+
+  it("keeps both onchain cursors unchanged when candidate handling fails", async () => {
+    let cursor = 90;
+    const state = { lastBlock: 90, lastGecko: 0 };
+    await runWatchIteration(state, {
+      settings: {
+        onchainScan: true,
+        geckoScan: false,
+        confirmationBlocks: 0,
+        maxAgeMinutes: 30,
+      },
+      runDiscoverySession: (work) => work({ name: "official", head: 92 }),
+      now: () => 1_000,
+      getBlockNumber: async (provider) => provider.head,
+      getOnchainCursor: () => cursor,
+      findFirstBlockAtOrAfter: async () => 0,
+      scanOnchain: async () => [{ token: "0x1" }],
+      handleEvents: async () => ({ accepted: 1, handled: 0, failed: 1 }),
+      setOnchainCursor: (value) => { cursor = value; },
+      geckoNewPools: async () => [],
+      log: () => {},
+    });
+    assert.equal(cursor, 90);
+    assert.equal(state.lastBlock, 90);
   });
 
   it("does not use RPC in watch iterations when onchain discovery is disabled", async () => {
