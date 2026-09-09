@@ -1,10 +1,7 @@
 import { normalizeSellabilityEvidence } from "./sellability.js";
+import { candidateKey } from "./core/candidate.js";
 
-export function candidateKey(event) {
-  return [event?.venue || "unknown", event?.poolId || event?.pool || "no-pool", event?.token || "no-token"]
-    .map((value) => String(value).toLowerCase())
-    .join("|");
-}
+export { candidateKey } from "./core/candidate.js";
 
 function normalizeSellabilityReason(reason) {
   if (reason == null || reason === "") return "none";
