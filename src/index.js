@@ -12,8 +12,11 @@ export function assertSupportedCommand(command) {
 
 export async function main() {
   const cli = parseCli(process.argv.slice(2));
-  const { runCommand } = await import("./scanner.js");
-  await runCommand(cli.command, cli.argument, { chainKey: cli.chain });
+  const { createApp } = await import("./app.js");
+  const app = createApp({ chainKey: cli.chain });
+  if (cli.command === "watch") await app.watch();
+  else if (cli.command === "scan") await app.scan();
+  else await app.check(cli.argument);
 }
 
 const isMain = Boolean(process.argv[1]) && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);

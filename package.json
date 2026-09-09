@@ -7,6 +7,10 @@
   "scripts": {
     "start": "node src/index.js watch",
     "watch": "node src/index.js watch",
+    "watch:robinhood": "node src/index.js watch --chain robinhood",
+    "watch:base": "node src/index.js watch --chain base",
+    "watch:bsc": "node src/index.js watch --chain bsc",
+    "watch:ethereum": "node src/index.js watch --chain ethereum",
     "scan": "node src/index.js scan",
     "check": "node src/index.js check",
     "import-wallets": "node scripts/import-wallet-csv.js",

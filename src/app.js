@@ -4,7 +4,14 @@ import { fileURLToPath } from "node:url";
 import { createChainRpcContext } from "./chain.js";
 import { loadChainConfig } from "./chains/load-chain.js";
 import { getStoreFor } from "./store.js";
+import { instanceLockPort } from "./instance-lock.js";
+import { createAerodromeClassicAdapter, createAerodromeSlipstreamAdapter } from "./venues/evm/aerodrome.js";
+import { createClankerAdapter } from "./venues/evm/clanker.js";
+import { createFourMemeAdapter } from "./venues/evm/four-meme.js";
+import { createPancakeInfinityAdapter, createPancakeV2Adapter, createPancakeV3Adapter } from "./venues/evm/pancakeswap.js";
 import { createPonsAdapter } from "./venues/evm/pons.js";
+import { createUniswapV2Adapter, createUniswapV3Adapter, createUniswapV4Adapter } from "./venues/evm/uniswap.js";
+import { createEvmSecurityRegistry, createV2SecurityEntry } from "./security/evm/index.js";
 
 const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const LEGACY_STATE_FILES = Object.freeze([
@@ -62,6 +69,68 @@ function defaultCommands() {
   };
 }
 
+function quoteAddresses(profile) {
+  return profile.quotes.map(({ address }) => address);
+}
+
+function instantiateVenue(profile, venue) {
+  const common = { id: venue.id, quoteAddresses: quoteAddresses(profile), version: venue.version };
+  if (venue.id.startsWith("uniswap-v2-")) {
+    return createUniswapV2Adapter({ ...common, address: venue.contracts.factory });
+  }
+  if (venue.id.startsWith("uniswap-v3-")) {
+    return createUniswapV3Adapter({ ...common, address: venue.contracts.factory });
+  }
+  if (venue.id.startsWith("uniswap-v4-")) {
+    return createUniswapV4Adapter({ ...common, address: venue.contracts.poolManager });
+  }
+  if (venue.id === "aerodrome-classic-base") {
+    return createAerodromeClassicAdapter({ ...common, address: venue.contracts.factory });
+  }
+  if (venue.id.startsWith("aerodrome-slipstream-")) {
+    return createAerodromeSlipstreamAdapter({ ...common, address: venue.contracts.factory });
+  }
+  if (venue.id === "clanker-v4-base") {
+    return createClankerAdapter({
+      ...common,
+      address: venue.contracts.factory,
+      poolManagerAddress: venue.contracts.poolManager,
+    });
+  }
+  if (venue.id === "pancakeswap-v2-bsc") {
+    return createPancakeV2Adapter({ ...common, address: venue.contracts.factory });
+  }
+  if (venue.id === "pancakeswap-v3-bsc") {
+    return createPancakeV3Adapter({ ...common, address: venue.contracts.factory });
+  }
+  if (venue.id === "pancakeswap-infinity-cl-bsc") {
+    return createPancakeInfinityAdapter({ ...common, address: venue.contracts.poolManager });
+  }
+  if (venue.id === "four-meme-v2-bsc") {
+    return createFourMemeAdapter({
+      id: venue.id,
+      address: venue.contracts.manager,
+      helperAddress: venue.contracts.helper,
+      wrappedNative: profile.wrappedNative,
+      version: venue.version,
+    });
+  }
+  throw new Error(`no discovery adapter for ${profile.key}|${venue.id}`);
+}
+
+function securityRegistry(profile) {
+  const entries = profile.venues
+    .filter(({ id }) => id.startsWith("uniswap-v2-") || id === "pancakeswap-v2-bsc")
+    .map((venue) => createV2SecurityEntry({
+      chain: profile.key,
+      venue: venue.id,
+      factoryAddress: venue.contracts.factory,
+      wrappedNative: profile.wrappedNative,
+      excludedAddresses: Object.values(venue.contracts),
+    }));
+  return createEvmSecurityRegistry(entries);
+}
+
 async function assertRpcChain(rpcContext, expectedChainId) {
   const rawChainId = await rpcContext.analysisProvider.send("eth_chainId", []);
   let actualChainId;
@@ -84,7 +153,7 @@ export function createApp({ chainKey, env = process.env, dependencies = {} }) {
   const createRpcContext = dependencies.createRpcContext ?? createChainRpcContext;
   const rpcContext = createRpcContext(rpcOptions(loaded));
   const store = getStoreFor(dataDir, dependencies.storeSettings);
-  const venues = [...loaded.profile.venues];
+  const venues = loaded.profile.venues.map((venue) => instantiateVenue(loaded.profile, venue));
   if (chainKey === "robinhood") venues.push(createPonsAdapter());
   const commands = dependencies.commands ?? defaultCommands();
   const verifyChain = dependencies.assertChain ?? assertRpcChain;
@@ -95,8 +164,11 @@ export function createApp({ chainKey, env = process.env, dependencies = {} }) {
     rpcContext,
     store,
     telegramTitle: loaded.profile.name,
+    telegram: loaded.telegram,
+    lockPort: instanceLockPort(dataDir),
     venues: Object.freeze(venues),
     venueIds: Object.freeze(venues.map((venue) => venue.id)),
+    securityRegistry: securityRegistry(loaded.profile),
   });
   const context = Object.freeze({ config });
   let chainVerification;

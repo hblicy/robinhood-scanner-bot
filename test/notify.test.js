@@ -8,6 +8,17 @@ const settings = {
 };
 
 describe("Telegram delivery", () => {
+  it("prefixes lifecycle notifications with the active chain name", () => {
+    const text = formatLifecycleNotification({
+      chainName: "BNB Chain",
+      transitionType: "graduated",
+      token: "0x1111111111111111111111111111111111111111",
+      reason: "pool ready",
+      id: "bsc:event",
+    });
+    assert.match(text, /^🎓 \[BNB Chain\] 链上毕业/);
+  });
+
   it("retries twice and succeeds on the third attempt", async () => {
     let attempts = 0;
     const waits = [];

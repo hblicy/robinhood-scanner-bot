@@ -72,6 +72,11 @@ function makeReport(overrides = {}) {
 }
 
 describe("formatAlert", () => {
+  it("prefixes a candidate report with the active chain name", () => {
+    const text = formatAlert(makeReport({ chainName: "Base", chain: "base" }));
+    assert.match(text, /^🟢 \[Base\] 可小仓试/);
+  });
+
   it("distinguishes unconfigured, unmatched, and matched smart-wallet signals", () => {
     const unconfigured = formatAlert(makeReport({
       walletSignals: { status: "unconfigured", count: 0, matches: [] },

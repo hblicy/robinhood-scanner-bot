@@ -16,7 +16,8 @@ export function formatAlert(report) {
   const walletSignals = normalizeWalletSignals(report.walletSignals || sellability.walletSignals);
   const sellabilityReason = formatSellabilityReason(sellability.status, sellability.reason);
   const lines = [];
-  lines.push(`${VERDICT[verdict] || verdict}  <b>${esc(meta.symbol)}</b>  ${score}/100`);
+  const chainName = report.chainName || report.chain || "Robinhood Chain";
+  lines.push(`${verdictIcon(verdict)} [${esc(chainName)}] ${verdictText(verdict)}  <b>${esc(meta.symbol)}</b>  ${score}/100`);
   lines.push(`${esc(meta.name || "")}`);
   lines.push("");
   lines.push(`<b>CA</b> <code>${token}</code>`);
@@ -103,12 +104,22 @@ export function formatLifecycleNotification(notification) {
   const type = String(notification?.transitionType || "unknown");
   const label = LIFECYCLE_LABELS[type] || "Pons V2 状态变化";
   const reason = notification?.reason || "链上状态变化";
+  const [icon, ...words] = label.split(" ");
+  const chainName = notification?.chainName || notification?.chain || "Robinhood Chain";
   return [
-    `${label} [${esc(type)}]`,
+    `${icon} [${esc(chainName)}] ${words.join(" ")} [${esc(type)}]`,
     `<b>CA</b> <code>${esc(notification?.token)}</code>`,
     `<b>原因</b> ${esc(reason)}`,
     `<b>ID</b> <code>${esc(notification?.id)}</code>`,
   ].join("\n");
+}
+
+function verdictIcon(verdict) {
+  return String(VERDICT[verdict] || verdict).split(" ")[0];
+}
+
+function verdictText(verdict) {
+  return String(VERDICT[verdict] || verdict).split(" ").slice(1).join(" ");
 }
 
 function delay(ms) {
