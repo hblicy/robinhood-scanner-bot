@@ -1,4 +1,5 @@
 import { getAddress } from "ethers";
+import { PublicKey } from "@solana/web3.js";
 
 const CHAIN_FAMILIES = Object.freeze({
   ethereum: "evm",
@@ -31,7 +32,12 @@ function nonNegativeInteger(name, value) {
 function normalizeIdentity(name, value, family, { optional = false } = {}) {
   if (optional && value == null) return null;
   const identity = requiredString(name, value);
-  return family === "evm" ? getAddress(identity) : identity;
+  if (family === "evm") return getAddress(identity);
+  try {
+    return new PublicKey(identity).toBase58();
+  } catch (error) {
+    throw new Error(`${name} must be a valid Solana public key`, { cause: error });
+  }
 }
 
 export function normalizeCandidate(input) {
@@ -48,6 +54,9 @@ export function normalizeCandidate(input) {
   const transactionId = requiredString("transactionId", input.transactionId);
   if (chainFamily === "evm" && !/^0x[0-9a-fA-F]{64}$/.test(transactionId)) {
     throw new Error("transactionId must be a 32-byte EVM hash");
+  }
+  if (chainFamily === "solana" && !/^[1-9A-HJ-NP-Za-km-z]{1,88}$/.test(transactionId)) {
+    throw new Error("transactionId must be a Base58 Solana signature");
   }
   if (input.createdAt != null && (!Number.isFinite(input.createdAt) || input.createdAt < 0)) {
     throw new Error("createdAt must be null or a non-negative timestamp");

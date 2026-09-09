@@ -48,13 +48,29 @@ describe("normalized candidate", () => {
       chainFamily: "solana",
       token: "So11111111111111111111111111111111111111112",
       quoteToken: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
-      pool: "Pool111111111111111111111111111111111111111",
+      pool: "SysvarRent111111111111111111111111111111111",
       poolId: "MixedCasePoolId",
-      transactionId: "MixedCaseSignature",
-      creator: "Creator1111111111111111111111111111111111111",
+      transactionId: "5".repeat(64),
+      creator: null,
     });
     assert.equal(candidateKey(solana), "solana|uniswap-v3-base|MixedCasePoolId");
-    assert.equal(rawEventKey(solana), "solana|MixedCaseSignature|2");
+    assert.equal(rawEventKey(solana), `solana|${"5".repeat(64)}|2`);
+  });
+
+  it("validates identities according to the selected chain family", () => {
+    const solana = {
+      ...input,
+      chain: "solana",
+      chainFamily: "solana",
+      token: "So11111111111111111111111111111111111111112",
+      quoteToken: "11111111111111111111111111111111",
+      pool: "Vote111111111111111111111111111111111111111",
+      transactionId: "5".repeat(64),
+    };
+    assert.doesNotThrow(() => normalizeCandidate(solana));
+    assert.throws(() => normalizeCandidate({ ...solana, token: "0x1111111111111111111111111111111111111111" }), /token/);
+    assert.throws(() => normalizeCandidate({ ...solana, transactionId: "0OIl" }), /transactionId/);
+    assert.throws(() => normalizeCandidate({ ...input, token: solana.token }), /address/i);
   });
 
   it("rejects missing provenance and invalid event identity", () => {
