@@ -47,6 +47,19 @@ npm run watch:robinhood
 
 启动摘要会显示资产条目数、启用/禁用 Venue 和 RPC 预算阶段，不打印 RPC URL 或凭据。身份或严格卖出验证能力未完成的 Launchpad 保持 disabled/discovery-only，不能进入付费深检和 Telegram 普通候选推送。
 
+当前 Launchpad 状态如下：
+
+| 链 | Venue | 状态 | disabledReason / 运行规则 |
+| --- | --- | --- | --- |
+| Robinhood | Pons V2 | `enabled` | 独立生命周期运行；`new_launch/swept/graduated` 仅记录，`hard_kill/rescued/green/market_ready` 可立即推送 |
+| Robinhood | O1 | `enabled` | Factory、Hook、PoolManager 与股票底池地址均需匹配 |
+| Robinhood | Pons V1 | `disabled-unverified` | `missing-verified-abi-or-event-source` |
+| Robinhood | Long | `disabled-unverified` | `missing-verified-factory` |
+| BNB Chain | Four.meme | `enabled` | 创建事件仅记录；毕业事件必须绑定同交易唯一 Pancake 池 |
+| BNB Chain | Flap | `enabled` | 创建事件仅记录；迁移后用 Portal `getTokenV8Safe` 校验底池、池地址及买卖税 |
+
+O1、Four.meme 和 Flap 的 `enabled` 不代表原始发币立即推送：未解析池的 Launchpad 候选统一 `record-only`。股票底池自己的合规转账政策、暂停或倍率限制单独报告，不会改写目标 Meme 的 sellability；读取失败显示 `reference-check-unavailable`。Flap 配置税率超过 `MAX_TAX_BPS` 时直接标记 `blocked:excessive-tax`。
+
 ## 状态与回滚
 
 状态目录是 `data/<chain>/state.json`，同目录还会保存 `rpc-usage.json` 和可选的 `asset-catalog.json`。升级前备份对应目录；不要复制一个链的状态到另一条链。停止某个进程不会影响其他链。程序只读链和外部数据，不含私钥、签名或广播交易能力。

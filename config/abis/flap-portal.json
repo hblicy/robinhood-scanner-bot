@@ -1,0 +1,69 @@
+{
+  "name": "Flap Portal",
+  "chainId": 56,
+  "address": "0xe2cE6ab80874Fa9Fa2aAE65D277Dd6B8e65C9De0",
+  "scope": "discovery-events",
+  "docsVersion": "v5.14.16",
+  "protocolVersion": "v5.23.0",
+  "verifiedAt": "2026-09-10",
+  "sources": {
+    "addresses": "https://docs.flap.sh/flap/developers/deployed-contract-addresses",
+    "creationEvents": "https://docs.flap.sh/flap/developers/wallet-and-terminal-and-bot-developers/index-token-created-events",
+    "migrationEvents": "https://docs.flap.sh/flap/developers/token-migration",
+    "tokenState": "https://docs.flap.sh/flap/developers/wallet-and-terminal-and-bot-developers/inspect-a-token"
+  },
+  "abi": [
+    {
+      "type": "event",
+      "name": "TokenCreated",
+      "anonymous": false,
+      "inputs": [
+        { "name": "ts", "type": "uint256", "indexed": false },
+        { "name": "creator", "type": "address", "indexed": false },
+        { "name": "nonce", "type": "uint256", "indexed": false },
+        { "name": "token", "type": "address", "indexed": false },
+        { "name": "name", "type": "string", "indexed": false },
+        { "name": "symbol", "type": "string", "indexed": false },
+        { "name": "meta", "type": "string", "indexed": false }
+      ]
+    },
+    {
+      "type": "event",
+      "name": "TokenQuoteSet",
+      "anonymous": false,
+      "inputs": [
+        { "name": "token", "type": "address", "indexed": false },
+        { "name": "quoteToken", "type": "address", "indexed": false }
+      ]
+    },
+    {
+      "type": "event",
+      "name": "TokenVersionSet",
+      "anonymous": false,
+      "inputs": [
+        { "name": "token", "type": "address", "indexed": false },
+        { "name": "version", "type": "uint8", "indexed": false }
+      ]
+    },
+    {
+      "type": "event",
+      "name": "FlapTokenTaxSet",
+      "anonymous": false,
+      "inputs": [
+        { "name": "token", "type": "address", "indexed": false },
+        { "name": "tax", "type": "uint256", "indexed": false }
+      ]
+    },
+    {
+      "type": "event",
+      "name": "LaunchedToDEX",
+      "anonymous": false,
+      "inputs": [
+        { "name": "token", "type": "address", "indexed": false },
+        { "name": "pool", "type": "address", "indexed": false },
+        { "name": "amount", "type": "uint256", "indexed": false },
+        { "name": "eth", "type": "uint256", "indexed": false }
+      ]
+    }
+  ]
+}

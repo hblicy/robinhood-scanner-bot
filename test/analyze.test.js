@@ -244,7 +244,17 @@ describe("analyze data completeness", () => {
     const pairCreatedAt = NOW - 8 * 60_000;
     let honeypotInput;
     await analyze(
-      { ...event, blockNumber: 123, createdAt: NOW - 1 * 60_000 },
+      {
+        ...event,
+        blockNumber: 123,
+        createdAt: NOW - 1 * 60_000,
+        poolId: `0x${"ab".repeat(32)}`,
+        referenceAssetKind: "stock",
+        referenceAssetIssuer: "Robinhood",
+        assetSource: "official-catalog",
+        assetVerifiedAt: NOW - 60_000,
+        referenceRestrictions: ["eu-only"],
+      },
       dependencies({
         dexScreener: async () => ({ marketBound: true, pairCreatedAt }),
         honeypotCheck: async (value) => {
@@ -259,12 +269,18 @@ describe("analyze data completeness", () => {
       quote: QUOTE,
       venue: "uniswap-v2",
       pool: POOL,
+      poolId: `0x${"ab".repeat(32)}`,
       holders: [],
       blockNumber: 123,
       pairCreatedAt,
       decimals: 18,
       walletCatalog: WALLET_CATALOG,
       metadata: {},
+      referenceAssetKind: "stock",
+      referenceAssetIssuer: "Robinhood",
+      assetSource: "official-catalog",
+      assetVerifiedAt: NOW - 60_000,
+      referenceRestrictions: ["eu-only"],
     });
   });
 
@@ -460,5 +476,30 @@ describe("analyze data completeness", () => {
       }),
     }));
     assert.match(report.checks.find((check) => check.key === "honeypot").detail, /买税 0bps \/ 卖税 0bps/);
+  });
+
+  it("preserves launchpad tax evidence carried by the sellability adapter", async () => {
+    const report = await analyze(event, dependencies({
+      honeypotCheck: async () => ({
+        honeypot: false,
+        complete: true,
+        sellOk: true,
+        reason: "confirmed real sells",
+        buyTaxBps: null,
+        sellTaxBps: null,
+        sellability: {
+          status: "confirmed",
+          reason: null,
+          buyerSamples: 3,
+          ladderSamples: 2,
+          meaningfulSellers: 3,
+          buyTaxBps: 100,
+          sellTaxBps: 200,
+        },
+      }),
+    }));
+
+    assert.equal(report.facts.buyTaxBps, 100);
+    assert.equal(report.facts.sellTaxBps, 200);
   });
 });

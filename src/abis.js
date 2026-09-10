@@ -57,6 +57,27 @@ export const FOUR_MEME_HELPER_ABI = [
   "function getTokenInfo(address token) view returns (uint256 version,address tokenManager,address quote,uint256 lastPrice,uint256 tradingFeeRate,uint256 minTradingFee,uint256 launchTime,uint256 offers,uint256 maxOffers,uint256 funds,uint256 maxFunds,bool liquidityAdded)",
 ];
 
+export const FLAP_PORTAL_ABI = [
+  "event TokenCreated(uint256 ts,address creator,uint256 nonce,address token,string name,string symbol,string meta)",
+  "event TokenQuoteSet(address token,address quoteToken)",
+  "event TokenVersionSet(address token,uint8 version)",
+  "event FlapTokenTaxSet(address token,uint256 tax)",
+  "event LaunchedToDEX(address token,address pool,uint256 amount,uint256 eth)",
+];
+
+export const FLAP_PORTAL_STATE_ABI = [
+  "function getTokenV8Safe(address token) view returns (tuple(uint8 status,uint256 reserve,uint256 circulatingSupply,uint256 price,uint8 tokenVersion,uint256 r,uint256 h,uint256 k,uint256 dexSupplyThresh,address quoteTokenAddress,bool nativeToQuoteSwapEnabled,bytes32 extensionID,uint256 buyTaxRate,uint256 sellTaxRate,address pool,uint256 progress,uint8 lpFeeProfile,uint8 dexId) state)",
+];
+
+export const POOL_TOKEN_ABI = [
+  "function token0() view returns (address)",
+  "function token1() view returns (address)",
+];
+
+export const O1_LAUNCH_FACTORY_ABI = [
+  "event Launched(address indexed token,bytes32 indexed poolId,address indexed originalCreator,address quoteToken,uint256 launchSupply,int24 tickSpacing)",
+];
+
 export const V2_ROUTER_ABI = [
   "function getAmountsOut(uint256 amountIn, address[] path) view returns (uint256[] amounts)",
 ];

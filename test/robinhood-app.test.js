@@ -98,7 +98,7 @@ describe("Robinhood multichain application", () => {
     assert.deepEqual(calls, [
       ["rpc", 4663],
       ["chain", 4663],
-      ["venues", 2],
+      ["venues", 4],
       ["watch", path.join(projectRoot, "data", "robinhood")],
       ["scan", 4663],
       ["check", "0x1111111111111111111111111111111111111111", 4663],

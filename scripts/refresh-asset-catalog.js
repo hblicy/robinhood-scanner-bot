@@ -17,6 +17,26 @@ const SOURCES = Object.freeze({
   solana: Object.freeze({ enabled: false, reason: "source mapper not enabled" }),
 });
 
+function assetKey(address) {
+  const value = String(address);
+  return /^0x[0-9a-fA-F]{40}$/.test(value) ? value.toLowerCase() : value;
+}
+
+export function mergeVerifiedAssetRows(rows) {
+  if (!Array.isArray(rows)) throw new Error("asset rows must be an array");
+  const byAddress = new Map();
+  for (const row of rows) {
+    const key = assetKey(row?.address);
+    const previous = byAddress.get(key);
+    if (previous && previous.issuer !== row.issuer) {
+      throw new Error(`asset issuer conflict for ${row.address}: ${previous.issuer} vs ${row.issuer}`);
+    }
+    if (!previous) byAddress.set(key, row);
+  }
+  return [...byAddress.values()].sort((left, right) =>
+    assetKey(left.address).localeCompare(assetKey(right.address)));
+}
+
 function atomicWriteJson(file, document) {
   const target = path.resolve(file);
   fs.mkdirSync(path.dirname(target), { recursive: true });
@@ -40,7 +60,18 @@ export async function refreshAssetCatalog({
 }) {
   const verifiedAt = now();
   const payload = await fetchJson(sourceUrl, { fetchImpl });
-  const rows = Array.isArray(payload) ? payload : payload?.assets;
+  const directRows = Array.isArray(payload) ? payload : payload?.assets;
+  const sourceRows = Array.isArray(payload?.sources)
+    ? payload.sources.flatMap((source) => source.status === "verified"
+      ? (source.assets ?? []).map((row) => ({
+        ...row,
+        issuer: row.issuer ?? source.issuer,
+        sourceId: row.sourceId ?? source.id,
+        sourceUrl: row.sourceUrl ?? source.url,
+      }))
+      : [])
+    : null;
+  const rows = mergeVerifiedAssetRows(sourceRows ?? directRows);
   if (!Array.isArray(rows)) throw new Error("invalid asset registry payload: assets must be an array");
 
   const document = {
@@ -54,7 +85,7 @@ export async function refreshAssetCatalog({
       sourceId: row.sourceId ?? sourceId,
       sourceUrl: row.sourceUrl ?? sourceUrl,
       verifiedAt: row.verifiedAt ?? verifiedAt,
-    })).sort((left, right) => String(left.address).localeCompare(String(right.address))),
+    })),
   };
   const catalog = createAssetCatalog(document);
   const serialized = serializeAssetCatalog(catalog);

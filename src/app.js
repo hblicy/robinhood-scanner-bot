@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { Contract, getAddress } from "ethers";
+import { Contract, getAddress, keccak256 } from "ethers";
 import { createChainRpcContext } from "./chain.js";
 import { bytecodeFlags, readOwner, readTokenMeta, readV2Pool } from "./chain.js";
 import { loadChainConfig } from "./chains/load-chain.js";
@@ -10,10 +10,16 @@ import { instanceLockPort } from "./instance-lock.js";
 import { createAerodromeClassicAdapter, createAerodromeSlipstreamAdapter } from "./venues/evm/aerodrome.js";
 import { createClankerAdapter } from "./venues/evm/clanker.js";
 import { createFourMemeAdapter } from "./venues/evm/four-meme.js";
+import { createFlapAdapter } from "./venues/evm/flap.js";
+import { createO1Adapter } from "./venues/evm/o1.js";
 import { createPancakeInfinityAdapter, createPancakeV2Adapter, createPancakeV3Adapter } from "./venues/evm/pancakeswap.js";
 import { createPonsAdapter } from "./venues/evm/pons.js";
 import { createUniswapV2Adapter, createUniswapV3Adapter, createUniswapV4Adapter } from "./venues/evm/uniswap.js";
 import { createEvmSecurityRegistry, createV2SecurityEntry } from "./security/evm/index.js";
+import { createO1SecurityEntry } from "./security/evm/o1.js";
+import { createFourMemeSecurityEntry } from "./security/evm/four-meme.js";
+import { createFlapSecurityEntry } from "./security/evm/flap.js";
+import { inspectReferenceAsset } from "./security/evm/reference-asset.js";
 import { analyze, honeypotCheck } from "./analyze.js";
 import { ERC20_ABI } from "./abis.js";
 import { dexScreener } from "./market.js";
@@ -47,8 +53,11 @@ const DISABLED_VENUES = Object.freeze({
     ["stonks-exchange-base", "missing-verified-factory"],
     ["basestonk-base", "missing-verified-factory"],
   ]),
-  bsc: Object.freeze([["flap-bsc", "missing-verified-factory"]]),
-  robinhood: Object.freeze([["long-robinhood", "missing-verified-factory"]]),
+  bsc: Object.freeze([]),
+  robinhood: Object.freeze([
+    ["pons-v1-robinhood", "missing-verified-abi-or-event-source"],
+    ["long-robinhood", "missing-verified-factory"],
+  ]),
   solana: Object.freeze([["stonk-fun-solana", "missing-verified-program"]]),
 });
 
@@ -294,10 +303,27 @@ function instantiateVenue(profile, venue, classifyPair) {
       version: venue.version,
     });
   }
+  if (venue.id === "flap-v5-bsc") {
+    return createFlapAdapter({
+      id: venue.id,
+      ...venue.contracts,
+      wrappedNative: profile.wrappedNative,
+      classifyPair,
+      version: venue.version,
+    });
+  }
+  if (venue.id === "o1-v4-robinhood") {
+    return createO1Adapter({
+      id: venue.id,
+      ...venue.contracts,
+      classifyPair,
+      version: venue.version,
+    });
+  }
   throw new Error(`no discovery adapter for ${profile.key}|${venue.id}`);
 }
 
-function securityRegistry(profile) {
+function securityRegistry(profile, assetCatalog, settings = {}) {
   const entries = profile.venues
     .filter(({ id }) => id.startsWith("uniswap-v2-") || id === "pancakeswap-v2-bsc")
     .map((venue) => createV2SecurityEntry({
@@ -307,6 +333,24 @@ function securityRegistry(profile) {
       wrappedNative: profile.wrappedNative,
       excludedAddresses: Object.values(venue.contracts),
     }));
+  const o1 = profile.venues.find(({ id }) => id === "o1-v4-robinhood");
+  if (o1) {
+    entries.push(createO1SecurityEntry({
+      chain: profile.key,
+      venue: o1.id,
+      ...o1.contracts,
+      assetCatalog,
+    }));
+  }
+  const fourMeme = profile.venues.find(({ id }) => id === "four-meme-v2-bsc");
+  if (fourMeme) entries.push(createFourMemeSecurityEntry(fourMeme));
+  const flap = profile.venues.find(({ id }) => id === "flap-v5-bsc");
+  if (flap) {
+    entries.push(createFlapSecurityEntry(flap, {
+      assetCatalog,
+      maxTaxBps: settings.maxTaxBps,
+    }));
+  }
   return createEvmSecurityRegistry(entries);
 }
 
@@ -315,6 +359,9 @@ function createServices({ loaded, rpcContext, registry, projectRoot, dependencie
   const provider = rpcContext.analysisProvider;
   const profile = loaded.profile;
   const walletCatalog = loadWalletLabels(path.join(projectRoot, "data", "wallets", "evm.json"));
+  const referenceAssetCache = new Map();
+  const readReferencePolicies = dependencies.readReferencePolicies
+    ?? (async (asset) => ({ restrictions: asset.restrictions ?? [] }));
   const unavailable = (source) => async () => {
     throw new Error(`${source} adapter unavailable for ${profile.key}`);
   };
@@ -335,6 +382,15 @@ function createServices({ loaded, rpcContext, registry, projectRoot, dependencie
     honeypotCheck: (input) => honeypotCheck(input, {
       provider,
       securityRegistry: registry,
+    }),
+    inspectReferenceAsset: (asset) => inspectReferenceAsset(asset, {
+      cache: referenceAssetCache,
+      readBytecodeHash: async ({ address }) => {
+        const code = await provider.getCode(address);
+        if (code === "0x") throw new Error(`reference asset has no code: ${address}`);
+        return keccak256(code);
+      },
+      readPolicies: readReferencePolicies,
     }),
     walletCatalog,
   });
@@ -501,7 +557,7 @@ export function createApp({ chainKey, command = "watch", env = process.env, depe
   const venues = loaded.profile.venues.map((venue) =>
     instantiateVenue(loaded.profile, venue, assets.classifyPair));
   if (chainKey === "robinhood") venues.push(createPonsAdapter());
-  const registry = securityRegistry(loaded.profile);
+  const registry = securityRegistry(loaded.profile, assets.catalog, loaded.settings);
   const venueRegistry = createConfiguredVenueRegistry(loaded.profile, registry);
   const services = createServices({ loaded, rpcContext, registry, projectRoot, dependencies });
   const commands = dependencies.commands ?? defaultCommands();

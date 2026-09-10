@@ -213,6 +213,21 @@ export const EVM_PROFILES = deepFreeze({
           helper: getAddress("0xF251F83e40a78868FcfA3FA4599Dad6494E46034"),
         },
       },
+      {
+        id: "flap-v5-bsc",
+        sourceKind: "launchpad",
+        version: 1,
+        protocolVersion: "v5.23.0",
+        docsVersion: "v5.14.16",
+        deploymentBlock: 39_980_228,
+        verifiedAtBlock: 121_047_803,
+        sourceUrl: "https://docs.flap.sh/flap/developers/deployed-contract-addresses",
+        contracts: {
+          portal: getAddress("0xe2cE6ab80874Fa9Fa2aAE65D277Dd6B8e65C9De0"),
+          vaultPortal: getAddress("0x90497450f2a706f1951b5bdda52B4E5d16f34C06"),
+          taxTokenV3: getAddress("0x024f18294970B5c76c0691b87f138A0317156422"),
+        },
+      },
     ],
   }),
   robinhood: defineEvmProfile({
@@ -233,15 +248,30 @@ export const EVM_PROFILES = deepFreeze({
       { symbol: "WETH", address: getAddress("0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73") },
       { symbol: "USDG", address: getAddress("0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168") },
     ],
-    venues: [{
-      id: "uniswap-v2-robinhood",
-      sourceKind: "dex",
-      version: 1,
-      deploymentBlock: 8_928,
-      verifiedAtBlock: 58_268_251,
-      sourceUrl: "https://developers.uniswap.org/deployments",
-      contracts: { factory: getAddress("0x8bcEaA40B9AcdfAedF85AdF4FF01F5Ad6517937f") },
-    }],
+    venues: [
+      {
+        id: "uniswap-v2-robinhood",
+        sourceKind: "dex",
+        version: 1,
+        deploymentBlock: 8_928,
+        verifiedAtBlock: 58_268_251,
+        sourceUrl: "https://developers.uniswap.org/deployments",
+        contracts: { factory: getAddress("0x8bcEaA40B9AcdfAedF85AdF4FF01F5Ad6517937f") },
+      },
+      {
+        id: "o1-v4-robinhood",
+        sourceKind: "launchpad",
+        version: 4,
+        deploymentBlock: 48_880_218,
+        verifiedAtBlock: 54_953_301,
+        sourceUrl: "https://docs.o1.exchange/launchpad/reference/launch-contract-suites.json",
+        contracts: {
+          factory: getAddress("0xcE9C48cFa068947f77738c81Be406B53338E5B0d"),
+          hook: getAddress("0x0310cFEbE1D7A69f2414f6595bBe9d17c5342aCc"),
+          poolManager: getAddress("0x8366a39CC670B4001A1121B8F6A443A643e40951"),
+        },
+      },
+    ],
   }),
 });
 

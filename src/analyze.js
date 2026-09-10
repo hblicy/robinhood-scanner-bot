@@ -105,6 +105,10 @@ const DEFAULT_ANALYZE_DEPENDENCIES = {
   deployerHistory,
   honeypotCheck,
   walletCatalog: loadWalletLabels(path.join(DATA_DIR, "wallet-labels.json")),
+  inspectReferenceAsset: async (asset) => ({
+    status: "known",
+    restrictions: [...(asset.restrictions ?? [])],
+  }),
 };
 
 export function scoreFromFacts(f, thresholds = SETTINGS) {
@@ -180,7 +184,32 @@ export async function analyze(event, overrides = {}) {
     explorer: "https://robinhoodchain.blockscout.com",
     dexScreenerSlug: "robinhood",
   };
-  const [metaResult, ownerResult, flagsResult, dexResult, bsTokenResult, holdersResult, creatorResult] = await Promise.all([
+  const referenceResultPromise = event.referenceAssetKind === "stock"
+    ? settled(dependencies.inspectReferenceAsset({
+      chain: event.chain ?? profile.key,
+      address: event.referenceAsset ?? event.quoteToken ?? event.quote,
+      kind: "stock",
+      issuer: event.referenceAssetIssuer ?? null,
+      source: event.assetSource ?? null,
+      verifiedAt: event.assetVerifiedAt ?? null,
+      restrictions: event.referenceRestrictions ?? [],
+    }))
+    : Promise.resolve({
+      ok: true,
+      value: { status: "not-applicable", restrictions: event.referenceRestrictions ?? [] },
+      error: null,
+      cause: null,
+    });
+  const [
+    metaResult,
+    ownerResult,
+    flagsResult,
+    dexResult,
+    bsTokenResult,
+    holdersResult,
+    creatorResult,
+    referenceResult,
+  ] = await Promise.all([
     settled(dependencies.readTokenMeta(token)),
     settled(dependencies.readOwner(token)),
     settled(dependencies.bytecodeFlags(token)),
@@ -188,6 +217,7 @@ export async function analyze(event, overrides = {}) {
     settled(dependencies.blockscoutToken(token)),
     settled(dependencies.blockscoutHolders(token, 25)),
     settled(dependencies.blockscoutCreator(token)),
+    referenceResultPromise,
   ]);
 
   const meta = requireCore("token metadata", metaResult, token);
@@ -198,6 +228,12 @@ export async function analyze(event, overrides = {}) {
   const bsToken = bsTokenResult.value;
   const holders = holdersResult.value || [];
   const creatorInfo = creatorResult.value;
+  requireNoAnalysisRateLimit("reference asset", referenceResult, token);
+  const referenceInspection = referenceResult.value ?? {
+    status: "unknown",
+    restrictions: [...(event.referenceRestrictions ?? []), "reference-check-unavailable"],
+  };
+  const referenceRestrictions = [...new Set(referenceInspection.restrictions ?? [])];
 
   const createdAt = event.createdAt || dex?.pairCreatedAt || null;
   const ageMinutes = createdAt ? Math.max(0, (dependencies.now() - createdAt) / 60000) : null;
@@ -315,12 +351,18 @@ export async function analyze(event, overrides = {}) {
       quote: event.quote,
       venue: event.venue,
       pool: event.pool,
+      poolId: event.poolId ?? null,
       holders,
       blockNumber: event.blockNumber ?? null,
       pairCreatedAt: dex?.pairCreatedAt ?? event.createdAt ?? null,
       decimals: meta.decimals,
       walletCatalog: dependencies.walletCatalog,
       metadata: event.metadata ?? {},
+      referenceAssetKind: event.referenceAssetKind ?? "unknown",
+      referenceAssetIssuer: event.referenceAssetIssuer ?? null,
+      assetSource: event.assetSource ?? null,
+      assetVerifiedAt: event.assetVerifiedAt ?? null,
+      referenceRestrictions,
     }))
     : { ok: true, value: prefilterHp, error: null, cause: null };
   requireNoAnalysisRateLimit("honeypot", hpResult, token);
@@ -335,7 +377,11 @@ export async function analyze(event, overrides = {}) {
     SELLABILITY.UNKNOWN,
     hpRaw.reason || "evidence-unavailable"
   );
-  const hp = normalizeHoneypotSellability(hpRaw, rawSellability);
+  const hp = normalizeHoneypotSellability({
+    ...hpRaw,
+    buyTaxBps: hpRaw.buyTaxBps ?? rawSellability.buyTaxBps ?? null,
+    sellTaxBps: hpRaw.sellTaxBps ?? rawSellability.sellTaxBps ?? null,
+  }, rawSellability);
   const sellability = hp.sellability;
   const walletSignals = normalizeWalletSignals(sellability.walletSignals);
 
@@ -364,6 +410,8 @@ export async function analyze(event, overrides = {}) {
     honeypot: hp,
     sellability,
     walletSignals,
+    referenceAssetStatus: referenceInspection.status,
+    referenceRestrictions,
     marketBound,
     securityComplete,
     errorSources: [
@@ -395,12 +443,18 @@ export async function honeypotCheck(
     quote,
     venue,
     pool,
+    poolId = null,
     holders = [],
     blockNumber = null,
     pairCreatedAt = null,
     decimals,
     walletCatalog,
     metadata = {},
+    referenceAssetKind = "unknown",
+    referenceAssetIssuer = null,
+    assetSource = null,
+    assetVerifiedAt = null,
+    referenceRestrictions = [],
   },
   dependencies = {}
 ) {
@@ -420,11 +474,17 @@ export async function honeypotCheck(
       token,
       quoteToken: quote,
       pool,
+      poolId,
       blockNumber,
       blockOrSlot: blockNumber,
       pairCreatedAt,
       decimals,
       metadata,
+      referenceAssetKind,
+      referenceAssetIssuer,
+      assetSource,
+      assetVerifiedAt,
+      referenceRestrictions,
       analysisBlock,
     }, {
       ...dependencies,
@@ -438,8 +498,8 @@ export async function honeypotCheck(
       reason: sellability.reason,
       buyOk: null,
       sellOk: null,
-      buyTaxBps: null,
-      sellTaxBps: null,
+      buyTaxBps: sellability.buyTaxBps ?? null,
+      sellTaxBps: sellability.sellTaxBps ?? null,
       flags: null,
       sellability,
     }, sellability, false);

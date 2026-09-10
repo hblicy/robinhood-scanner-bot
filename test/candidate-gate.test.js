@@ -39,6 +39,22 @@ function candidate(overrides = {}) {
 }
 
 describe("candidate RPC gate", () => {
+  it("records an unresolved launchpad candidate before any paid deep check", () => {
+    let capabilityReads = 0;
+    const result = routeCandidate(candidate({
+      sourceKind: "launchpad",
+      metadata: { poolResolved: false },
+    }), {
+      thresholds,
+      venueRegistry: {
+        route: () => { capabilityReads += 1; return { action: "analyze", reason: null }; },
+      },
+      supportsSellability: () => true,
+    });
+    assert.deepEqual(result, { action: "record-only", reason: "pool-not-resolved" });
+    assert.equal(capabilityReads, 0);
+  });
+
   it("applies venue capability before sellability and scoring", () => {
     let sellabilityReads = 0;
     const result = routeCandidate(candidate(), {
