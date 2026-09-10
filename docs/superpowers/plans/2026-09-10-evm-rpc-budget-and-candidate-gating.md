@@ -1,4 +1,6 @@
-# EVM RPC Budget and Candidate Gating Implementation Plan
+# EVM RPC Budget and Candidate Gating Implementation Plan（已被修订版取代）
+
+> **停止执行：** 本计划中的本地 UTC 月份 JSON 预算器与 Dwellir 实际账单周期不一致。请改用同目录下的 `2026-09-10-evm-rpc-server-quota-and-candidate-gating.md`。
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
