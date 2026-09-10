@@ -20,6 +20,25 @@ const clankerLog = fixture("clanker-token-created");
 const quotes = EVM_PROFILES.base.quotes.map(({ address }) => address);
 
 describe("Base discovery adapters", () => {
+  it("uses the injected pair classifier for Aerodrome direction and stock metadata", () => {
+    const adapter = createAerodromeClassicAdapter({
+      id: "aerodrome-classic-base",
+      address: classicLog.address,
+      classifyPair: (_left, _right) => ({
+        candidateKind: "meme",
+        targetToken: "0x2222222222222222222222222222222222222222",
+        referenceAsset: "0x1111111111111111111111111111111111111111",
+        targetSide: "token1",
+        referenceAssetKind: "stock",
+        referenceAssetIssuer: "Coinbase",
+      }),
+    });
+    const event = adapter.parse(classicLog);
+    assert.equal(event.token, event.targetToken);
+    assert.equal(event.quoteToken, event.referenceAsset);
+    assert.equal(event.referenceAssetKind, "stock");
+  });
+
   it("parses a real Aerodrome classic volatile pool", () => {
     const adapter = createAerodromeClassicAdapter({
       id: "aerodrome-classic-base",

@@ -30,6 +30,23 @@ npm run watch:robinhood
 
 游标只在本轮全部候选处理成功后推进。普通候选只有 `confirmed + score >= minScore` 才推送，`blocked` 推风险，`unknown` 静默。集中流动性协议没有完成卖出证据绑定时保持 discovery-only。
 
+四链本地月度软预算默认如下，合计 1800 万次，为供应商 2000 万硬配额保留缓冲：
+
+| 链 | 环境变量 | 默认值 |
+| --- | --- | ---: |
+| Ethereum | `ETHEREUM_MONTHLY_RPC_LIMIT` | 4,500,000 |
+| Base | `BASE_MONTHLY_RPC_LIMIT` | 3,000,000 |
+| BSC | `BSC_MONTHLY_RPC_LIMIT` | 5,500,000 |
+| Robinhood | `ROBINHOOD_MONTHLY_RPC_LIMIT` | 5,000,000 |
+
+计数文件为 `data/<chain>/rpc-usage.json`，只统计配置为 analysis 的节点请求；公共 discovery 节点不计入。预算按 UTC 自然月轮换：达到 80% 节流，达到 95% 只深检可信股票底池候选，达到 100% 停止付费深检但继续发现和记录。每小时日志会输出主要 RPC 方法、资产目录缓存命中和按当前速率推算的月调用量。多主机部署或多个进程共用 Key 时，本地文件不能替代供应商侧的 2000 万硬上限。
+
+## 可信资产目录与 Venue 状态
+
+发行方清单保存在 `config/assets/<chain>.json`，成功的运行时刷新快照保存在 `data/<chain>/asset-catalog.json`。刷新间隔由 `ASSET_REFRESH_MS` 控制，默认 6 小时；只有清单明确开启已验证 HTTPS 来源时才联网刷新，任何下载、格式、来源或地址校验失败都保留最后一个有效快照。不能验证权威来源时必须保持 `disabled-unverified`，禁止按 symbol 猜测。
+
+启动摘要会显示资产条目数、启用/禁用 Venue 和 RPC 预算阶段，不打印 RPC URL 或凭据。身份或严格卖出验证能力未完成的 Launchpad 保持 disabled/discovery-only，不能进入付费深检和 Telegram 普通候选推送。
+
 ## 状态与回滚
 
-状态目录是 `data/<chain>/state.json`。升级前备份对应目录；不要复制一个链的 state 到另一条链。停止某个进程不会影响其他链。程序只读链和外部数据，不含私钥、签名或广播交易能力。
+状态目录是 `data/<chain>/state.json`，同目录还会保存 `rpc-usage.json` 和可选的 `asset-catalog.json`。升级前备份对应目录；不要复制一个链的状态到另一条链。停止某个进程不会影响其他链。程序只读链和外部数据，不含私钥、签名或广播交易能力。

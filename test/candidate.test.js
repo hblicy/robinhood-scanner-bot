@@ -26,6 +26,37 @@ const input = {
 };
 
 describe("normalized candidate", () => {
+  it("normalizes target and reference assets while retaining legacy aliases", () => {
+    const value = normalizeCandidate({
+      ...input,
+      sourceKind: "launchpad",
+      targetToken: input.token,
+      referenceAsset: input.quoteToken,
+      targetSide: "token1",
+      targetAssetKind: "meme",
+      referenceAssetKind: "stock",
+      referenceAssetIssuer: "Coinbase",
+      assetSource: "base-official-stocks",
+      assetVerifiedAt: 1_789_000_000_000,
+      lifecyclePhase: "new_launch",
+    });
+    assert.equal(value.token, value.targetToken);
+    assert.equal(value.quoteToken, value.referenceAsset);
+    assert.equal(value.referenceAssetKind, "stock");
+    assert.equal(value.targetSide, "token1");
+  });
+
+  it("upgrades legacy token and quoteToken inputs without losing compatibility", () => {
+    const value = normalizeCandidate(input);
+    assert.equal(value.targetToken, value.token);
+    assert.equal(value.referenceAsset, value.quoteToken);
+    assert.equal(value.referenceAssetKind, "unknown");
+  });
+
+  it("rejects unsupported target sides", () => {
+    assert.throws(() => normalizeCandidate({ ...input, targetSide: "left" }), /targetSide/);
+  });
+
   it("normalizes EVM addresses and creates chain-aware keys", () => {
     const value = normalizeCandidate(input);
     assert.equal(value.chain, "base");

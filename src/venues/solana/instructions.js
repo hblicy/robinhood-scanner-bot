@@ -64,6 +64,16 @@ export function requireAccounts(context, instruction, count, adapterId) {
 }
 
 export function chooseTargetPair(mintA, mintB, quoteMints) {
+  if (typeof quoteMints === "function") {
+    const classified = quoteMints(mintA, mintB);
+    if (!classified || classified.candidateKind !== "meme") return null;
+    return {
+      ...classified,
+      token: classified.targetToken,
+      quoteToken: classified.referenceAsset,
+      targetIsA: classified.targetToken === mintA,
+    };
+  }
   const aQuote = quoteMints.has(mintA);
   const bQuote = quoteMints.has(mintB);
   if (aQuote === bQuote) return null;

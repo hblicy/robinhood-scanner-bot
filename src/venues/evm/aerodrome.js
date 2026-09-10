@@ -3,27 +3,17 @@ import {
   AERODROME_CLASSIC_FACTORY_ABI,
   AERODROME_SLIPSTREAM_FACTORY_ABI,
 } from "../../abis.js";
+import { createLegacyPairClassifier, withLegacyPairAliases } from "../../assets/pair.js";
 
 const classicInterface = new Interface(AERODROME_CLASSIC_FACTORY_ABI);
 const slipstreamInterface = new Interface(AERODROME_SLIPSTREAM_FACTORY_ABI);
 
-function quoteSet(addresses) {
-  return new Set(addresses.map((address) => getAddress(address).toLowerCase()));
-}
-
-function pickToken(token0, token1, quotes) {
-  const a = getAddress(token0);
-  const b = getAddress(token1);
-  const aQuote = quotes.has(a.toLowerCase());
-  const bQuote = quotes.has(b.toLowerCase());
-  if (aQuote && !bQuote) return { token: b, quoteToken: a };
-  if (bQuote && !aQuote) return { token: a, quoteToken: b };
-  return null;
-}
-
-function adapter({ id, address, quoteAddresses, iface, parse, version }) {
+function adapter({ id, address, quoteAddresses = [], classifyPair, iface, parse, version }) {
   const factory = getAddress(address);
-  const quotes = quoteSet(quoteAddresses);
+  const classify = classifyPair ?? createLegacyPairClassifier({
+    referenceAssets: quoteAddresses,
+    normalizeAddress: getAddress,
+  });
   return Object.freeze({
     id,
     sourceKind: "dex",
@@ -32,7 +22,7 @@ function adapter({ id, address, quoteAddresses, iface, parse, version }) {
     topics: Object.freeze([iface.getEvent("PoolCreated").topicHash]),
     parse(log) {
       const args = iface.parseLog(log).args;
-      const picked = pickToken(args.token0, args.token1, quotes);
+      const picked = withLegacyPairAliases(classify(args.token0, args.token1));
       if (!picked) return null;
       return parse(args, picked);
     },
@@ -43,12 +33,14 @@ export function createAerodromeClassicAdapter({
   id,
   address,
   quoteAddresses,
+  classifyPair,
   version = 1,
 }) {
   return adapter({
     id,
     address,
     quoteAddresses,
+    classifyPair,
     iface: classicInterface,
     version,
     parse(args, picked) {
@@ -71,12 +63,14 @@ export function createAerodromeSlipstreamAdapter({
   id,
   address,
   quoteAddresses,
+  classifyPair,
   version = 1,
 }) {
   return adapter({
     id,
     address,
     quoteAddresses,
+    classifyPair,
     iface: slipstreamInterface,
     version,
     parse(args, picked) {

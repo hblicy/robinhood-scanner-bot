@@ -7,11 +7,43 @@ import { createDiscoverySessionRunner } from "./discovery-session.js";
 
 let rpcContext;
 
-function createBudgetedJsonRpcProvider(url, cuPerSecond, chainId = CHAIN.id) {
+export function recordRpcPayload(usageBudget, role, payload) {
+  if (!usageBudget) return;
+  const requests = Array.isArray(payload) ? payload : [payload];
+  usageBudget.assertAllowed(role);
+  for (const request of requests) {
+    usageBudget.record(String(request?.method || "unknown"));
+  }
+}
+
+export class MeteredJsonRpcProvider extends JsonRpcProvider {
+  constructor(request, network, options, { usageBudget = null, role = "analysis" } = {}) {
+    super(request, network, options);
+    this.usageBudget = usageBudget;
+    this.usageRole = role;
+  }
+
+  async _send(payload) {
+    recordRpcPayload(this.usageBudget, this.usageRole, payload);
+    return super._send(payload);
+  }
+}
+
+export function createBudgetedJsonRpcProvider(
+  url,
+  cuPerSecond,
+  chainId = CHAIN.id,
+  { usageBudget = null, role = "analysis" } = {}
+) {
   const request = new FetchRequest(url);
   request.timeout = 15_000;
   request.retryFunc = async () => false;
-  const provider = new JsonRpcProvider(request, chainId, { staticNetwork: true });
+  const provider = new MeteredJsonRpcProvider(
+    request,
+    chainId,
+    { staticNetwork: true },
+    { usageBudget, role }
+  );
   return createBudgetedProvider(provider, createRpcScheduler({ cuPerSecond }));
 }
 
@@ -19,16 +51,18 @@ export function createChainRpcContext({
   chain,
   settings,
   createProvider = null,
+  usageBudget = null,
   shouldFallback = isDiscoveryFallbackError,
   log = console.warn,
 }) {
-  const buildProvider = createProvider ?? ((url, cups) =>
-    createBudgetedJsonRpcProvider(url, cups, chain.id));
+  const buildProvider = createProvider ?? ((url, cups, options) =>
+    createBudgetedJsonRpcProvider(url, cups, chain.id, options));
   const providers = createRoleProviders({
     discoveryUrl: chain.discoveryRpc,
     analysisUrl: chain.analysisRpc,
     discoveryCups: settings.discoveryRpcCups,
     analysisCups: settings.analysisRpcCups,
+    usageBudget,
     createProvider: buildProvider,
   });
   return {

@@ -26,6 +26,23 @@ const profile = EVM_PROFILES.bsc;
 const quotes = profile.quotes.map(({ address }) => address);
 
 describe("BSC discovery adapters", () => {
+  it("uses the injected pair classifier for Infinity pools", () => {
+    const infinity = createPancakeInfinityAdapter({
+      id: "pancakeswap-infinity-cl-bsc",
+      address: logs.infinity.address,
+      classifyPair: (token, quote) => ({
+        candidateKind: "meme",
+        targetToken: token,
+        referenceAsset: quote,
+        targetSide: "token0",
+        referenceAssetKind: "stock",
+      }),
+    }).parse(logs.infinity);
+    assert.equal(infinity.token, infinity.targetToken);
+    assert.equal(infinity.quoteToken, infinity.referenceAsset);
+    assert.equal(infinity.referenceAssetKind, "stock");
+  });
+
   it("normalizes real PancakeSwap V2, V3, and Infinity logs distinctly", () => {
     const v2 = createPancakeV2Adapter({ id: "pancakeswap-v2-bsc", address: logs.v2.address, quoteAddresses: quotes }).parse(logs.v2);
     const v3 = createPancakeV3Adapter({ id: "pancakeswap-v3-bsc", address: logs.v3.address, quoteAddresses: quotes }).parse(logs.v3);
@@ -56,6 +73,27 @@ describe("BSC discovery adapters", () => {
     assert.equal(event.pool.toLowerCase(), logs.launch.address);
     assert.equal(event.lifecyclePhase, "new_launch");
     assert.equal(event.metadata.poolResolved, false);
+  });
+
+  it("enriches a Four.meme launch through the injected pair classifier", async () => {
+    const adapter = createFourMemeAdapter({
+      id: "four-meme-v2-bsc",
+      address: logs.launch.address,
+      wrappedNative: profile.wrappedNative,
+      classifyPair: () => ({
+        candidateKind: "meme",
+        targetToken: "0x2222222222222222222222222222222222222222",
+        referenceAsset: "0x1111111111111111111111111111111111111111",
+        targetSide: "token1",
+        referenceAssetKind: "stock",
+        referenceAssetIssuer: "BTech Holdings",
+      }),
+      resolveTokenInfo: async () => ({ quote: profile.wrappedNative, tokenManager: logs.launch.address }),
+      resolveMigrationPool: async () => null,
+    });
+    const event = await adapter.parse(logs.launch, { provider: {} });
+    assert.equal(event.token, event.targetToken);
+    assert.equal(event.referenceAssetKind, "stock");
   });
 
   it("binds a Four.meme graduation to the pool created in the same transaction", async () => {

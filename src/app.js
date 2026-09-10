@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { Contract } from "ethers";
+import { Contract, getAddress } from "ethers";
 import { createChainRpcContext } from "./chain.js";
 import { bytecodeFlags, readOwner, readTokenMeta, readV2Pool } from "./chain.js";
 import { loadChainConfig } from "./chains/load-chain.js";
@@ -27,6 +27,11 @@ import { createSolanaSecurityRegistry } from "./security/solana/index.js";
 import { inspectMintControls } from "./security/solana/mint.js";
 import { analyzeSolanaCandidate } from "./solana/analyze.js";
 import { createAnalysisRpcCircuit } from "./analysis-rpc-circuit.js";
+import { createVenueRegistry } from "./venues/registry.js";
+import { verifyVenueDeployments } from "./venues/verify.js";
+import { createRpcUsageBudget } from "./rpc-usage-budget.js";
+import { createAssetCatalogCache, createAssetRefreshScheduler } from "./assets/cache.js";
+import { createPairClassifier } from "./assets/pair.js";
 
 const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const LEGACY_STATE_FILES = Object.freeze([
@@ -35,6 +40,43 @@ const LEGACY_STATE_FILES = Object.freeze([
   "positions.json",
   "trades.json",
 ]);
+const DISABLED_VENUES = Object.freeze({
+  ethereum: Object.freeze([]),
+  base: Object.freeze([
+    ["o1-base", "missing-verified-factory"],
+    ["stonks-exchange-base", "missing-verified-factory"],
+    ["basestonk-base", "missing-verified-factory"],
+  ]),
+  bsc: Object.freeze([["flap-bsc", "missing-verified-factory"]]),
+  robinhood: Object.freeze([["long-robinhood", "missing-verified-factory"]]),
+  solana: Object.freeze([["stonk-fun-solana", "missing-verified-program"]]),
+});
+
+function createConfiguredVenueRegistry(profile, security) {
+  const configured = (profile.venues ?? profile.programs ?? []).map((venue) => ({
+    chain: profile.key,
+    family: profile.family,
+    id: venue.id,
+    identityStatus: "verified",
+    securityCapability: profile.family === "solana"
+      ? "supported"
+      : security.supports({ chain: profile.key, venue: venue.id })
+        ? "supported"
+        : "discovery-only",
+    verifiedContracts: profile.family === "evm" ? Object.values(venue.contracts) : [],
+    disabledReason: null,
+  }));
+  const disabled = (DISABLED_VENUES[profile.key] ?? []).map(([id, disabledReason]) => ({
+    chain: profile.key,
+    family: profile.family,
+    id,
+    identityStatus: "disabled-unverified",
+    securityCapability: "unsupported",
+    verifiedContracts: [],
+    disabledReason,
+  }));
+  return createVenueRegistry([...configured, ...disabled]);
+}
 
 function migrateLegacyRobinhoodState(projectRoot, dataDir) {
   if (LEGACY_STATE_FILES.some((name) => fs.existsSync(path.join(dataDir, name)))) return false;
@@ -52,7 +94,7 @@ function migrateLegacyRobinhoodState(projectRoot, dataDir) {
   return true;
 }
 
-function rpcOptions(config) {
+function rpcOptions(config, usageBudget = null) {
   return {
     chain: {
       ...config.profile,
@@ -64,6 +106,111 @@ function rpcOptions(config) {
       analysisRpcCups: config.rpc.analysisCups,
       discoveryRpcCooldownMs: config.rpc.cooldownMs,
     },
+    usageBudget,
+  };
+}
+
+function readRpcUsage(file) {
+  if (!fs.existsSync(file)) return null;
+  try {
+    return JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch (cause) {
+    throw new Error(`cannot read RPC usage state ${file}`, { cause });
+  }
+}
+
+function writeRpcUsage(file, state) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const temporary = `${file}.${process.pid}.tmp`;
+  try {
+    fs.writeFileSync(temporary, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+    fs.renameSync(temporary, file);
+  } finally {
+    if (fs.existsSync(temporary)) fs.rmSync(temporary, { force: true });
+  }
+}
+
+function readJsonIfPresent(file) {
+  if (!fs.existsSync(file)) return null;
+  return JSON.parse(fs.readFileSync(file, "utf8"));
+}
+
+function createAssetRuntime(loaded, dataDir, dependencies) {
+  const shippedPath = path.join(
+    path.resolve(dependencies.assetConfigRoot ?? PROJECT_ROOT),
+    "config",
+    "assets",
+    `${loaded.profile.key}.json`
+  );
+  const runtimePath = path.join(dataDir, "asset-catalog.json");
+  const cache = createAssetCatalogCache({
+    readJson: dependencies.readAssetJson ?? readJsonIfPresent,
+    atomicWriteJson: dependencies.writeAssetJson ?? writeRpcUsage,
+  });
+  const initial = dependencies.assetCatalog ?? cache.load({ shippedPath, runtimePath });
+  const refreshLoader = dependencies.refreshAssetCatalog;
+  const scheduler = createAssetRefreshScheduler({
+    current: initial,
+    enabled: initial.source.runtimeRefresh === true,
+    intervalMs: loaded.settings.assetRefreshMs,
+    refresh: (current) => cache.refresh({
+      current,
+      runtimePath,
+      load: async () => {
+        if (typeof refreshLoader !== "function") {
+          throw new Error(`asset-registry-unavailable: no refresh adapter for ${loaded.profile.key}`);
+        }
+        return refreshLoader({ chain: loaded.profile.key, current });
+      },
+    }),
+    onError: dependencies.logError ?? console.error,
+  });
+  const catalog = Object.freeze({
+    get schemaVersion() { return scheduler.currentCatalog().schemaVersion; },
+    get chain() { return scheduler.currentCatalog().chain; },
+    get family() { return scheduler.currentCatalog().family; },
+    get source() { return scheduler.currentCatalog().source; },
+    get assets() { return scheduler.currentCatalog().assets; },
+    has: (address) => scheduler.currentCatalog().has(address),
+    lookup: (address) => scheduler.currentCatalog().lookup(address),
+  });
+  const normalizeAddress = loaded.family === "evm"
+    ? getAddress
+    : (value) => new PublicKey(value).toBase58();
+  const classifyPair = createPairClassifier({
+    catalog,
+    nativeQuotes: loaded.profile.quotes.map(({ address }) => address),
+    normalizeAddress,
+  });
+  return { catalog, cache, scheduler, classifyPair };
+}
+
+function createChainUsageBudget(loaded, dataDir, dependencies) {
+  const file = path.join(dataDir, "rpc-usage.json");
+  return createRpcUsageBudget({
+    limit: loaded.rpc.monthlyLimit,
+    initial: dependencies.rpcUsageInitial ?? readRpcUsage(file),
+    persist: dependencies.persistRpcUsage ?? ((state) => writeRpcUsage(file, state)),
+    now: dependencies.now ?? Date.now,
+  });
+}
+
+function startUsageFlush(budget, { intervalMs = 60_000, logError = console.error } = {}) {
+  const flush = () => budget.flush();
+  const timer = setInterval(() => {
+    try {
+      flush();
+    } catch (error) {
+      logError(`RPC usage flush failed: ${error.message}`);
+    }
+  }, intervalMs);
+  timer.unref?.();
+  const onExit = () => flush();
+  process.once("exit", onExit);
+  return () => {
+    clearInterval(timer);
+    process.removeListener("exit", onExit);
+    flush();
   };
 }
 
@@ -99,8 +246,13 @@ function quoteAddresses(profile) {
   return profile.quotes.map(({ address }) => address);
 }
 
-function instantiateVenue(profile, venue) {
-  const common = { id: venue.id, quoteAddresses: quoteAddresses(profile), version: venue.version };
+function instantiateVenue(profile, venue, classifyPair) {
+  const common = {
+    id: venue.id,
+    quoteAddresses: quoteAddresses(profile),
+    classifyPair,
+    version: venue.version,
+  };
   if (venue.id.startsWith("uniswap-v2-")) {
     return createUniswapV2Adapter({ ...common, address: venue.contracts.factory });
   }
@@ -138,6 +290,7 @@ function instantiateVenue(profile, venue) {
       address: venue.contracts.manager,
       helperAddress: venue.contracts.helper,
       wrappedNative: profile.wrappedNative,
+      classifyPair,
       version: venue.version,
     });
   }
@@ -185,24 +338,25 @@ function createServices({ loaded, rpcContext, registry, projectRoot, dependencie
     }),
     walletCatalog,
   });
+  const sendText = (text) => sendTelegramWith(text, {
+    settings: {
+      telegramToken: loaded.telegram.token,
+      telegramChat: loaded.telegram.chatId,
+    },
+  });
   const alertReport = async (report) => {
     const text = formatAlert({ ...report, chain: profile.key, chainName: profile.name });
     console.log(`[${profile.key}] ${report.verdict} ${report.meta.symbol} ${report.score}/100`);
-    return sendTelegramWith(text, {
-      settings: {
-        telegramToken: loaded.telegram.token,
-        telegramChat: loaded.telegram.chatId,
-      },
-    });
+    return sendText(text);
   };
   return Object.freeze({
     analyze: analyzeCandidate,
     alertReport,
+    sendText,
     async notifyAnalysisRpcLimited() {
       try {
-        return await sendTelegramWith(
-          `⚠️ ${profile.name} 分析 RPC 被限流或额度耗尽，深检暂时暂停；官方发现仍在运行。`,
-          { settings: { telegramToken: loaded.telegram.token, telegramChat: loaded.telegram.chatId } }
+        return await sendText(
+          `⚠️ ${profile.name} 分析 RPC 被限流或额度耗尽，深检暂时暂停；官方发现仍在运行。`
         );
       } catch (error) {
         console.error(`[${profile.key}] analysis RPC alert failed`);
@@ -260,10 +414,15 @@ function defaultSolanaCommands() {
 
 function createSolanaApplication(loaded, { dependencies, projectRoot, readOnly }) {
   const dataDir = path.join(projectRoot, "data", "solana");
+  const assets = createAssetRuntime(loaded, dataDir, dependencies);
   const rpcContext = (dependencies.createSolanaRpcContext ?? createSolanaRpcContext)(loaded, dependencies.rpcDependencies);
   const store = getStoreFor(dataDir, dependencies.storeSettings, { readOnly });
-  const venues = [...createPumpAdapters(loaded.profile), ...createRaydiumAdapters(loaded.profile)];
+  const venues = [
+    ...createPumpAdapters(loaded.profile, { classifyPair: assets.classifyPair }),
+    ...createRaydiumAdapters(loaded.profile, { classifyPair: assets.classifyPair }),
+  ];
   const registry = createSolanaSecurityRegistry(loaded.profile);
+  const venueRegistry = createConfiguredVenueRegistry(loaded.profile, registry);
   const walletCatalog = loadWalletLabels(path.join(projectRoot, "data", "wallets", "solana.json"));
   const services = dependencies.services ?? Object.freeze({
     analyze: (event) => analyzeSolanaCandidate(event, {
@@ -295,6 +454,11 @@ function createSolanaApplication(loaded, { dependencies, projectRoot, readOnly }
     venues: Object.freeze(venues),
     venueIds: Object.freeze(venues.map((venue) => venue.id)),
     securityRegistry: registry,
+    venueRegistry,
+    assetCatalog: assets.catalog,
+    assetCatalogCache: assets.cache,
+    assetRefreshScheduler: assets.scheduler,
+    classifyPair: assets.classifyPair,
     services,
   });
   const context = Object.freeze({ config });
@@ -307,7 +471,15 @@ function createSolanaApplication(loaded, { dependencies, projectRoot, readOnly }
   };
   return Object.freeze({
     config,
-    watch: async () => { await ensurePrograms(); return commands.watch(context); },
+    watch: async () => {
+      await assets.scheduler.start();
+      try {
+        await ensurePrograms();
+        return await commands.watch(context);
+      } finally {
+        assets.scheduler.stop();
+      }
+    },
     scan: async () => { await ensurePrograms(); return commands.scan(context); },
     check: async (token) => { await ensurePrograms(); return commands.check(token, context); },
   });
@@ -321,15 +493,23 @@ export function createApp({ chainKey, command = "watch", env = process.env, depe
   const dataDir = path.join(projectRoot, "data", chainKey);
   if (!readOnly && chainKey === "robinhood") migrateLegacyRobinhoodState(projectRoot, dataDir);
 
+  const assets = createAssetRuntime(loaded, dataDir, dependencies);
   const createRpcContext = dependencies.createRpcContext ?? createChainRpcContext;
-  const rpcContext = createRpcContext(rpcOptions(loaded));
+  const rpcUsageBudget = createChainUsageBudget(loaded, dataDir, dependencies);
+  const rpcContext = createRpcContext(rpcOptions(loaded, rpcUsageBudget));
   const store = getStoreFor(dataDir, dependencies.storeSettings, { readOnly });
-  const venues = loaded.profile.venues.map((venue) => instantiateVenue(loaded.profile, venue));
+  const venues = loaded.profile.venues.map((venue) =>
+    instantiateVenue(loaded.profile, venue, assets.classifyPair));
   if (chainKey === "robinhood") venues.push(createPonsAdapter());
   const registry = securityRegistry(loaded.profile);
+  const venueRegistry = createConfiguredVenueRegistry(loaded.profile, registry);
   const services = createServices({ loaded, rpcContext, registry, projectRoot, dependencies });
   const commands = dependencies.commands ?? defaultCommands();
   const verifyChain = dependencies.assertChain ?? assertRpcChain;
+  const verifyVenues = dependencies.verifyVenueDeployments ?? ((entries) =>
+    rpcContext.discoverySessions.run((provider) => verifyVenueDeployments(entries, {
+      getCode: (address) => provider.getCode(address),
+    })));
   const config = Object.freeze({
     ...loaded,
     dataDir,
@@ -342,29 +522,55 @@ export function createApp({ chainKey, command = "watch", env = process.env, depe
     venues: Object.freeze(venues),
     venueIds: Object.freeze(venues.map((venue) => venue.id)),
     securityRegistry: registry,
+    venueRegistry,
     analysisRpcCircuit: createAnalysisRpcCircuit(),
+    rpcUsageBudget,
+    assetCatalog: assets.catalog,
+    assetCatalogCache: assets.cache,
+    assetRefreshScheduler: assets.scheduler,
+    classifyPair: assets.classifyPair,
     services,
   });
   const context = Object.freeze({ config });
   let chainVerification;
   const ensureChain = () => {
-    chainVerification ??= Promise.resolve().then(() => verifyChain(rpcContext, loaded.profile.id));
+    chainVerification ??= Promise.resolve()
+      .then(() => verifyChain(rpcContext, loaded.profile.id))
+      .then(() => verifyVenues(venueRegistry.list()));
     return chainVerification;
   };
 
   return Object.freeze({
     config,
     watch: async () => {
-      await ensureChain();
-      return commands.watch(context);
+      await assets.scheduler.start();
+      const stopUsageFlush = startUsageFlush(rpcUsageBudget, {
+        intervalMs: dependencies.rpcUsageFlushMs ?? 60_000,
+        logError: dependencies.logError ?? console.error,
+      });
+      try {
+        await ensureChain();
+        return await commands.watch(context);
+      } finally {
+        stopUsageFlush();
+        assets.scheduler.stop();
+      }
     },
     scan: async () => {
-      await ensureChain();
-      return commands.scan(context);
+      try {
+        await ensureChain();
+        return await commands.scan(context);
+      } finally {
+        rpcUsageBudget.flush();
+      }
     },
     check: async (token) => {
-      await ensureChain();
-      return commands.check(token, context);
+      try {
+        await ensureChain();
+        return await commands.check(token, context);
+      } finally {
+        rpcUsageBudget.flush();
+      }
     },
   });
 }

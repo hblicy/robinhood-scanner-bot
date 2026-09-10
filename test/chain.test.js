@@ -16,12 +16,55 @@ import {
   isRateLimitError,
   readOwnerFromContract,
   readV2PoolFromContract,
+  recordRpcPayload,
   parseV4PoolLog,
   scanOnchain,
   withRetry,
 } from "../src/chain.js";
 
 describe("dual RPC providers", () => {
+  it("counts each JSON-RPC payload item exactly once", () => {
+    const methods = [];
+    const roles = [];
+    recordRpcPayload({
+      assertAllowed: (role) => roles.push(role),
+      record: (method) => methods.push(method),
+    }, "analysis", [
+      { method: "eth_getLogs" },
+      { method: "eth_getBlockByNumber" },
+    ]);
+    assert.deepEqual(roles, ["analysis"]);
+    assert.deepEqual(methods, ["eth_getLogs", "eth_getBlockByNumber"]);
+  });
+
+  it("meters only the paid analysis endpoint and its discovery fallback", () => {
+    const made = [];
+    const usageBudget = { record() {}, assertAllowed() {} };
+    const context = createChainRpcContext({
+      chain: {
+        id: 4663,
+        discoveryRpc: "https://official.example",
+        analysisRpc: "https://paid.example/key",
+      },
+      settings: {
+        discoveryRpcCups: 150,
+        analysisRpcCups: 250,
+        discoveryRpcCooldownMs: 60_000,
+      },
+      usageBudget,
+      createProvider: (url, cups, options) => {
+        const provider = { url, cups, options };
+        made.push(provider);
+        return provider;
+      },
+    });
+    assert.equal(context.discoveryPrimary.options.role, "discovery-public");
+    assert.equal(context.discoveryPrimary.options.usageBudget, null);
+    assert.equal(context.analysisProvider.options.role, "analysis");
+    assert.equal(context.analysisProvider.options.usageBudget, usageBudget);
+    assert.equal(context.discoveryFallback, context.analysisProvider);
+  });
+
   it("keeps getProvider as the analysis alias and reuses the default shared endpoint", () => {
     assert.equal(getProvider(), getAnalysisProvider());
     assert.equal(getDiscoveryProvider(), getAnalysisProvider());

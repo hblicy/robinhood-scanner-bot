@@ -48,6 +48,19 @@ function pair(pairAddress, liquidity, quote = QUOTE) {
 }
 
 describe("selectDexPair", () => {
+  it("selects a bound pair when the target token is on the quote side", () => {
+    const reversed = {
+      ...pair(EXACT_POOL, 100),
+      baseToken: { address: QUOTE, symbol: "STOCK" },
+      quoteToken: { address: TOKEN, symbol: "MEME" },
+    };
+    assert.equal(selectDexPair([reversed], {
+      token: TOKEN,
+      pool: EXACT_POOL,
+      quote: QUOTE,
+    }), reversed);
+  });
+
   it("selects only the exact event pool and quote", () => {
     const selected = selectDexPair([pair(WRONG_POOL, 1_000_000), pair(EXACT_POOL, 100)], {
       token: TOKEN,
@@ -100,6 +113,26 @@ describe("summarizeDeployerHistory", () => {
 });
 
 describe("geckoNewPools", () => {
+  it("uses an injected classifier and preserves stock reference metadata", async () => {
+    const row = geckoRow(new Date(NOW).toISOString());
+    const [event] = await geckoNewPools(1, {
+      fetchImpl: async () => jsonResponse({ data: [row] }),
+      now: () => NOW,
+      maxAgeMinutes: 30,
+      classifyPair: () => ({
+        candidateKind: "meme",
+        targetToken: TOKEN,
+        referenceAsset: WETH,
+        targetSide: "base",
+        referenceAssetKind: "stock",
+        referenceAssetIssuer: "Robinhood",
+      }),
+    });
+    assert.equal(event.token, event.targetToken);
+    assert.equal(event.quote, event.referenceAsset);
+    assert.equal(event.referenceAssetKind, "stock");
+  });
+
   it("returns only pools inside the strict age window", async () => {
     const recent = new Date(NOW - 5 * 60_000).toISOString();
     const old = new Date(NOW - 31 * 60_000).toISOString();

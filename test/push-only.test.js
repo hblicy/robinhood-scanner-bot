@@ -50,6 +50,7 @@ describe("push-only command surface", () => {
     assert.deepEqual(Object.keys(pkg.scripts).sort(), [
       "check",
       "import-wallets",
+      "refresh-assets",
       "scan",
       "start",
       "test",
@@ -173,6 +174,26 @@ describe("push-only command surface", () => {
     assert.match(output, /Discovery RPC|发现 RPC/);
     assert.match(output, /Analysis RPC|分析 RPC/);
     assert.doesNotMatch(output, /https?:\/\//);
+  });
+
+  it("prints the selected chain score instead of the legacy global score", () => {
+    const lines = [];
+    const original = console.log;
+    console.log = (line) => lines.push(String(line));
+    try {
+      banner(
+        { maxAgeMinutes: 30, minScore: 70 },
+        {
+          name: "Robinhood Chain",
+          id: 4663,
+          discoveryRpc: "https://public.example",
+          analysisRpc: "https://paid.example",
+        }
+      );
+    } finally {
+      console.log = original;
+    }
+    assert.match(lines.join("\n"), /minScore=70/);
   });
 
   it("recognizes normalized RPC URLs as the same endpoint", () => {

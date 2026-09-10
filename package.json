@@ -15,6 +15,7 @@
     "scan": "node src/index.js scan",
     "check": "node src/index.js check",
     "import-wallets": "node scripts/import-wallet-csv.js",
+    "refresh-assets": "node scripts/refresh-asset-catalog.js",
     "test": "node --test test/*.test.js"
   },
   "engines": {

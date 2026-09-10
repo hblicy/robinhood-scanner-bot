@@ -45,8 +45,9 @@ function pumpAdapter(profile, program, poolProgram) {
   return adapter;
 }
 
-function pumpSwapAdapter(profile, program) {
+function pumpSwapAdapter(profile, program, classifyPair) {
   const quoteMints = new Set(profile.quotes.map((quote) => quote.address));
+  const classify = classifyPair ?? quoteMints;
   return Object.freeze({ ...program, version: 1, parseTransaction(context) {
     const instructions = programInstructions(context.transaction, program.programId);
     ensureProgram(context, program, instructions);
@@ -54,7 +55,7 @@ function pumpSwapAdapter(profile, program) {
     for (const instruction of instructions) {
       if (!matchesDiscriminator(instruction.data, DISC.createPool)) continue;
       const a = requireAccounts(context, instruction, 18, program.id);
-      const pair = chooseTargetPair(a[3], a[4], quoteMints);
+      const pair = chooseTargetPair(a[3], a[4], classify);
       if (!pair) continue;
       events.push(candidate(context, program, instruction, { ...pair, pool: a[0], creator: a[2], lifecyclePhase: "new_pool", metadata: { baseMint: a[3], quoteMint: a[4], baseVault: pair.targetIsA ? a[9] : a[10], quoteVault: pair.targetIsA ? a[10] : a[9], poolProgramId: program.programId } }));
     }
@@ -62,9 +63,9 @@ function pumpSwapAdapter(profile, program) {
   } });
 }
 
-export function createPumpAdapters(profile) {
+export function createPumpAdapters(profile, { classifyPair = null } = {}) {
   const pump = profile.programs.find((program) => program.id === "pump-bonding-curve");
   const swap = profile.programs.find((program) => program.id === "pumpswap");
   if (!pump || !swap) throw new Error("Solana profile is missing Pump programs");
-  return Object.freeze([pumpAdapter(profile, pump, swap), pumpSwapAdapter(profile, swap)]);
+  return Object.freeze([pumpAdapter(profile, pump, swap), pumpSwapAdapter(profile, swap, classifyPair)]);
 }

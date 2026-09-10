@@ -1,5 +1,6 @@
 import { Interface, getAddress } from "ethers";
 import { CLANKER_V4_ABI } from "../../abis.js";
+import { createLegacyPairClassifier, withLegacyPairAliases } from "../../assets/pair.js";
 
 const clankerInterface = new Interface(CLANKER_V4_ABI);
 
@@ -7,12 +8,16 @@ export function createClankerAdapter({
   id,
   address,
   poolManagerAddress,
-  quoteAddresses,
+  quoteAddresses = [],
+  classifyPair,
   version = 1,
 }) {
   const factory = getAddress(address);
   const poolManager = getAddress(poolManagerAddress);
-  const quotes = new Set(quoteAddresses.map((value) => getAddress(value).toLowerCase()));
+  const classify = classifyPair ?? createLegacyPairClassifier({
+    referenceAssets: quoteAddresses,
+    normalizeAddress: getAddress,
+  });
   return Object.freeze({
     id,
     sourceKind: "launchpad",
@@ -21,11 +26,10 @@ export function createClankerAdapter({
     topics: Object.freeze([clankerInterface.getEvent("TokenCreated").topicHash]),
     parse(log) {
       const args = clankerInterface.parseLog(log).args;
-      const quoteToken = getAddress(args.pairedToken);
-      if (!quotes.has(quoteToken.toLowerCase())) return null;
+      const picked = withLegacyPairAliases(classify(args.tokenAddress, args.pairedToken));
+      if (!picked) return null;
       return {
-        token: getAddress(args.tokenAddress),
-        quoteToken,
+        ...picked,
         pool: poolManager,
         poolId: String(args.poolId).toLowerCase(),
         creator: getAddress(args.tokenAdmin),

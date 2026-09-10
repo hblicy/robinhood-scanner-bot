@@ -9,6 +9,12 @@ const PREFIXES = Object.freeze({
   robinhood: "ROBINHOOD",
 });
 const ALERT_MODES = new Set(["recovery", "shadow", "live"]);
+const MONTHLY_RPC_LIMITS = Object.freeze({
+  ethereum: 4_500_000,
+  base: 3_000_000,
+  bsc: 5_500_000,
+  robinhood: 5_000_000,
+});
 
 function firstValue(env, names, fallback = "") {
   for (const name of names) {
@@ -147,6 +153,11 @@ function loadSolanaConfig(envSource) {
         firstValue(envSource, ["SOLANA_MEANINGFUL_SELLER_COUNT"], 3),
         { min: 1, max: 20 }
       ),
+      assetRefreshMs: integer(
+        "ASSET_REFRESH_MS",
+        firstValue(envSource, ["ASSET_REFRESH_MS"], 21_600_000),
+        { min: 60_000 }
+      ),
     }),
     telegram: Object.freeze({
       token: firstValue(envSource, ["TELEGRAM_BOT_TOKEN"], ""),
@@ -186,6 +197,7 @@ export function loadChainConfig(chainKey, envSource = process.env) {
   }
 
   return Object.freeze({
+    family: "evm",
     profile,
     rpc: Object.freeze({
       discoveryUrl,
@@ -203,6 +215,11 @@ export function loadChainConfig(chainKey, envSource = process.env) {
       cooldownMs: integer(
         `${prefix}_DISCOVERY_RPC_COOLDOWN_MS`,
         firstValue(envSource, [`${prefix}_DISCOVERY_RPC_COOLDOWN_MS`, "DISCOVERY_RPC_COOLDOWN_MS"], 60_000),
+        { min: 1 }
+      ),
+      monthlyLimit: integer(
+        `${prefix}_MONTHLY_RPC_LIMIT`,
+        firstValue(envSource, [`${prefix}_MONTHLY_RPC_LIMIT`], MONTHLY_RPC_LIMITS[chainKey]),
         { min: 1 }
       ),
     }),
@@ -249,6 +266,11 @@ export function loadChainConfig(chainKey, envSource = process.env) {
         { min: 0 }
       ),
       alertMode,
+      assetRefreshMs: integer(
+        "ASSET_REFRESH_MS",
+        firstValue(envSource, ["ASSET_REFRESH_MS"], 21_600_000),
+        { min: 60_000 }
+      ),
     }),
     telegram: Object.freeze({
       token: firstValue(envSource, ["TELEGRAM_BOT_TOKEN"], ""),

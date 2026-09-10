@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "chain": "ethereum",
+  "family": "evm",
+  "source": {
+    "id": "no-verified-stock-source",
+    "url": null,
+    "verifiedAt": 0,
+    "status": "disabled-unverified"
+  },
+  "assets": []
+}

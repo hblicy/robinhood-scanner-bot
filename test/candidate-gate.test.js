@@ -39,6 +39,40 @@ function candidate(overrides = {}) {
 }
 
 describe("candidate RPC gate", () => {
+  it("applies venue capability before sellability and scoring", () => {
+    let sellabilityReads = 0;
+    const result = routeCandidate(candidate(), {
+      thresholds,
+      venueRegistry: { route: () => ({ action: "record-only", reason: "venue-security-unsupported" }) },
+      supportsSellability: () => { sellabilityReads += 1; return true; },
+    });
+    assert.deepEqual(result, { action: "record-only", reason: "venue-security-unsupported" });
+    assert.equal(sellabilityReads, 0);
+  });
+
+  it("records paid candidates without analysis when the monthly budget is exhausted", () => {
+    const result = routeCandidate(candidate(), {
+      thresholds,
+      rpcUsageBudget: { snapshot: () => ({ stage: "exhausted" }) },
+      supportsSellability: () => true,
+    });
+    assert.deepEqual(result, { action: "record-only", reason: "rpc-budget-exhausted" });
+  });
+
+  it("keeps verified stock-reference candidates prioritized at the critical stage", () => {
+    const budget = { snapshot: () => ({ stage: "critical" }) };
+    assert.equal(routeCandidate(candidate(), {
+      thresholds,
+      rpcUsageBudget: budget,
+      supportsSellability: () => true,
+    }).reason, "rpc-budget-critical");
+    assert.equal(routeCandidate(candidate({ referenceAssetKind: "stock" }), {
+      thresholds,
+      rpcUsageBudget: budget,
+      supportsSellability: () => true,
+    }).action, "analyze");
+  });
+
   it("skips venues without strict sellability support before analysis", () => {
     const result = routeCandidate(candidate({ venue: "uniswap-v4-base" }), {
       thresholds,

@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "chain": "robinhood",
+  "family": "evm",
+  "source": {
+    "id": "robinhood-registry-pending",
+    "url": null,
+    "verifiedAt": 0,
+    "status": "disabled-unverified"
+  },
+  "assets": []
+}

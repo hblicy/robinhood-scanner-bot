@@ -456,18 +456,18 @@ test("the Pons watch loop retries the same range after a transient launch read f
   assert.match(errors[0], /pons watch failed:.*exceeded maximum retry limit/);
 });
 
-test("auxiliary discovery classifies LONG only after an explicit non-Pons factory result", async () => {
+test("auxiliary discovery does not infer LONG from a non-Pons factory result", async () => {
   const event = {
     token: TOKEN,
     quote: ADDR.WETH,
     venue: "uniswap-v4",
     poolId: `0x${"aa".repeat(32)}`,
   };
-  const long = await classifyAuxiliaryCandidate(event, {
+  const ordinary = await classifyAuxiliaryCandidate(event, {
     provider: {},
     readLaunch: async () => ({ ...launchRecord(), exists: false }),
   });
-  assert.equal(long.pad, "long");
+  assert.equal(ordinary.pad, "uniswap-native");
 
   const pons = await classifyAuxiliaryCandidate(event, {
     provider: {},

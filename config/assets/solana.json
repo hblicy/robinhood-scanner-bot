@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "chain": "solana",
+  "family": "solana",
+  "source": {
+    "id": "backed-xstocks-mapper-pending",
+    "url": null,
+    "verifiedAt": 0,
+    "status": "disabled-unverified"
+  },
+  "assets": []
+}

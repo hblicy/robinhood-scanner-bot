@@ -9,6 +9,7 @@ const CHAIN_FAMILIES = Object.freeze({
   solana: "solana",
 });
 const SOURCE_KINDS = new Set(["dex", "launchpad"]);
+const TARGET_SIDES = new Set(["token0", "token1", "base", "quote"]);
 
 function requiredString(name, value) {
   if (typeof value !== "string" || value.trim() === "") {
@@ -63,14 +64,47 @@ export function normalizeCandidate(input) {
   }
   const poolId = optionalString("poolId", input.poolId);
   const metadata = input.metadata == null ? Object.freeze({}) : Object.freeze({ ...input.metadata });
+  const targetToken = normalizeIdentity(
+    input.targetToken == null ? "token" : "targetToken",
+    input.targetToken ?? input.token,
+    chainFamily
+  );
+  const referenceAsset = normalizeIdentity(
+    input.referenceAsset == null ? "quoteToken" : "referenceAsset",
+    input.referenceAsset ?? input.quoteToken,
+    chainFamily
+  );
+  const targetSide = input.targetSide == null
+    ? null
+    : requiredString("targetSide", input.targetSide);
+  if (targetSide != null && !TARGET_SIDES.has(targetSide)) {
+    throw new Error(`unsupported targetSide ${targetSide}`);
+  }
+  if (input.assetVerifiedAt != null
+    && (!Number.isFinite(input.assetVerifiedAt) || input.assetVerifiedAt < 0)) {
+    throw new Error("assetVerifiedAt must be null or a non-negative timestamp");
+  }
+  if (input.referenceRestrictions != null && !Array.isArray(input.referenceRestrictions)) {
+    throw new Error("referenceRestrictions must be an array");
+  }
 
   return Object.freeze({
     chain,
     chainFamily,
     venue: requiredString("venue", input.venue),
     sourceKind,
-    token: normalizeIdentity("token", input.token, chainFamily),
-    quoteToken: normalizeIdentity("quoteToken", input.quoteToken, chainFamily),
+    token: targetToken,
+    quoteToken: referenceAsset,
+    targetToken,
+    referenceAsset,
+    targetSide,
+    pairDirection: optionalString("pairDirection", input.pairDirection),
+    targetAssetKind: input.targetAssetKind ?? "unknown",
+    referenceAssetKind: input.referenceAssetKind ?? "unknown",
+    referenceAssetIssuer: optionalString("referenceAssetIssuer", input.referenceAssetIssuer),
+    assetSource: optionalString("assetSource", input.assetSource),
+    assetVerifiedAt: input.assetVerifiedAt ?? null,
+    referenceRestrictions: Object.freeze([...(input.referenceRestrictions ?? [])]),
     pool: normalizeIdentity("pool", input.pool, chainFamily),
     poolId,
     creator: normalizeIdentity("creator", input.creator, chainFamily, { optional: true }),
@@ -100,7 +134,11 @@ export function rawEventKey(event) {
 }
 
 export function candidateKey(event) {
-  const values = [chainOf(event), event.venue, event.poolId || event.pool || event.token];
+  const values = [
+    chainOf(event),
+    event.venue,
+    event.poolId || event.pool || event.targetToken || event.token,
+  ];
   return (isEvm(event)
     ? values.map((value) => String(value).toLowerCase())
     : values.map(String)
@@ -108,7 +146,7 @@ export function candidateKey(event) {
 }
 
 export function notificationKey(event, alertType, stateVersion) {
-  const values = [chainOf(event), event.token, alertType, stateVersion];
+  const values = [chainOf(event), event.targetToken || event.token, alertType, stateVersion];
   return (isEvm(event)
     ? values.map((value) => String(value).toLowerCase())
     : values.map(String)

@@ -13,6 +13,7 @@ import { scanEvmRange } from "./discovery.js";
 import { safeErrorMessage } from "../safety.js";
 import {
   createCandidateRouteStats,
+  candidateRouteStatKey,
   formatCandidateRouteStats,
   incrementCandidateRouteStat,
   routeCandidate,
@@ -21,6 +22,7 @@ import {
   AnalysisRpcCooldownError,
   bindAnalysisCircuit,
 } from "../analysis-rpc-circuit.js";
+import { formatHourlyUsage } from "../startup-summary.js";
 
 async function blockTimes({ provider, blockNumbers }) {
   const values = await Promise.all(blockNumbers.map(async (blockNumber) => {
@@ -100,11 +102,11 @@ export async function runEvmRangeOnce(config, { persist = true } = {}, supplied 
       const route = routeCandidate(event, {
         thresholds: { ...config.settings, maxAgeMinutes },
         supportsSellability: (value) => config.securityRegistry.supports(value),
+        venueRegistry: config.venueRegistry ?? null,
+        rpcUsageBudget: config.rpcUsageBudget ?? null,
       });
-      if (route.action === "skip") {
-        const stat = route.reason === "unsupported-sellability-venue"
-          ? "skipped_unsupported_venue"
-          : "skipped_score_upper_bound";
+      if (route.action !== "analyze") {
+        const stat = candidateRouteStatKey(route);
         incrementCandidateRouteStat(routeStats, stat);
         if (persist) store.markSeen(key, { token: event.token, skipped: route.reason });
         continue;
@@ -147,6 +149,7 @@ export async function runEvmRangeOnce(config, { persist = true } = {}, supplied 
 export async function watchEvm(config, supplied = {}) {
   const dependencies = { ...defaultDependencies(config), ...supplied };
   const release = await (dependencies.acquireLock ?? acquireInstanceLock)(config.dataDir);
+  let lastUsageHour = null;
   try {
     while (true) {
       try {
@@ -154,6 +157,11 @@ export async function watchEvm(config, supplied = {}) {
         dependencies.log(
           `${config.profile.key}: blocks ${result.fromBlock ?? "none"}-${result.toBlock} candidates=${result.candidates} mode=${result.mode} routes ${formatCandidateRouteStats(result.routeStats)}`
         );
+        const usageHour = Math.floor(dependencies.now() / 3_600_000);
+        if (config.rpcUsageBudget && usageHour !== lastUsageHour) {
+          dependencies.log(formatHourlyUsage(config, dependencies.now()));
+          lastUsageHour = usageHour;
+        }
       } catch (error) {
         if (!isDiscoveryFallbackError(error)) throw error;
         dependencies.log(`${config.profile.key} discovery retry: ${safeErrorMessage(error)}`);

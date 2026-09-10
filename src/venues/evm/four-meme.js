@@ -5,6 +5,7 @@ import {
   V2_FACTORY_ABI,
   V3_FACTORY_ABI,
 } from "../../abis.js";
+import { withLegacyPairAliases } from "../../assets/pair.js";
 
 const fourMemeInterface = new Interface(FOUR_MEME_V2_ABI);
 const v2Interface = new Interface(V2_FACTORY_ABI);
@@ -55,6 +56,7 @@ export function createFourMemeAdapter({
   id,
   address,
   wrappedNative,
+  classifyPair,
   helperAddress = DEFAULT_HELPER,
   resolveTokenInfo = readTokenInfo,
   resolveMigrationPool = findMigrationPool,
@@ -63,6 +65,25 @@ export function createFourMemeAdapter({
   const manager = getAddress(address);
   const helper = getAddress(helperAddress);
   const wrapped = getAddress(wrappedNative);
+  const classify = (token, quoteToken) => {
+    if (!classifyPair) {
+      return {
+        token,
+        quoteToken,
+        targetToken: token,
+        referenceAsset: quoteToken,
+        targetSide: "token0",
+        pairDirection: "token0/token1",
+        targetAssetKind: "meme",
+        referenceAssetKind: "unknown",
+        referenceAssetIssuer: null,
+        assetSource: null,
+        assetVerifiedAt: null,
+        referenceRestrictions: [],
+      };
+    }
+    return withLegacyPairAliases(classifyPair(token, quoteToken));
+  };
   return Object.freeze({
     id,
     sourceKind: "launchpad",
@@ -87,9 +108,10 @@ export function createFourMemeAdapter({
         }
         const quote = getAddress(info.quote);
         const quoteToken = sameAddress(quote, ZeroAddress) ? wrapped : quote;
+        const picked = classify(token, quoteToken);
+        if (!picked) return null;
         return {
-          token,
-          quoteToken,
+          ...picked,
           pool: manager,
           poolId: null,
           creator: getAddress(parsed.args.creator),
@@ -107,6 +129,8 @@ export function createFourMemeAdapter({
       const token = getAddress(parsed.args.token1);
       const rawQuote = getAddress(parsed.args.token2);
       const quoteToken = sameAddress(rawQuote, ZeroAddress) ? wrapped : rawQuote;
+      const picked = classify(token, quoteToken);
+      if (!picked) return null;
       const pool = await resolveMigrationPool({
         provider,
         transactionHash: log.transactionHash,
@@ -114,8 +138,7 @@ export function createFourMemeAdapter({
         quoteToken,
       });
       return {
-        token,
-        quoteToken,
+        ...picked,
         pool: pool ?? manager,
         poolId: null,
         creator: null,

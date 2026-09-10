@@ -169,7 +169,9 @@ DEXPAPRIKA_SCAN=true
 - analysis RPC 在有限重试后仍返回 429 时，当前链进程进入 15 分钟深检冷却；官方发现和游标推进继续运行。冷却到期只放行一次探测，成功后恢复；同一熔断周期最多发送一条 Telegram 告警。429 可能是瞬时吞吐限制，也可能是月额度耗尽，程序不会误报具体原因。
 - 官方公共 RPC 会限流；双 RPC 能减少付费调用，但不能保证完全没有节点错误。未提交区间会重试，只有完整处理成功后才推进游标。
 
-四条 EVM 链建议使用同一个“扫描器专用”Dwellir API Key，并在 Dwellir 控制台为该 Key 设置 `20,000,000` 次 monthly quota。另一个预计使用 500 万次/月的项目必须使用独立 Key。跨进程、跨主机和实际账单周期的硬上限由 Dwellir 服务端执行；本程序不维护容易与账单周期错位的本地月度计数文件。终端 `routes` 统计只是候选分流次数，不等同于供应商账单。
+四条 EVM 链建议使用同一个“扫描器专用”Dwellir API Key，并在 Dwellir 控制台为该 Key 设置 `20,000,000` 次 monthly quota。默认本地软预算合计 1800 万次：Ethereum 450 万、Base 300 万、BSC 550 万、Robinhood 500 万。每条链在 `data/<chain>/rpc-usage.json` 按 UTC 月记录分析/回退 RPC 的请求数和方法分布；80% 开始节流，95% 只保留可信股票底池候选，100% 停止付费深检但继续公共节点发现。本地计数只约束单机单实例，跨主机和供应商账期的硬上限仍应由 Dwellir 控制台执行。
+
+可信资产目录来自 `config/assets/<chain>.json`，运行时成功刷新后写入 `data/<chain>/asset-catalog.json`。启动时优先读取最后一个有效运行时快照；刷新下载、校验或写入失败时继续使用旧快照。仓库内尚未验证到权威 HTTPS 清单的链保持 `disabled-unverified`，不会用 symbol 猜测股票资产，也不会因此启用对应 Launchpad。
 
 旧服务器可以保留：
 
@@ -208,7 +210,7 @@ Pons 链上阶段为 `not_graduated → swept → pool_created`，`rescued` 是�
 
 链上与 GeckoTerminal 独立运行：一个来源故障不会阻止另一个来源。`scan` 会处理已取得的候选后汇总错误并以非零状态退出，不会把部分成功伪装成整轮成功；整轮超过 120 秒会明确报超时，公共 RPC 无法及时扫完时请换专用 RPC。`watch` 对同一 `data/` 使用单实例锁，重复启动会明确报错。
 
-`scan` 和 `check` 不创建锁、不创建或修改 `data/`，也不发送 Telegram。配置文件通过局部解析读取，旧 `.env` 中的私钥或交易字段不会注入进程配置，也不会被程序访问。
+`scan` 和 `check` 不创建锁、不修改业务状态 `state.json`，也不发送 Telegram；若使用 analysis RPC，会更新对应链的 `rpc-usage.json` 计数。配置文件通过局部解析读取，旧 `.env` 中的私钥或交易字段不会注入进程配置，也不会被程序访问。
 
 升级前建议先备份 `data/state.json`。Robinhood 旧状态会复制迁移到 `data/robinhood`；程序可从旧 schema v3/v4 迁移到 v5，不会删除旧版 `positions`、`trades` 或其他历史文件。
 

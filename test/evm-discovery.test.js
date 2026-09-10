@@ -43,6 +43,24 @@ const chain = {
 };
 
 describe("generic EVM discovery", () => {
+  it("uses an injected pair classifier for Uniswap pools", () => {
+    const adapter = createUniswapV2Adapter({
+      id: "uniswap-v2-base",
+      address: logs[0].address,
+      classifyPair: () => ({
+        candidateKind: "meme",
+        targetToken: "0x2222222222222222222222222222222222222222",
+        referenceAsset: "0x1111111111111111111111111111111111111111",
+        targetSide: "token1",
+        referenceAssetKind: "stock",
+      }),
+    });
+    const event = adapter.parse(logs[0]);
+    assert.equal(event.token, event.targetToken);
+    assert.equal(event.quoteToken, event.referenceAsset);
+    assert.equal(event.referenceAssetKind, "stock");
+  });
+
   it("groups filters, pins one provider, sorts logs, and normalizes exact Uniswap fields", async () => {
     const provider = { role: "discovery" };
     let request;

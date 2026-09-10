@@ -14,13 +14,17 @@ export function createRoleProviders({
   analysisUrl,
   discoveryCups,
   analysisCups,
+  usageBudget = null,
   createProvider,
 }) {
   if (typeof createProvider !== "function") throw new Error("createProvider must be a function");
   const discoveryKey = normalizeRpcEndpoint(discoveryUrl);
   const analysisKey = normalizeRpcEndpoint(analysisUrl);
   if (discoveryKey === analysisKey) {
-    const shared = createProvider(analysisUrl, Math.min(discoveryCups, analysisCups));
+    const shared = createProvider(analysisUrl, Math.min(discoveryCups, analysisCups), {
+      role: "analysis",
+      usageBudget,
+    });
     return {
       analysis: shared,
       discoveryPrimary: shared,
@@ -28,8 +32,14 @@ export function createRoleProviders({
       sameEndpoint: true,
     };
   }
-  const discoveryPrimary = createProvider(discoveryUrl, discoveryCups);
-  const analysis = createProvider(analysisUrl, analysisCups);
+  const discoveryPrimary = createProvider(discoveryUrl, discoveryCups, {
+    role: "discovery-public",
+    usageBudget: null,
+  });
+  const analysis = createProvider(analysisUrl, analysisCups, {
+    role: "analysis",
+    usageBudget,
+  });
   return {
     analysis,
     discoveryPrimary,

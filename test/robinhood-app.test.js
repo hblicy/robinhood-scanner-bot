@@ -18,6 +18,35 @@ afterEach(() => {
 });
 
 describe("Robinhood multichain application", () => {
+  it("restores and persists the chain-scoped monthly RPC counter", () => {
+    const projectRoot = tempRoot();
+    const dataDir = path.join(projectRoot, "data", "robinhood");
+    fs.mkdirSync(dataDir, { recursive: true });
+    fs.writeFileSync(path.join(dataDir, "rpc-usage.json"), JSON.stringify({
+      schemaVersion: 1,
+      month: new Date().toISOString().slice(0, 7),
+      total: 12,
+      methods: { eth_call: 12 },
+    }));
+    let rpcOptions;
+    const app = createApp({
+      chainKey: "robinhood",
+      env: {},
+      dependencies: {
+        projectRoot,
+        createRpcContext: (options) => { rpcOptions = options; return {}; },
+        commands: { watch: async () => {}, scan: async () => {}, check: async () => {} },
+      },
+    });
+    assert.equal(app.config.rpcUsageBudget.snapshot().total, 12);
+    assert.equal(rpcOptions.usageBudget, app.config.rpcUsageBudget);
+    app.config.rpcUsageBudget.record("eth_getLogs");
+    app.config.rpcUsageBudget.flush();
+    const saved = JSON.parse(fs.readFileSync(path.join(dataDir, "rpc-usage.json"), "utf8"));
+    assert.equal(saved.total, 13);
+    assert.equal(saved.methods.eth_getLogs, 1);
+  });
+
   it("assembles chain-scoped RPC, state, venues and a push-only command surface", async () => {
     const projectRoot = tempRoot();
     const calls = [];
@@ -39,6 +68,9 @@ describe("Robinhood multichain application", () => {
           assert.equal(context, rpcContext);
           calls.push(["chain", chainId]);
         },
+        verifyVenueDeployments: async (entries) => {
+          calls.push(["venues", entries.length]);
+        },
         commands: {
           watch: async (context) => calls.push(["watch", context.config.dataDir]),
           scan: async (context) => calls.push(["scan", context.config.profile.id]),
@@ -54,6 +86,10 @@ describe("Robinhood multichain application", () => {
     assert.match(app.config.telegramTitle, /Robinhood/);
     assert.ok(app.config.venueIds.includes("uniswap-v2-robinhood"));
     assert.ok(app.config.venueIds.includes("pons-v2-robinhood"));
+    assert.equal(app.config.assetCatalog.chain, "robinhood");
+    assert.equal(typeof app.config.classifyPair, "function");
+    assert.equal(app.config.venueRegistry.route("uniswap-v2-robinhood").action, "analyze");
+    assert.equal(app.config.venueRegistry.route("long-robinhood").reason, "venue-disabled-unverified");
     assert.deepEqual(Object.keys(app).sort(), ["check", "config", "scan", "watch"]);
 
     await app.watch();
@@ -62,6 +98,7 @@ describe("Robinhood multichain application", () => {
     assert.deepEqual(calls, [
       ["rpc", 4663],
       ["chain", 4663],
+      ["venues", 2],
       ["watch", path.join(projectRoot, "data", "robinhood")],
       ["scan", 4663],
       ["check", "0x1111111111111111111111111111111111111111", 4663],
