@@ -87,12 +87,12 @@ export function atomicWriteJsonBatch(documents, {
   });
   if (entries.length === 0) throw new Error("asset catalog batch is empty");
   fsImpl.mkdirSync(path.resolve(directory), { recursive: true });
+  for (const entry of entries) entry.hadTarget = fsImpl.existsSync(entry.target);
   try {
     for (const entry of entries) {
       fsImpl.writeFileSync(entry.temporary, `${JSON.stringify(entry.document, null, 2)}\n`, "utf8");
     }
     for (const entry of entries) {
-      entry.hadTarget = fsImpl.existsSync(entry.target);
       if (entry.hadTarget) fsImpl.copyFileSync(entry.target, entry.backup);
     }
     for (const entry of entries) fsImpl.renameSync(entry.temporary, entry.target);

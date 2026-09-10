@@ -173,6 +173,39 @@ describe("xStocks official asset catalog", () => {
     }
   });
 
+  it("preserves every old catalog when staging a batch fails", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "xstocks-stage-"));
+    const originals = Object.fromEntries(["solana", "ethereum", "bsc"].map((chain) => [
+      chain,
+      { chain, generation: "old" },
+    ]));
+    try {
+      for (const [chain, document] of Object.entries(originals)) {
+        fs.writeFileSync(path.join(directory, `${chain}.json`), JSON.stringify(document), "utf8");
+      }
+      let failed = false;
+      const fsImpl = {
+        ...fs,
+        writeFileSync(file, ...args) {
+          if (!failed && file.includes("ethereum.json") && file.endsWith(".tmp")) {
+            failed = true;
+            throw new Error("stage failed");
+          }
+          return fs.writeFileSync(file, ...args);
+        },
+      };
+      assert.throws(() => atomicWriteJsonBatch(
+        Object.fromEntries(Object.keys(originals).map((chain) => [chain, { chain, generation: "new" }])),
+        { directory, fsImpl, transactionId: "test" }
+      ), /batch publish failed.*stage failed/i);
+      for (const [chain, original] of Object.entries(originals)) {
+        assert.deepEqual(JSON.parse(fs.readFileSync(path.join(directory, `${chain}.json`), "utf8")), original);
+      }
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("formats a multi-chain refresh result without assuming a single catalog", () => {
     assert.equal(formatAssetRefreshResult({
       solana: { assets: [{}, {}] },
