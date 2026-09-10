@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { createRpcUsageBudget } from "../src/rpc-usage-budget.js";
+import { createRpcUsageBudget, intervalForRpcBudget } from "../src/rpc-usage-budget.js";
 
 const NOW = Date.parse("2026-09-10T00:00:00Z");
 
@@ -38,6 +38,22 @@ describe("monthly RPC usage budget", () => {
     assert.deepEqual(budget.snapshot().methods, {});
   });
 
+  it("rotates the counter while a watch process remains alive across a UTC month", () => {
+    let clock = NOW;
+    const budget = createRpcUsageBudget({
+      limit: 100,
+      initial: { month: "2026-09", total: 99, methods: { eth_call: 99 } },
+      now: () => clock,
+    });
+    assert.equal(budget.snapshot().stage, "critical");
+    clock = Date.parse("2026-10-01T00:00:01Z");
+    assert.equal(budget.snapshot().month, "2026-10");
+    assert.equal(budget.snapshot().total, 0);
+    assert.doesNotThrow(() => budget.assertAllowed("analysis"));
+    budget.record("eth_getLogs");
+    assert.equal(budget.snapshot().methods.eth_getLogs, 1);
+  });
+
   it("restores a same-month snapshot and rejects invalid limits", () => {
     const budget = createRpcUsageBudget({
       limit: 100,
@@ -46,5 +62,12 @@ describe("monthly RPC usage budget", () => {
     });
     assert.equal(budget.snapshot().total, 12);
     assert.throws(() => createRpcUsageBudget({ limit: 0 }), /limit/);
+  });
+
+  it("slows supplemental market polling after the throttled threshold", () => {
+    assert.equal(intervalForRpcBudget(15_000, null), 15_000);
+    assert.equal(intervalForRpcBudget(15_000, { snapshot: () => ({ stage: "normal" }) }), 15_000);
+    assert.equal(intervalForRpcBudget(15_000, { snapshot: () => ({ stage: "throttled" }) }), 30_000);
+    assert.equal(intervalForRpcBudget(15_000, { snapshot: () => ({ stage: "critical" }) }), 30_000);
   });
 });

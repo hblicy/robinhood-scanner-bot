@@ -153,6 +153,11 @@ function loadSolanaConfig(envSource) {
         firstValue(envSource, ["SOLANA_MEANINGFUL_SELLER_COUNT"], 3),
         { min: 1, max: 20 }
       ),
+      assetRefreshMs: integer(
+        "ASSET_REFRESH_MS",
+        firstValue(envSource, ["ASSET_REFRESH_MS"], 21_600_000),
+        { min: 60_000 }
+      ),
     }),
     telegram: Object.freeze({
       token: firstValue(envSource, ["TELEGRAM_BOT_TOKEN"], ""),
@@ -192,6 +197,7 @@ export function loadChainConfig(chainKey, envSource = process.env) {
   }
 
   return Object.freeze({
+    family: "evm",
     profile,
     rpc: Object.freeze({
       discoveryUrl,
@@ -260,6 +266,11 @@ export function loadChainConfig(chainKey, envSource = process.env) {
         { min: 0 }
       ),
       alertMode,
+      assetRefreshMs: integer(
+        "ASSET_REFRESH_MS",
+        firstValue(envSource, ["ASSET_REFRESH_MS"], 21_600_000),
+        { min: 60_000 }
+      ),
     }),
     telegram: Object.freeze({
       token: firstValue(envSource, ["TELEGRAM_BOT_TOKEN"], ""),

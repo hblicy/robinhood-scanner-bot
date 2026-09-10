@@ -46,6 +46,8 @@ import {
   bindAnalysisCircuit,
   createAnalysisRpcCircuit,
 } from "./analysis-rpc-circuit.js";
+import { intervalForRpcBudget } from "./rpc-usage-budget.js";
+import { formatHourlyUsage } from "./startup-summary.js";
 
 const DEFAULT_ANALYSIS_CONCURRENCY = 1;
 class NonRetryablePendingCheckError extends Error {
@@ -717,6 +719,7 @@ export async function runReadOnlyCandidates(events, dependencies) {
           },
           supportsSellability: dependencies.supportsSellability ?? supportsRobinhoodSellability,
           venueRegistry: dependencies.venueRegistry ?? null,
+          rpcUsageBudget: dependencies.rpcUsageBudget ?? null,
         });
         if (route.action !== "analyze") {
           incrementCandidateRouteStat(routeStats, candidateRouteStatKey(route));
@@ -821,6 +824,37 @@ export function createWatchRpcBindings({
   };
 }
 
+export function createWatchRuntime(context = null) {
+  const config = context?.config ?? null;
+  const settings = Object.freeze({ ...SETTINGS, ...(config?.settings ?? {}) });
+  const store = config?.store ?? getDefaultStore();
+  const rpcContext = config?.rpcContext;
+  const rpc = createWatchRpcBindings(rpcContext ? {
+    analysisProvider: rpcContext.analysisProvider,
+    discoveryProvider: rpcContext.discoveryPrimary,
+    discoverySessions: rpcContext.discoverySessions,
+    analyzeImpl: config.services?.analyze ?? analyze,
+  } : undefined);
+  return {
+    settings,
+    dataDir: config?.dataDir ?? DATA_DIR,
+    store,
+    rpc,
+    hasSeen: store.hasSeen,
+    markSeen: store.markSeen,
+    getOnchainCursor: store.getOnchainCursor,
+    setOnchainCursor: store.setOnchainCursor,
+    venueRegistry: config?.venueRegistry ?? null,
+    rpcUsageBudget: config?.rpcUsageBudget ?? null,
+    alertReport: config?.services?.alertReport ?? alertReport,
+    sendText: config?.services?.sendText ?? sendTelegram,
+    geckoOptions: {
+      maxAgeMinutes: settings.maxAgeMinutes,
+      classifyPair: config?.classifyPair ?? null,
+    },
+  };
+}
+
 export function buildWatchCandidateDependencies({
   rpc,
   mode = "live",
@@ -833,6 +867,7 @@ export function buildWatchCandidateDependencies({
   analysisCircuit = createAnalysisRpcCircuit(),
   onAnalysisRpcOpen,
   venueRegistry = null,
+  rpcUsageBudget = null,
 }) {
   if (typeof rpc?.analyzeCandidate !== "function") {
     throw new Error("watch candidate analysis RPC binding is required");
@@ -850,6 +885,7 @@ export function buildWatchCandidateDependencies({
     onAnalyzed,
     supportsSellability: supportsRobinhoodSellability,
     venueRegistry,
+    rpcUsageBudget,
     routeStats: createCandidateRouteStats(),
     analysisCircuit,
     onAnalysisRpcOpen,
@@ -887,6 +923,7 @@ export async function processWatchCandidate(event, {
     },
     supportsSellability: candidateDependencies.supportsSellability ?? supportsRobinhoodSellability,
     venueRegistry: candidateDependencies.venueRegistry ?? null,
+    rpcUsageBudget: candidateDependencies.rpcUsageBudget ?? null,
   });
   if (route.action !== "analyze") {
     const stat = candidateRouteStatKey(route);
@@ -1057,23 +1094,28 @@ export function notificationsEnabledForMode(mode) {
   throw new Error(`unknown watch mode: ${mode}`);
 }
 
-async function watch({ mode = "live" } = {}) {
+async function watch({ mode = "live", context = null } = {}) {
+  const runtime = createWatchRuntime(context);
+  const { settings, store, rpc } = runtime;
   const notificationsEnabled = notificationsEnabledForMode(mode);
-  const sendCandidateAlert = notificationsEnabled ? alertReport : async () => {};
-  const releaseLock = await acquireInstanceLock(DATA_DIR);
+  const sendCandidateAlert = notificationsEnabled ? runtime.alertReport : async () => {};
+  const releaseLock = await acquireInstanceLock(runtime.dataDir);
   const releaseOnExit = () => releaseLock();
   process.once("exit", releaseOnExit);
   try {
-    banner();
-    const rpc = createWatchRpcBindings();
+    banner(settings, context?.config ? {
+      name: context.config.profile.name,
+      id: context.config.profile.id,
+      discoveryRpc: context.config.rpc.discoveryUrl,
+      analysisRpc: context.config.rpc.analysisUrl,
+    } : CHAIN);
     const { analysisProvider } = rpc;
-    const store = getDefaultStore();
-    if (SETTINGS.onchainScan) {
+    if (settings.onchainScan) {
       await runWatchStartupChecks({ ...rpc.startup, store, notificationsEnabled });
     }
-    if (notificationsEnabled && SETTINGS.telegramToken) {
-      await sendTelegram(
-        `🤖 Robinhood 扫链机器人已启动\n仅扫描和报警，不包含交易功能\n年龄 &lt; ${SETTINGS.maxAgeMinutes} 分钟 · 最低分 ${SETTINGS.minScore}`
+    if (notificationsEnabled && (context?.config?.telegram?.token ?? SETTINGS.telegramToken)) {
+      await runtime.sendText(
+        `🤖 Robinhood 扫链机器人已启动\n仅扫描和报警，不包含交易功能\n年龄 &lt; ${settings.maxAgeMinutes} 分钟 · 最低分 ${settings.minScore}`
       ).catch((error) => console.error("startup telegram:", safeErrorMessage(error)));
     }
 
@@ -1093,9 +1135,13 @@ async function watch({ mode = "live" } = {}) {
       mode,
       onAnalyzed: scheduleCandidateRecheck,
       alertReport: sendCandidateAlert,
+      markSeen: runtime.markSeen,
+      settings,
+      venueRegistry: runtime.venueRegistry,
+      rpcUsageBudget: runtime.rpcUsageBudget,
       onAnalysisRpcOpen: notificationsEnabled
         ? async () => {
-          await sendTelegram(
+          await runtime.sendText(
             "⚠️ Robinhood Chain 分析 RPC 被限流或额度耗尽，深检暂时暂停；官方发现仍在运行。"
           ).catch((error) => console.error("analysis RPC telegram:", safeErrorMessage(error)));
         }
@@ -1118,8 +1164,8 @@ async function watch({ mode = "live" } = {}) {
       candidate_recheck: createCandidateRecheckHandler({
         executeCandidate,
         now: Date.now,
-        maxAgeMinutes: SETTINGS.maxAgeMinutes,
-        minScore: SETTINGS.minScore,
+        maxAgeMinutes: settings.maxAgeMinutes,
+        minScore: settings.minScore,
         analyze: analyzeCandidateRecheck,
         alertReport: sendCandidateAlert,
         log: console.log,
@@ -1132,8 +1178,8 @@ async function watch({ mode = "live" } = {}) {
       }),
     };
     const createSourceProcessor = () => createWatchSourceProcessor({
-      maxQueueSize: SETTINGS.maxQueueSize,
-      hasSeen,
+      maxQueueSize: settings.maxQueueSize,
+      hasSeen: runtime.hasSeen,
       claimed,
       recoveryKeys,
       executeCandidate,
@@ -1145,18 +1191,18 @@ async function watch({ mode = "live" } = {}) {
     const common = {
         ...rpc.onchain,
         now: Date.now,
-        getOnchainCursor,
-        setOnchainCursor,
-        geckoNewPools,
+        getOnchainCursor: runtime.getOnchainCursor,
+        setOnchainCursor: runtime.setOnchainCursor,
+        geckoNewPools: (pages) => geckoNewPools(pages, runtime.geckoOptions),
         routeStats: candidateDependencies.routeStats,
         log: console.log,
     };
     const loops = [];
-    if (SETTINGS.onchainScan) {
+    if (settings.onchainScan) {
       loops.push(runPonsWatchLoop(ponsState, {
         ...rpc.pons,
         store,
-        settings: SETTINGS,
+        settings,
         scanRange: scanPonsRange,
         readLaunch: readPonsLaunch,
         now: Date.now,
@@ -1169,10 +1215,10 @@ async function watch({ mode = "live" } = {}) {
         while (true) {
           await runWatchIteration(state, {
             ...common,
-            settings: { ...SETTINGS, geckoScan: false },
+            settings: { ...settings, geckoScan: false },
             handleEvents,
           });
-          await sleep(SETTINGS.pollMs);
+          await sleep(settings.pollMs);
         }
       })());
     }
@@ -1181,10 +1227,10 @@ async function watch({ mode = "live" } = {}) {
         while (true) {
           const result = await drainOutbox({
             store,
-            send: (text) => sendTelegram(text),
+            send: runtime.sendText,
           });
           if (result.failed) console.error(`outbox: ${result.failed} notifications exhausted retries`);
-          await sleep(SETTINGS.outboxPollMs);
+          await sleep(settings.outboxPollMs);
         }
       })());
     }
@@ -1192,10 +1238,10 @@ async function watch({ mode = "live" } = {}) {
       while (true) {
         const result = await runPendingChecks({ store, handlers: pendingHandlers });
         if (result.failed) console.error(`pending checks: ${result.failed} checks exhausted retries`);
-        await sleep(SETTINGS.outboxPollMs);
+        await sleep(settings.outboxPollMs);
       }
     })());
-    if (SETTINGS.dexPaprikaScan) {
+    if (settings.dexPaprikaScan) {
       loops.push((async () => {
         while (true) {
           const heat = await refreshMarketHeat({ provider: analysisProvider, store });
@@ -1205,17 +1251,29 @@ async function watch({ mode = "live" } = {}) {
         }
       })());
     }
-    if (SETTINGS.geckoScan) {
+    if (settings.geckoScan) {
       const handleEvents = createSourceProcessor();
       loops.push((async () => {
         while (true) {
           await runWatchIteration(state, {
             ...common,
-            settings: { ...SETTINGS, onchainScan: false },
+            settings: { ...settings, onchainScan: false },
             handleEvents,
           });
-          const nextPoll = state.lastGecko + SETTINGS.geckoPollMs;
+          const nextPoll = state.lastGecko + intervalForRpcBudget(
+            settings.geckoPollMs,
+            runtime.rpcUsageBudget
+          );
           await sleep(Math.max(1, nextPoll - Date.now()));
+        }
+      })());
+    }
+    if (context?.config?.rpcUsageBudget) {
+      loops.push((async () => {
+        while (true) {
+          console.log(formatHourlyUsage(context.config, Date.now()));
+          const hour = Math.floor(Date.now() / 3_600_000);
+          await sleep(Math.max(1, (hour + 1) * 3_600_000 - Date.now()));
         }
       })());
     }
@@ -1224,6 +1282,43 @@ async function watch({ mode = "live" } = {}) {
     process.removeListener("exit", releaseOnExit);
     await releaseLock();
   }
+}
+
+export function createScanRuntime(context = null) {
+  const config = context?.config;
+  if (!config) return null;
+  const settings = Object.freeze({ ...SETTINGS, ...(config.settings ?? {}) });
+  return {
+    settings,
+    chain: {
+      name: config.profile.name,
+      id: config.profile.id,
+      discoveryRpc: config.rpc.discoveryUrl,
+      analysisRpc: config.rpc.analysisUrl,
+    },
+    discoveryProvider: config.rpcContext.discoveryPrimary,
+    analysisProvider: config.rpcContext.analysisProvider,
+    getBlockNumber,
+    findFirstBlockAtOrAfter,
+    scanOnchain,
+    geckoNewPools: (pages) => geckoNewPools(pages, {
+      maxAgeMinutes: settings.maxAgeMinutes,
+      classifyPair: config.classifyPair ?? null,
+    }),
+    previewPonsRange,
+    verifyPonsDeployment,
+    analyze: config.services?.analyze ?? analyze,
+    classifyCandidate: classifyAuxiliaryCandidate,
+    consoleAlert: async (report) => {
+      console.log(formatAlert(report).replace(/<[^>]+>/g, ""));
+    },
+    consolePons: async (report) => {
+      console.log(`Pons ${report.nextToken.protocolPhase} ${report.nextToken.token} ID ${report.eventId}`);
+    },
+    venueRegistry: config.venueRegistry ?? null,
+    rpcUsageBudget: config.rpcUsageBudget ?? null,
+    log: console.log,
+  };
 }
 
 async function scanOnceCore(supplied = null) {
@@ -1250,7 +1345,7 @@ async function scanOnceCore(supplied = null) {
   const discoveryProvider = dependencies.discoveryProvider || dependencies.provider;
   const analysisProvider = dependencies.analysisProvider || dependencies.provider || getAnalysisProvider();
   const settings = dependencies.settings;
-  banner();
+  banner(settings, dependencies.chain ?? CHAIN);
   const sources = [];
   if (settings.onchainScan) {
     if (dependencies.previewPonsRange) {
@@ -1335,6 +1430,7 @@ async function scanOnceCore(supplied = null) {
       log: dependencies.log,
       supportsSellability: dependencies.supportsSellability ?? supportsRobinhoodSellability,
       venueRegistry: dependencies.venueRegistry ?? null,
+      rpcUsageBudget: dependencies.rpcUsageBudget ?? null,
       routeStats,
       analysisCircuit: dependencies.analysisCircuit ?? createAnalysisRpcCircuit(),
       onAnalysisRpcOpen: dependencies.onAnalysisRpcOpen,
@@ -1382,28 +1478,29 @@ function normalizedRpcEndpoint(value) {
   return url.href;
 }
 
-function banner() {
+function banner(settings = SETTINGS, chain = CHAIN) {
   console.log("====================================================");
   console.log(" Robinhood Chain scanner");
-  console.log(` ${CHAIN.name}  chainId=${CHAIN.id}`);
-  const sharedRpc = normalizedRpcEndpoint(CHAIN.discoveryRpc)
-    === normalizedRpcEndpoint(CHAIN.analysisRpc);
+  console.log(` ${chain.name}  chainId=${chain.id}`);
+  const sharedRpc = normalizedRpcEndpoint(chain.discoveryRpc)
+    === normalizedRpcEndpoint(chain.analysisRpc);
   console.log(` Discovery RPC ${sharedRpc ? "shared endpoint" : "official primary + analysis fallback"}`);
   console.log(` Analysis RPC configured${sharedRpc ? " (same endpoint; no CU separation)" : ""}`);
   console.log(" mode=push-only");
-  console.log(` maxAge=${SETTINGS.maxAgeMinutes}m  minScore=${SETTINGS.minScore}`);
+  console.log(` maxAge=${settings.maxAgeMinutes}m  minScore=${settings.minScore}`);
   console.log(" Scanner and alerts only. Transaction functionality is not included.");
   console.log(" This is not financial advice. Most memecoins go to zero.");
   console.log("====================================================");
 }
 
-export async function runCommand(command, argument) {
+export async function runCommand(command, argument, context = null) {
   if (command === "watch") {
-    await watch();
+    await watch({ mode: context?.config?.settings?.alertMode ?? "live", context });
   } else if (command === "scan") {
-    await scanOnce();
+    await scanOnce(createScanRuntime(context));
   } else if (command === "check") {
-    await checkOne(argument);
+    if (context?.config?.services?.check) await context.config.services.check(argument);
+    else await checkOne(argument);
   }
 }
 

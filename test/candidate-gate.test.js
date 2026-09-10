@@ -50,6 +50,29 @@ describe("candidate RPC gate", () => {
     assert.equal(sellabilityReads, 0);
   });
 
+  it("records paid candidates without analysis when the monthly budget is exhausted", () => {
+    const result = routeCandidate(candidate(), {
+      thresholds,
+      rpcUsageBudget: { snapshot: () => ({ stage: "exhausted" }) },
+      supportsSellability: () => true,
+    });
+    assert.deepEqual(result, { action: "record-only", reason: "rpc-budget-exhausted" });
+  });
+
+  it("keeps verified stock-reference candidates prioritized at the critical stage", () => {
+    const budget = { snapshot: () => ({ stage: "critical" }) };
+    assert.equal(routeCandidate(candidate(), {
+      thresholds,
+      rpcUsageBudget: budget,
+      supportsSellability: () => true,
+    }).reason, "rpc-budget-critical");
+    assert.equal(routeCandidate(candidate({ referenceAssetKind: "stock" }), {
+      thresholds,
+      rpcUsageBudget: budget,
+      supportsSellability: () => true,
+    }).action, "analyze");
+  });
+
   it("skips venues without strict sellability support before analysis", () => {
     const result = routeCandidate(candidate({ venue: "uniswap-v4-base" }), {
       thresholds,

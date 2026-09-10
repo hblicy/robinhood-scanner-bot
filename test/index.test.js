@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import {
   createCandidateRecheckHandler,
   createCandidateRetryScheduler,
+  createScanRuntime,
+  createWatchRuntime,
   createWatchRpcBindings,
   initialOnchainCursor,
   processEvents,
@@ -423,6 +425,74 @@ describe("scanner orchestration", () => {
       ["analyze", analysisProvider],
       ["classify", discoveryProvider],
     ]);
+  });
+
+  it("uses the application RPC, state, budget and catalog bindings for Robinhood watch", async () => {
+    const analysisProvider = { role: "paid-analysis" };
+    const discoveryProvider = { role: "public-discovery" };
+    const discoverySessions = { run: async (work) => work(discoveryProvider) };
+    const store = {
+      hasSeen: () => false,
+      markSeen: () => {},
+      getOnchainCursor: () => 12,
+      setOnchainCursor: () => {},
+    };
+    const rpcUsageBudget = { stage: () => "normal" };
+    const venueRegistry = { lookup: () => null };
+    const classifyPair = () => ({ candidateKind: "meme" });
+    const config = {
+      dataDir: "D:/isolated/robinhood",
+      settings: { minScore: 70 },
+      store,
+      rpcContext: { analysisProvider, discoveryPrimary: discoveryProvider, discoverySessions },
+      rpcUsageBudget,
+      venueRegistry,
+      classifyPair,
+      services: {
+        analyze: async () => ({ score: 70 }),
+        alertReport: async () => {},
+        sendText: async () => true,
+      },
+    };
+
+    const runtime = createWatchRuntime({ config });
+
+    assert.equal(runtime.dataDir, config.dataDir);
+    assert.equal(runtime.store, store);
+    assert.equal(runtime.settings.minScore, 70);
+    assert.equal(runtime.rpc.analysisProvider, analysisProvider);
+    assert.equal(runtime.rpcUsageBudget, rpcUsageBudget);
+    assert.equal(runtime.venueRegistry, venueRegistry);
+    assert.equal(runtime.hasSeen, store.hasSeen);
+    assert.equal(runtime.getOnchainCursor, store.getOnchainCursor);
+    assert.equal(runtime.geckoOptions.classifyPair, classifyPair);
+    assert.equal(runtime.sendText, config.services.sendText);
+  });
+
+  it("uses the application RPC and budget bindings for a Robinhood one-shot scan", () => {
+    const analysisProvider = { role: "paid-analysis" };
+    const discoveryProvider = { role: "public-discovery" };
+    const rpcUsageBudget = { stage: () => "normal" };
+    const venueRegistry = { lookup: () => null };
+    const classifyPair = () => ({ candidateKind: "meme" });
+    const config = {
+      profile: { name: "Robinhood Chain", id: 4663 },
+      rpc: { discoveryUrl: "https://public.example", analysisUrl: "https://paid.example" },
+      settings: { minScore: 70 },
+      rpcContext: { analysisProvider, discoveryPrimary: discoveryProvider },
+      rpcUsageBudget,
+      venueRegistry,
+      classifyPair,
+      services: { analyze: async () => ({ score: 70 }) },
+    };
+
+    const runtime = createScanRuntime({ config });
+
+    assert.equal(runtime.settings.minScore, 70);
+    assert.equal(runtime.analysisProvider, analysisProvider);
+    assert.equal(runtime.discoveryProvider, discoveryProvider);
+    assert.equal(runtime.rpcUsageBudget, rpcUsageBudget);
+    assert.equal(runtime.venueRegistry, venueRegistry);
   });
 
   it("retries recoverable startup RPC checks without exiting watch", async () => {

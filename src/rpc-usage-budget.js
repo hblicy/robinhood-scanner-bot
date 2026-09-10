@@ -12,6 +12,14 @@ function stageFor(total, limit) {
   return "normal";
 }
 
+export function intervalForRpcBudget(baseIntervalMs, usageBudget) {
+  if (!Number.isFinite(baseIntervalMs) || baseIntervalMs <= 0) {
+    throw new Error("RPC budget interval must be positive");
+  }
+  const stage = usageBudget?.snapshot?.().stage ?? "normal";
+  return stage === "normal" ? baseIntervalMs : baseIntervalMs * 2;
+}
+
 function emptyState(month) {
   return { schemaVersion: 1, month, total: 0, methods: {} };
 }
@@ -47,9 +55,16 @@ export function createRpcUsageBudget({ limit, initial = null, persist = null, no
   }
   let state = normalizeInitial(initial, utcMonth(now()));
   let dirty = false;
+  const ensureCurrentMonth = () => {
+    const month = utcMonth(now());
+    if (state.month === month) return;
+    state = emptyState(month);
+    dirty = true;
+  };
 
   return Object.freeze({
     record(method) {
+      ensureCurrentMonth();
       if (typeof method !== "string" || method.trim() === "") {
         throw new Error("RPC method must be a non-empty string");
       }
@@ -59,6 +74,7 @@ export function createRpcUsageBudget({ limit, initial = null, persist = null, no
       return stageFor(state.total, limit);
     },
     assertAllowed(role) {
+      ensureCurrentMonth();
       if (stageFor(state.total, limit) === "exhausted" && role !== "discovery-public") {
         const error = new Error("rpc-budget-exhausted");
         error.code = "rpc-budget-exhausted";
@@ -66,12 +82,14 @@ export function createRpcUsageBudget({ limit, initial = null, persist = null, no
       }
     },
     flush() {
+      ensureCurrentMonth();
       if (!dirty) return false;
       persist?.(cloneState(state));
       dirty = false;
       return true;
     },
     snapshot() {
+      ensureCurrentMonth();
       const snapshot = cloneState(state);
       snapshot.limit = limit;
       snapshot.stage = stageFor(state.total, limit);

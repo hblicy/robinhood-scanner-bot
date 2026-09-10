@@ -2,6 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createAssetCatalog } from "../src/assets/catalog.js";
 import { createAssetCatalogCache } from "../src/assets/cache.js";
+import { createAssetRefreshScheduler } from "../src/assets/cache.js";
 
 const TOKEN = "0x1111111111111111111111111111111111111111";
 const QUOTE = "0x2222222222222222222222222222222222222222";
@@ -95,6 +96,17 @@ describe("trusted asset catalog", () => {
     assert.deepEqual(reads, ["runtime.json"]);
   });
 
+  it("falls back to the shipped catalog when the runtime snapshot is corrupt", () => {
+    const cache = createAssetCatalogCache({
+      readJson: (file) => file === "runtime.json" ? { broken: true } : validDocument(),
+      atomicWriteJson() {},
+    });
+    const catalog = cache.load({ shippedPath: "shipped.json", runtimePath: "runtime.json" });
+    assert.equal(catalog.chain, "base");
+    assert.equal(cache.snapshot().runtimeHits, 0);
+    assert.equal(cache.snapshot().shippedHits, 1);
+  });
+
   it("keeps the last valid snapshot when refresh validation fails", async () => {
     const current = createAssetCatalog(validDocument());
     const writes = [];
@@ -111,5 +123,32 @@ describe("trusted asset catalog", () => {
     assert.equal(result.status, "stale");
     assert.match(result.error.message, /schemaVersion/);
     assert.equal(writes.length, 0);
+  });
+
+  it("refreshes an enabled runtime source immediately and on its interval", async () => {
+    const first = createAssetCatalog(validDocument());
+    let refreshCalls = 0;
+    let tick;
+    const scheduler = createAssetRefreshScheduler({
+      current: first,
+      enabled: true,
+      intervalMs: 21_600_000,
+      refresh: async () => {
+        refreshCalls += 1;
+        return { catalog: first, status: "fresh", error: null };
+      },
+      setIntervalImpl: (callback, interval) => {
+        assert.equal(interval, 21_600_000);
+        tick = callback;
+        return 1;
+      },
+      clearIntervalImpl: () => {},
+    });
+    await scheduler.start();
+    assert.equal(refreshCalls, 1);
+    await tick();
+    assert.equal(refreshCalls, 2);
+    assert.equal(scheduler.currentCatalog(), first);
+    scheduler.stop();
   });
 });

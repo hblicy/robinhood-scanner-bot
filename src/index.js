@@ -2,6 +2,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseCli } from "./cli.js";
 import { safeErrorMessage } from "./safety.js";
+import { printStartupSummary } from "./startup-summary.js";
 
 export function assertSupportedCommand(command) {
   if (!["watch", "scan", "check"].includes(command)) {
@@ -14,6 +15,7 @@ export async function main() {
   const cli = parseCli(process.argv.slice(2));
   const { createApp } = await import("./app.js");
   const app = createApp({ chainKey: cli.chain, command: cli.command });
+  printStartupSummary(app.config);
   if (cli.command === "watch") await app.watch();
   else if (cli.command === "scan") await app.scan();
   else await app.check(cli.argument);

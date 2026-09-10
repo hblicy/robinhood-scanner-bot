@@ -86,6 +86,8 @@ describe("Robinhood multichain application", () => {
     assert.match(app.config.telegramTitle, /Robinhood/);
     assert.ok(app.config.venueIds.includes("uniswap-v2-robinhood"));
     assert.ok(app.config.venueIds.includes("pons-v2-robinhood"));
+    assert.equal(app.config.assetCatalog.chain, "robinhood");
+    assert.equal(typeof app.config.classifyPair, "function");
     assert.equal(app.config.venueRegistry.route("uniswap-v2-robinhood").action, "analyze");
     assert.equal(app.config.venueRegistry.route("long-robinhood").reason, "venue-disabled-unverified");
     assert.deepEqual(Object.keys(app).sort(), ["check", "config", "scan", "watch"]);

@@ -79,6 +79,7 @@ export function routeCandidate(candidate, {
   thresholds = {},
   supportsSellability,
   venueRegistry = null,
+  rpcUsageBudget = null,
 } = {}) {
   if (venueRegistry != null) {
     if (typeof venueRegistry.route !== "function") {
@@ -86,6 +87,13 @@ export function routeCandidate(candidate, {
     }
     const capability = venueRegistry.route(candidate?.venue);
     if (capability.action !== "analyze") return capability;
+  }
+  const budgetStage = rpcUsageBudget?.snapshot?.().stage ?? "normal";
+  if (budgetStage === "exhausted") {
+    return { action: "record-only", reason: "rpc-budget-exhausted" };
+  }
+  if (budgetStage === "critical" && candidate?.referenceAssetKind !== "stock") {
+    return { action: "record-only", reason: "rpc-budget-critical" };
   }
   if (typeof supportsSellability !== "function") {
     throw new Error("candidate gate requires sellability capability lookup");
