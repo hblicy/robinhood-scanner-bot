@@ -5,6 +5,8 @@ import { createHash } from "node:crypto";
 import { Keypair } from "@solana/web3.js";
 import { SOLANA_PROFILE } from "../src/chains/solana-profile.js";
 import { createRaydiumAdapters } from "../src/venues/solana/raydium.js";
+import { createAssetCatalog } from "../src/assets/catalog.js";
+import { createPairClassifier } from "../src/assets/pair.js";
 
 const WSOL = SOLANA_PROFILE.wrappedNative;
 const quote = new Set(SOLANA_PROFILE.quotes.map((item) => item.address));
@@ -59,6 +61,30 @@ describe("Raydium Solana adapters", () => {
     const adapter = createRaydiumAdapters(SOLANA_PROFILE).find((item) => item.id === "raydium-cpmm");
     const fixture = make(adapter, [175, 175, 109, 31, 13, 152, 155, 237], 20, {});
     assert.deepEqual(adapter.parseTransaction(fixture.context), []);
+  });
+
+  it("selects the meme when an xStock is the Raydium quote mint", () => {
+    const stock = Keypair.generate().publicKey.toBase58();
+    const catalog = createAssetCatalog({
+      schemaVersion: 1,
+      chain: "solana",
+      family: "solana",
+      source: { id: "fixture", url: "https://example.com/xstocks", verifiedAt: 1 },
+      assets: [{ address: stock, symbol: "NVDAx", kind: "stock", issuer: "Backed", sourceId: "fixture", sourceUrl: "https://example.com/xstocks", verifiedAt: 1 }],
+    });
+    const classifyPair = createPairClassifier({
+      catalog,
+      nativeQuotes: SOLANA_PROFILE.quotes.map(({ address }) => address),
+      normalizeAddress: (value) => value,
+    });
+    const adapter = createRaydiumAdapters(SOLANA_PROFILE, { classifyPair })
+      .find((item) => item.id === "raydium-cpmm");
+    const fixture = make(adapter, [175, 175, 109, 31, 13, 152, 155, 237], 20, { 5: stock });
+    const [event] = adapter.parseTransaction(fixture.context);
+    assert.equal(event.token, fixture.accountKeys[5]);
+    assert.equal(event.quoteToken, stock);
+    assert.equal(event.targetSide, "base");
+    assert.equal(event.referenceAssetIssuer, "Backed");
   });
 
   it("rejects mismatched executing programs", () => {

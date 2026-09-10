@@ -4,6 +4,8 @@ import bs58 from "bs58";
 import { Keypair } from "@solana/web3.js";
 import { SOLANA_PROFILE } from "../src/chains/solana-profile.js";
 import { createPumpAdapters } from "../src/venues/solana/pump.js";
+import { createAssetCatalog } from "../src/assets/catalog.js";
+import { createPairClassifier } from "../src/assets/pair.js";
 
 const PUMP = SOLANA_PROFILE.programs.find((program) => program.id === "pump-bonding-curve");
 const SWAP = SOLANA_PROFILE.programs.find((program) => program.id === "pumpswap");
@@ -71,6 +73,32 @@ describe("Pump Solana adapters", () => {
     const trade = pumpswap.parseTransaction(context(SWAP, [102, 6, 61, 18, 1, 218, 235, 234], accountKeys,
       Array.from({ length: 18 }, (_, index) => index + 1)));
     assert.deepEqual(trade, []);
+  });
+
+  it("selects the meme when an xStock is the PumpSwap base mint", () => {
+    const stock = Keypair.generate().publicKey.toBase58();
+    const catalog = createAssetCatalog({
+      schemaVersion: 1,
+      chain: "solana",
+      family: "solana",
+      source: { id: "fixture", url: "https://example.com/xstocks", verifiedAt: 1 },
+      assets: [{ address: stock, symbol: "AAPLx", kind: "stock", issuer: "Backed", sourceId: "fixture", sourceUrl: "https://example.com/xstocks", verifiedAt: 1 }],
+    });
+    const classifyPair = createPairClassifier({
+      catalog,
+      nativeQuotes: SOLANA_PROFILE.quotes.map(({ address }) => address),
+      normalizeAddress: (value) => value,
+    });
+    const [, pumpswap] = createPumpAdapters(SOLANA_PROFILE, { classifyPair });
+    const accountKeys = keys(21, SWAP.programId);
+    accountKeys[4] = stock;
+    const meme = accountKeys[5];
+    const [event] = pumpswap.parseTransaction(context(SWAP, [233, 146, 209, 142, 207, 104, 64, 188], accountKeys,
+      Array.from({ length: 18 }, (_, index) => index + 1)));
+    assert.equal(event.token, meme);
+    assert.equal(event.quoteToken, stock);
+    assert.equal(event.targetSide, "quote");
+    assert.equal(event.referenceAssetKind, "stock");
   });
 
   it("rejects a recognized instruction whose account layout is truncated", () => {
