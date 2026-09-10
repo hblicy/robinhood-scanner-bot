@@ -5,6 +5,7 @@ import { pathToFileURL } from "node:url";
 import { getAddress, JsonRpcProvider } from "ethers";
 import { Connection, PublicKey } from "@solana/web3.js";
 import { createAssetCatalog, serializeAssetCatalog } from "../src/assets/catalog.js";
+import { ASSET_TRANSACTION_JOURNAL } from "../src/assets/transaction.js";
 import { fetchJson } from "../src/assets/sources/http-json.js";
 import { readEnvFile } from "../src/env.js";
 import {
@@ -66,8 +67,6 @@ function atomicWriteJson(file, document) {
   }
 }
 
-const XSTOCKS_TRANSACTION_JOURNAL = ".xstocks-refresh-transaction.json";
-
 function validatedJournalEntries(journal, directory) {
   if (journal?.schemaVersion !== 1 || !/^[A-Za-z0-9-]+$/.test(journal?.transactionId || "")) {
     throw new Error("asset catalog transaction journal is invalid");
@@ -96,7 +95,7 @@ export function recoverAtomicJsonBatch({
   fsImpl = fs,
 } = {}) {
   const resolvedDirectory = path.resolve(directory);
-  const journalFile = path.join(resolvedDirectory, XSTOCKS_TRANSACTION_JOURNAL);
+  const journalFile = path.join(resolvedDirectory, ASSET_TRANSACTION_JOURNAL);
   if (!fsImpl.existsSync(journalFile)) return false;
   let journal;
   try {
@@ -149,7 +148,7 @@ export function atomicWriteJsonBatch(documents, {
     };
   });
   if (entries.length === 0) throw new Error("asset catalog batch is empty");
-  const journalFile = path.join(resolvedDirectory, XSTOCKS_TRANSACTION_JOURNAL);
+  const journalFile = path.join(resolvedDirectory, ASSET_TRANSACTION_JOURNAL);
   const journalTemporary = `${journalFile}.${transactionId}.tmp`;
   fsImpl.mkdirSync(resolvedDirectory, { recursive: true });
   for (const entry of entries) entry.hadTarget = fsImpl.existsSync(entry.target);

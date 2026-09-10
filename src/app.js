@@ -43,6 +43,7 @@ import { createVenueRegistry } from "./venues/registry.js";
 import { verifyVenueDeployments } from "./venues/verify.js";
 import { createRpcUsageBudget } from "./rpc-usage-budget.js";
 import { createAssetCatalogCache, createAssetRefreshScheduler } from "./assets/cache.js";
+import { assertNoPendingAssetTransaction } from "./assets/transaction.js";
 import { createPairClassifier } from "./assets/pair.js";
 
 const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -157,6 +158,7 @@ function createAssetRuntime(loaded, dataDir, dependencies) {
     `${loaded.profile.key}.json`
   );
   const runtimePath = path.join(dataDir, "asset-catalog.json");
+  assertNoPendingAssetTransaction(shippedPath, fs.existsSync);
   const cache = createAssetCatalogCache({
     readJson: dependencies.readAssetJson ?? readJsonIfPresent,
     atomicWriteJson: dependencies.writeAssetJson ?? writeRpcUsage,
