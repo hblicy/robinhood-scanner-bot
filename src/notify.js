@@ -42,6 +42,28 @@ export function formatAlert(report) {
   lines.push(
     `<b>创建者</b> ${creator ? `<code>${short(creator)}</code>` : "?"} 持仓 ${facts.creatorPct?.toFixed(1) ?? "?"}%  · 历史发币 ${facts.deployerTokens ?? "未知"}`
   );
+  if (report.referenceAssetKind === "stock") {
+    const standard = report.referenceAssetStandard || "stock";
+    const symbol = report.dex?.quoteSymbol || "?";
+    const address = report.referenceAsset || report.quoteToken || report.quote || "?";
+    const source = report.assetSource || "unknown-source";
+    lines.push(
+      `<b>股票底池</b> ${esc(standard)} ${esc(symbol)}  <code>${esc(address)}</code>  · 来源 ${esc(source)}`
+    );
+    if (standard === "B20") {
+      const multiplier = report.referenceAssetMultiplier ?? "unknown";
+      const paused = typeof report.referenceAssetPaused === "boolean"
+        ? String(report.referenceAssetPaused)
+        : "unknown";
+      const policyIds = Array.isArray(report.referenceAssetPolicyIds)
+        && report.referenceAssetPolicyIds.length > 0
+        ? report.referenceAssetPolicyIds.join("/")
+        : "unknown";
+      lines.push(
+        `<b>B20 控制</b> multiplier ${esc(multiplier)}  · paused ${esc(paused)}  · policyIds ${esc(policyIds)}`
+      );
+    }
+  }
   const referenceRestrictions = [...new Set(
     Array.isArray(report.referenceRestrictions) ? report.referenceRestrictions : []
   )];

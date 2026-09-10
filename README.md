@@ -83,6 +83,9 @@ Launchpad 启用状态：
 | Robinhood | Long | `disabled-unverified` | `missing-verified-factory` |
 | BNB Chain | Four.meme | `enabled` | 创建阶段 `record-only`；只对同交易绑定出的唯一毕业池做安全检查 |
 | BNB Chain | Flap | `enabled` | 创建阶段 `record-only`；迁移时核对 Portal V8Safe 状态、池和税配置后深检 |
+| Base | Stonks Exchange | `enabled` | 固定 Launcher、FeeLocker、Quote Registry 与 Uniswap V3 池；只接受官方 B20 底池 |
+| Base | O1 | `disabled-unverified` | `stock-pair-route-not-supported` |
+| Base | BaseStonk | `disabled-unverified` | `missing-public-contract-registry` |
 
 股票底池自身的转账政策、暂停或倍率限制单独显示为“股票底池限制”，不会据此把目标 Meme 标成貔貅。未列入可信地址清单的股票 symbol 不会启用 Launchpad 候选。
 
@@ -179,7 +182,7 @@ DEXPAPRIKA_SCAN=true
 - 底层 HTTP 请求最长等待 15 秒，429 由外层退避和熔断处理，避免节点内部重试数分钟。
 - 旧 `RPC_URL` 仍可用：未填写 `ANALYSIS_RPC_URL` 时，它自动作为分析与备用节点。
 - 区间扫描或候选处理失败会保留带上下文的脱敏日志，长期运行的 `watch` 不会因此退出；日志不会打印 RPC URL 中的 API key、Token 或查询参数凭据。
-- 当前严格卖出验证支持已注册的 V2 场所，以及具备专用池绑定和真实卖出证据的 O1、Four.meme、Flap。普通 V3/V4、其他集中流动性池和未知场所只发现、去重，不进入付费深检；V2 Gecko 候选只有在已有市场数据证明评分最高值仍低于 `max(0, MIN_SCORE - 10)` 时才会提前跳过，缺数据一律放行。
+- 当前严格卖出验证支持已注册的 V2 场所，以及具备专用池绑定和真实卖出证据的 O1、Four.meme、Flap、Stonks Exchange。Launchpad 卖出取证只回看最近 250 个区块，每个候选最多读取 500 条目标转入日志和 30 笔回执。普通 V3/V4、其他集中流动性池和未知场所只发现、去重，不进入付费深检；V2 Gecko 候选只有在已有市场数据证明评分最高值仍低于 `max(0, MIN_SCORE - 10)` 时才会提前跳过，缺数据一律放行。
 - analysis RPC 在有限重试后仍返回 429 时，当前链进程进入 15 分钟深检冷却；官方发现和游标推进继续运行。冷却到期只放行一次探测，成功后恢复；同一熔断周期最多发送一条 Telegram 告警。429 可能是瞬时吞吐限制，也可能是月额度耗尽，程序不会误报具体原因。
 - 官方公共 RPC 会限流；双 RPC 能减少付费调用，但不能保证完全没有节点错误。未提交区间会重试，只有完整处理成功后才推进游标。
 
