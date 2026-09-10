@@ -44,6 +44,29 @@ function isEthAddress(value) {
   return /^0x[0-9a-fA-F]{40}$/.test(String(value || ""));
 }
 
+function hasNonNegativeNumber(value) {
+  if (value === null || value === undefined || value === "") return false;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0;
+}
+
+function hasNonNegativeInteger(value) {
+  if (!hasNonNegativeNumber(value)) return false;
+  return Number.isInteger(Number(value));
+}
+
+function hasCompleteGeckoScoreFacts(attributes) {
+  const tx = attributes?.transactions?.m5;
+  return (
+    (hasNonNegativeNumber(attributes?.market_cap_usd) || hasNonNegativeNumber(attributes?.fdv_usd))
+    && hasNonNegativeNumber(attributes?.reserve_in_usd)
+    && hasNonNegativeNumber(attributes?.volume_usd?.m5)
+    && hasNonNegativeNumber(attributes?.volume_usd?.h1)
+    && hasNonNegativeInteger(tx?.buys)
+    && hasNonNegativeInteger(tx?.sells)
+  );
+}
+
 export async function geckoNewPools(
   pages = 1,
   {
@@ -100,6 +123,7 @@ export async function geckoNewPools(
         quote,
         createdAt,
         market: {
+          scoreKnown: hasCompleteGeckoScoreFacts(a),
           name: a.name || "",
           priceUsd: num(a.base_token_price_usd),
           fdvUsd: num(a.fdv_usd),

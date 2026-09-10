@@ -1,6 +1,13 @@
 import { getAddress, Interface } from "ethers";
 import { ERC20_ABI, PAIR_V2_ABI, V2_FACTORY_ABI } from "./abis.js";
-import { getProvider, getLogsChunked, findFirstBlockAtOrAfter, isContractCallRevert, withRetry } from "./chain.js";
+import {
+  getProvider,
+  getLogsChunked,
+  findFirstBlockAtOrAfter,
+  isContractCallRevert,
+  isRateLimitError,
+  withRetry,
+} from "./chain.js";
 import { ADDR } from "./config.js";
 import { safeErrorMessage } from "./safety.js";
 import { normalizeWalletSignals } from "./wallet-labels.js";
@@ -172,6 +179,7 @@ export async function validateV2PoolBinding(context, dependencies = {}) {
     if (!binding) return { ok: false, reason: "pool-binding-mismatch", binding: null, details: [] };
     return { ok: true, reason: null, binding, details: [] };
   } catch (error) {
+    if (isRateLimitError(error)) throw error;
     return {
       ok: false,
       reason: "evidence-unavailable",
@@ -638,6 +646,7 @@ export async function inspectSellability(context, dependencies = {}) {
     }
     return finalizeSellability({ buyerSamples, ladderSamples, sellers, walletSignals });
   } catch (error) {
+    if (isRateLimitError(error)) throw error;
     return unavailableResult(error, { buyerSamples, ladderSamples });
   }
 }

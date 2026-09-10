@@ -33,6 +33,18 @@ import {
   createCandidateRecovery,
   isRetryableCandidateFailure,
 } from "./candidate-recovery.js";
+import {
+  createCandidateRouteStats,
+  formatCandidateRouteStats,
+  incrementCandidateRouteStat,
+  routeCandidate,
+  supportsRobinhoodSellability,
+} from "./candidate-gate.js";
+import {
+  AnalysisRpcCooldownError,
+  bindAnalysisCircuit,
+  createAnalysisRpcCircuit,
+} from "./analysis-rpc-circuit.js";
 
 const DEFAULT_ANALYSIS_CONCURRENCY = 1;
 class NonRetryablePendingCheckError extends Error {
@@ -582,7 +594,10 @@ export async function runWatchIteration(state, dependencies) {
         "gecko"
       );
       if (result.accepted) {
-        dependencies.log(`gecko: ${events.length} pools, ${result.accepted} new`);
+        const routes = dependencies.routeStats
+          ? ` routes ${formatCandidateRouteStats(dependencies.routeStats)}`
+          : "";
+        dependencies.log(`gecko: ${events.length} pools, ${result.accepted} new${routes}`);
       }
       if (result.failed) dependencies.log(`gecko: ${result.failed} candidates failed`);
     } catch (cause) {
@@ -664,6 +679,20 @@ export async function runReadOnlyCandidates(events, dependencies) {
   const reports = [];
   const failures = [];
   const observedAt = dependencies.now();
+  const routeStats = dependencies.routeStats ?? createCandidateRouteStats();
+  const analyzeCandidate = dependencies.analysisCircuit
+    ? bindAnalysisCircuit({
+      circuit: dependencies.analysisCircuit,
+      analyze: async (event) => {
+        incrementCandidateRouteStat(routeStats, "paid_deep_checks");
+        return dependencies.analyze(event);
+      },
+      onOpen: dependencies.onAnalysisRpcOpen,
+    })
+    : async (event) => {
+      incrementCandidateRouteStat(routeStats, "paid_deep_checks");
+      return dependencies.analyze(event);
+    };
   const runDrain = async () => {
     return drainQueue(
       queue,
@@ -673,18 +702,37 @@ export async function runReadOnlyCandidates(events, dependencies) {
         const classified = dependencies.classifyCandidate
           ? await dependencies.classifyCandidate(event)
           : event;
+        incrementCandidateRouteStat(routeStats, "pons_official_checks");
         if (classified.identity === "pons-v2") return;
         if (classified.identity === "unknown") {
+          incrementCandidateRouteStat(routeStats, "deferred_pons_checks");
           throw new Error(`Pons identity unknown for ${event.token}: ${classified.error || "Factory read failed"}`);
         }
+        const routed = { ...classified, observedAt: classified.observedAt ?? dependencies.now() };
+        const route = routeCandidate(routed, {
+          thresholds: dependencies.scoreThresholds ?? {
+            maxAgeMinutes: dependencies.maxAgeMinutes,
+            minScore: dependencies.minScore,
+          },
+          supportsSellability: dependencies.supportsSellability ?? supportsRobinhoodSellability,
+        });
+        if (route.action === "skip") {
+          incrementCandidateRouteStat(
+            routeStats,
+            route.reason === "unsupported-sellability-venue"
+              ? "skipped_unsupported_venue"
+              : "skipped_score_upper_bound"
+          );
+          return;
+        }
         const report = await handleCandidate(
-          classified,
+          routed,
           { persistSeen: false },
           {
             now: dependencies.now,
             maxAgeMinutes: dependencies.maxAgeMinutes,
             minScore: dependencies.minScore,
-            analyze: dependencies.analyze,
+            analyze: analyzeCandidate,
             markSeen: () => {},
             alertReport: dependencies.consoleAlert,
             log: dependencies.log,
@@ -692,6 +740,10 @@ export async function runReadOnlyCandidates(events, dependencies) {
         );
         if (report) reports.push(report);
       } catch (error) {
+        if (error instanceof AnalysisRpcCooldownError) {
+          incrementCandidateRouteStat(routeStats, "analysis_rpc_cooldown_skips");
+          return;
+        }
         failures.push({ event, error });
         dependencies.log(`handle failed ${event.token} ${safeErrorMessage(error)}`);
         throw error;
@@ -743,6 +795,7 @@ export async function runWatchStartupChecks({
 
 export function createWatchRpcBindings({
   analysisProvider = getAnalysisProvider(),
+  discoveryProvider = getDiscoveryProvider(),
   discoverySessions = getDiscoverySessions(),
   getBlockNumberImpl = getBlockNumber,
   findFirstBlockAtOrAfterImpl = findFirstBlockAtOrAfter,
@@ -767,7 +820,7 @@ export function createWatchRpcBindings({
     onchain: { ...discovery, scanOnchain: scanDiscovery },
     pons: { ...discovery },
     analyzeCandidate: (event) => analyzeImpl(event, { provider: analysisProvider }),
-    classifyCandidate: (event) => classifyCandidateImpl(event, { provider: analysisProvider }),
+    classifyCandidate: (event) => classifyCandidateImpl(event, { provider: discoveryProvider }),
   };
 }
 
@@ -780,6 +833,8 @@ export function buildWatchCandidateDependencies({
   markSeen: persistSeen = markSeen,
   log = console.log,
   settings = SETTINGS,
+  analysisCircuit = createAnalysisRpcCircuit(),
+  onAnalysisRpcOpen,
 }) {
   if (typeof rpc?.analyzeCandidate !== "function") {
     throw new Error("watch candidate analysis RPC binding is required");
@@ -788,12 +843,17 @@ export function buildWatchCandidateDependencies({
     now,
     maxAgeMinutes: settings.maxAgeMinutes,
     minScore: settings.minScore,
+    scoreThresholds: settings,
     mode,
     analyze: rpc.analyzeCandidate,
     markSeen: persistSeen,
     alertReport: sendAlert,
     log,
     onAnalyzed,
+    supportsSellability: supportsRobinhoodSellability,
+    routeStats: createCandidateRouteStats(),
+    analysisCircuit,
+    onAnalysisRpcOpen,
   };
 }
 
@@ -801,6 +861,9 @@ export async function processWatchCandidate(event, {
   classifyCandidate,
   candidateDependencies,
 }) {
+  if (candidateDependencies.routeStats) {
+    incrementCandidateRouteStat(candidateDependencies.routeStats, "pons_official_checks");
+  }
   const classified = await classifyCandidate(event);
   if (classified.identity === "pons-v2") {
     candidateDependencies.markSeen(candidateKey(event), {
@@ -810,11 +873,62 @@ export async function processWatchCandidate(event, {
     return null;
   }
   if (classified.identity === "unknown") {
+    if (candidateDependencies.routeStats) {
+      incrementCandidateRouteStat(candidateDependencies.routeStats, "deferred_pons_checks");
+    }
     throw new RetryableCandidateError(
       `Pons identity unknown for ${event.token}: ${classified.error || "Factory read failed"}`
     );
   }
-  return handleCandidate(classified, { persistSeen: true }, candidateDependencies);
+  const routed = { ...classified, observedAt: candidateDependencies.now() };
+  const route = routeCandidate(routed, {
+    thresholds: candidateDependencies.scoreThresholds ?? {
+      maxAgeMinutes: candidateDependencies.maxAgeMinutes,
+      minScore: candidateDependencies.minScore,
+    },
+    supportsSellability: candidateDependencies.supportsSellability ?? supportsRobinhoodSellability,
+  });
+  if (route.action === "skip") {
+    const stat = route.reason === "unsupported-sellability-venue"
+      ? "skipped_unsupported_venue"
+      : "skipped_score_upper_bound";
+    if (candidateDependencies.routeStats) {
+      incrementCandidateRouteStat(candidateDependencies.routeStats, stat);
+    }
+    candidateDependencies.markSeen(candidateKey(event), {
+      token: event.token,
+      skipped: route.reason,
+    });
+    return null;
+  }
+  const analyzeCandidate = candidateDependencies.analysisCircuit
+    ? bindAnalysisCircuit({
+      circuit: candidateDependencies.analysisCircuit,
+      analyze: async (value) => {
+        if (candidateDependencies.routeStats) {
+          incrementCandidateRouteStat(candidateDependencies.routeStats, "paid_deep_checks");
+        }
+        return candidateDependencies.analyze(value);
+      },
+      onOpen: candidateDependencies.onAnalysisRpcOpen,
+    })
+    : candidateDependencies.analyze;
+  try {
+    return await handleCandidate(routed, { persistSeen: true }, {
+      ...candidateDependencies,
+      analyze: analyzeCandidate,
+    });
+  } catch (error) {
+    if (!(error instanceof AnalysisRpcCooldownError)) throw error;
+    if (candidateDependencies.routeStats) {
+      incrementCandidateRouteStat(candidateDependencies.routeStats, "analysis_rpc_cooldown_skips");
+    }
+    candidateDependencies.markSeen(candidateKey(event), {
+      token: event.token,
+      skipped: "analysis-rpc-cooldown",
+    });
+    return null;
+  }
 }
 
 export function createCandidateRecoveryScheduler({ store, recoveryKeys, now = Date.now }) {
@@ -981,6 +1095,21 @@ async function watch({ mode = "live" } = {}) {
       mode,
       onAnalyzed: scheduleCandidateRecheck,
       alertReport: sendCandidateAlert,
+      onAnalysisRpcOpen: notificationsEnabled
+        ? async () => {
+          await sendTelegram(
+            "⚠️ Robinhood Chain 分析 RPC 被限流或额度耗尽，深检暂时暂停；官方发现仍在运行。"
+          ).catch((error) => console.error("analysis RPC telegram:", safeErrorMessage(error)));
+        }
+        : undefined,
+    });
+    const analyzeCandidateRecheck = bindAnalysisCircuit({
+      circuit: candidateDependencies.analysisCircuit,
+      analyze: async (event) => {
+        incrementCandidateRouteStat(candidateDependencies.routeStats, "paid_deep_checks");
+        return rpc.analyzeCandidate(event);
+      },
+      onOpen: candidateDependencies.onAnalysisRpcOpen,
     });
     const pendingHandlers = {
       ...createInspectionCheckHandlers({
@@ -993,7 +1122,7 @@ async function watch({ mode = "live" } = {}) {
         now: Date.now,
         maxAgeMinutes: SETTINGS.maxAgeMinutes,
         minScore: SETTINGS.minScore,
-        analyze: rpc.analyzeCandidate,
+        analyze: analyzeCandidateRecheck,
         alertReport: sendCandidateAlert,
         log: console.log,
         mode,
@@ -1021,6 +1150,7 @@ async function watch({ mode = "live" } = {}) {
         getOnchainCursor,
         setOnchainCursor,
         geckoNewPools,
+        routeStats: candidateDependencies.routeStats,
         log: console.log,
     };
     const loops = [];
@@ -1191,11 +1321,13 @@ async function scanOnceCore(supplied = null) {
   for (const report of pons) await (dependencies.consolePons || dependencies.consoleAlert)(report);
   let reports = [];
   let candidateFailure = null;
+  const routeStats = createCandidateRouteStats();
   try {
     reports = await runReadOnlyCandidates([...onchain, ...gecko], {
       maxQueueSize: settings.maxQueueSize,
       maxAgeMinutes: settings.maxAgeMinutes,
       minScore: settings.minScore,
+      scoreThresholds: settings,
       now: dependencies.now || Date.now,
       analyze: (event) => dependencies.analyze(event, { provider: analysisProvider }),
       classifyCandidate: dependencies.classifyCandidate
@@ -1203,10 +1335,15 @@ async function scanOnceCore(supplied = null) {
         : undefined,
       consoleAlert: dependencies.consoleAlert,
       log: dependencies.log,
+      supportsSellability: dependencies.supportsSellability ?? supportsRobinhoodSellability,
+      routeStats,
+      analysisCircuit: dependencies.analysisCircuit ?? createAnalysisRpcCircuit(),
+      onAnalysisRpcOpen: dependencies.onAnalysisRpcOpen,
     });
   } catch (error) {
     candidateFailure = error;
   }
+  dependencies.log(`one-shot routes ${formatCandidateRouteStats(routeStats)}`);
   if (sourceFailures.length || candidateFailure) {
     const errors = [...sourceFailures];
     if (candidateFailure instanceof AggregateError) errors.push(...candidateFailure.errors);

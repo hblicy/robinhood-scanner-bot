@@ -13,6 +13,8 @@ import {
 } from "../src/scanner.js";
 import { CandidateQueue, createSerialExecutor } from "../src/queue.js";
 import { candidateKey } from "../src/runtime.js";
+import { createAnalysisRpcCircuit } from "../src/analysis-rpc-circuit.js";
+import { RetryableAnalysisError } from "../src/analyze.js";
 
 const CONFIRMED_SELLABILITY = {
   status: "confirmed",
@@ -57,6 +59,7 @@ function watchCandidateDependencies(overrides = {}) {
     markSeen: () => {},
     alertReport: async () => {},
     log: () => {},
+    supportsSellability: (event) => event.venue === "uniswap-v2",
     ...overrides,
   };
 }
@@ -324,12 +327,60 @@ describe("scanner orchestration", () => {
     assert.equal(seen[0][1].skipped, "pons-v2");
   });
 
+  it("records an unsupported venue without generic analysis", async () => {
+    const scanner = await import("../src/scanner.js");
+    let analyzed = 0;
+    const seen = [];
+    const event = { ...watchCandidateEvent(), venue: "uniswap-v4" };
+
+    const report = await scanner.processWatchCandidate(event, {
+      classifyCandidate: async (value) => ({ ...value, identity: "not_pons" }),
+      candidateDependencies: watchCandidateDependencies({
+        analyze: async () => { analyzed += 1; },
+        markSeen: (key, payload) => seen.push([key, payload]),
+      }),
+    });
+
+    assert.equal(report, null);
+    assert.equal(analyzed, 0);
+    assert.equal(seen[0][1].skipped, "unsupported-sellability-venue");
+  });
+
+  it("opens analysis cooldown on 429 and quietly completes later candidates", async () => {
+    const scanner = await import("../src/scanner.js");
+    const { createAnalysisRpcCircuit } = await import("../src/analysis-rpc-circuit.js");
+    let calls = 0;
+    let notices = 0;
+    const seen = [];
+    const candidateDependencies = watchCandidateDependencies({
+      analysisCircuit: createAnalysisRpcCircuit({ cooldownMs: 60_000 }),
+      analyze: async () => {
+        calls += 1;
+        throw Object.assign(new Error("Too Many Requests"), { status: 429 });
+      },
+      onAnalysisRpcOpen: async () => { notices += 1; },
+      markSeen: (key, payload) => seen.push([key, payload]),
+    });
+    const options = {
+      classifyCandidate: async (value) => ({ ...value, identity: "not_pons" }),
+      candidateDependencies,
+    };
+
+    await assert.rejects(() => scanner.processWatchCandidate(watchCandidateEvent(), options), /Too Many Requests/);
+    const second = { ...watchCandidateEvent(), token: "0x3000000000000000000000000000000000000003" };
+    assert.equal(await scanner.processWatchCandidate(second, options), null);
+    assert.equal(calls, 1);
+    assert.equal(notices, 1);
+    assert.equal(seen[0][1].skipped, "analysis-rpc-cooldown");
+  });
+
   it("shares one discovery session runner across watch loops and keeps candidate calls on analysis RPC", async () => {
     const discoveryProvider = { role: "discovery" };
     const analysisProvider = { role: "analysis" };
     const calls = [];
     const bindings = createWatchRpcBindings({
       analysisProvider,
+      discoveryProvider,
       discoverySessions: {
         run: async (work) => work(discoveryProvider),
       },
@@ -370,7 +421,7 @@ describe("scanner orchestration", () => {
       ["boundary", discoveryProvider],
       ["logs", discoveryProvider],
       ["analyze", analysisProvider],
-      ["classify", analysisProvider],
+      ["classify", discoveryProvider],
     ]);
   });
 
@@ -728,7 +779,10 @@ describe("scanner orchestration", () => {
   it("routes auxiliary candidates through Pons identity before generic analysis", async () => {
     const analyzed = [];
     const reports = await runReadOnlyCandidates(
-      [{ token: "pons" }, { token: "long" }],
+      [
+        { token: "pons", venue: "uniswap-v2", pool: "0xa" },
+        { token: "long", venue: "uniswap-v2", pool: "0xb" },
+      ],
       {
         maxQueueSize: 2,
         maxAgeMinutes: 30,
@@ -755,6 +809,60 @@ describe("scanner orchestration", () => {
     );
     assert.deepEqual(analyzed, ["long"]);
     assert.equal(reports.length, 1);
+  });
+
+  it("does not deep-analyze unsupported venues in a one-shot scan", async () => {
+    let analyzed = 0;
+    const reports = await runReadOnlyCandidates(
+      [{
+        token: "0x1",
+        source: "gecko",
+        venue: "uniswap-v4-robinhood",
+        market: { scoreKnown: true, liquidityUsd: 10_000, mcapUsd: 50_000 },
+      }],
+      {
+        maxQueueSize: 1,
+        maxAgeMinutes: 30,
+        minScore: 70,
+        now: () => 1,
+        classifyCandidate: async (event) => ({ ...event, identity: "not_pons" }),
+        analyze: async () => { analyzed += 1; },
+        consoleAlert: async () => {},
+        log: () => {},
+      }
+    );
+
+    assert.equal(analyzed, 0);
+    assert.deepEqual(reports, []);
+  });
+
+  it("stops one-shot paid analysis calls while the analysis RPC circuit is open", async () => {
+    let analyzed = 0;
+    const limited = Object.assign(new Error("Too Many Requests"), { status: 429 });
+    await assert.rejects(
+      () => runReadOnlyCandidates(
+        [
+          { token: "0x1", source: "onchain", venue: "uniswap-v2", pool: "0xa" },
+          { token: "0x2", source: "onchain", venue: "uniswap-v2", pool: "0xb" },
+        ],
+        {
+          maxQueueSize: 2,
+          maxAgeMinutes: 30,
+          minScore: 70,
+          now: () => 1,
+          analysisConcurrency: 1,
+          analysisCircuit: createAnalysisRpcCircuit({ now: () => 1 }),
+          analyze: async (candidate) => {
+            analyzed += 1;
+            throw new RetryableAnalysisError("honeypot", candidate.token, limited);
+          },
+          consoleAlert: async () => {},
+          log: () => {},
+        }
+      ),
+      /candidate analysis failed/
+    );
+    assert.equal(analyzed, 1);
   });
 
   it("does not treat an unknown Pons identity as a generic candidate", async () => {
@@ -842,6 +950,36 @@ describe("scanner orchestration", () => {
     });
 
     assert.equal(analyzedWith, analysisProvider);
+  });
+
+  it("applies the candidate gate in scanOnce before using the analysis RPC", async () => {
+    let analyzed = 0;
+    const reports = await scanOnce({
+      timeoutMs: 2_000,
+      now: () => 1_000,
+      settings: {
+        onchainScan: false,
+        geckoScan: true,
+        maxAgeMinutes: 30,
+        maxQueueSize: 10,
+        minScore: 70,
+      },
+      geckoNewPools: async () => [{
+        token: "0x1000000000000000000000000000000000000001",
+        source: "gecko",
+        venue: "uniswap-v4-robinhood",
+        createdAt: 500,
+        market: { scoreKnown: true, liquidityUsd: 10_000, mcapUsd: 50_000 },
+      }],
+      classifyCandidate: async (candidate) => ({ ...candidate, identity: "not_pons" }),
+      analyze: async () => { analyzed += 1; },
+      consoleAlert: async () => {},
+      consolePons: async () => {},
+      log: () => {},
+    });
+
+    assert.equal(analyzed, 0);
+    assert.deepEqual(reports, []);
   });
 
   it("keeps scanOnce free of persistent and Telegram calls", async () => {

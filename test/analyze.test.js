@@ -185,6 +185,28 @@ describe("analyze data completeness", () => {
     });
   }
 
+  for (const [source, override] of [
+    ["owner", { readOwner: async () => { throw Object.assign(new Error("limited"), { status: 429 }); } }],
+    ["V2 pool", { readV2Pool: async () => { throw Object.assign(new Error("limited"), { status: 429 }); } }],
+    ["creator balance", {
+      blockscoutCreator: async () => ({ creator: "0x2222222222222222222222222222222222222222" }),
+      readCreatorBalance: async () => { throw Object.assign(new Error("limited"), { status: 429 }); },
+    }],
+    ["honeypot", { honeypotCheck: async () => { throw Object.assign(new Error("limited"), { status: 429 }); } }],
+  ]) {
+    it(`propagates an analysis RPC limit from ${source}`, async () => {
+      await assert.rejects(
+        () => analyze(event, dependencies(override)),
+        (error) => {
+          assert.ok(error instanceof RetryableAnalysisError);
+          assert.equal(error.source, source);
+          assert.equal(error.cause?.status, 429);
+          return true;
+        }
+      );
+    });
+  }
+
   it("keeps auxiliary failures in the report", async () => {
     const unavailable = async () => { throw new Error("service unavailable"); };
     const report = await analyze(event, dependencies({

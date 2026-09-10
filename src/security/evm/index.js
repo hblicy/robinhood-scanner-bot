@@ -17,6 +17,9 @@ export function createEvmSecurityRegistry(entries) {
     byVenue.set(key, entry);
   }
   return Object.freeze({
+    supports(candidate) {
+      return byVenue.has(entryKey(candidate?.chain, candidate?.venue));
+    },
     inspect(candidate, dependencies = {}) {
       const adapter = byVenue.get(entryKey(candidate?.chain, candidate?.venue));
       if (!adapter) return sellabilityResult("unknown", "unsupported-venue");

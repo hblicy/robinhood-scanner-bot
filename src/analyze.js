@@ -6,6 +6,7 @@ import {
   bytecodeFlags,
   getProvider,
   isContractCallRevert,
+  isRateLimitError,
   readOwner,
   readTokenMeta,
   readV2Pool,
@@ -163,6 +164,12 @@ export function scoreFromFacts(f, thresholds = SETTINGS) {
   return { ...scored, checks, red, verdict };
 }
 
+function requireNoAnalysisRateLimit(source, result, token) {
+  if (!result.ok && isRateLimitError(result.cause)) {
+    throw new RetryableAnalysisError(source, token, result.cause);
+  }
+}
+
 export async function analyze(event, overrides = {}) {
   const dependencies = { ...DEFAULT_ANALYZE_DEPENDENCIES, ...overrides };
   const scoreThresholds = { ...dependencies.scoreThresholds, minScore: dependencies.minScore };
@@ -184,6 +191,7 @@ export async function analyze(event, overrides = {}) {
   ]);
 
   const meta = requireCore("token metadata", metaResult, token);
+  requireNoAnalysisRateLimit("owner", ownerResult, token);
   const owner = ownerResult.value;
   const flags = requireCore("bytecode", flagsResult, token);
   const dex = requireCore("DexScreener pool", dexResult, token);
@@ -203,6 +211,7 @@ export async function analyze(event, overrides = {}) {
     || event.venue === "pancakeswap-v2-bsc";
   if (isV2Venue && event.pool) {
     poolResult = await settled(dependencies.readV2Pool(event.pool));
+    requireNoAnalysisRateLimit("V2 pool", poolResult, token);
     poolInfo = poolResult.value;
     lpBurnedPct = poolInfo?.burnedPct ?? null;
   }
@@ -227,6 +236,7 @@ export async function analyze(event, overrides = {}) {
   const creatorBalanceResult = creator
     ? await settled(dependencies.readCreatorBalance(token, creator))
     : { ok: true, value: null, error: null };
+  requireNoAnalysisRateLimit("creator balance", creatorBalanceResult, token);
   const creatorKnown = creatorResult.ok && Boolean(creator) && creatorBalanceResult.ok && supply > 0n;
   const creatorPct = creatorKnown ? pct(creatorBalanceResult.value, supply) : null;
   const historyResult = creator
@@ -313,6 +323,7 @@ export async function analyze(event, overrides = {}) {
       metadata: event.metadata ?? {},
     }))
     : { ok: true, value: prefilterHp, error: null, cause: null };
+  requireNoAnalysisRateLimit("honeypot", hpResult, token);
   const hpRaw = hpResult.value || {
     honeypot: null,
     complete: false,
