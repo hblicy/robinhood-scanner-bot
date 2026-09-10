@@ -9,6 +9,7 @@
 | 检查项 | 实现方式 |
 | --- | --- |
 | Pons V2 生命周期 | 以 Factory getter 和事件一致性确认身份，监听 Launch、Sweep、Graduated、Rescued，并核对 Hook 注册 |
+| 股票 Meme Launchpad | Robinhood 接入已验证 O1；BNB Chain 接入 Four.meme 与 Flap，原始发币只建状态，池绑定后才安全深检 |
 | 新池发现 | 链上监听 Uniswap V2 `PairCreated`、V3 `PoolCreated`、V4 `Initialize`，并读取 GeckoTerminal `new_pools` |
 | 年龄与市场数据 | 按 `MAX_AGE_MINUTES` 过滤，读取成交、买卖笔数、流动性和市值 |
 | 社交与叙事 | 读取 DexScreener 社交链接并匹配名称关键词 |
@@ -71,6 +72,19 @@ screen -r robinhood
 - `unknown` 即使 100 分也保持静默；发现事件本身不等于可卖、安全或推荐买入。
 - EVM V2 类池可进入完整可卖性检查；没有协议级卖出证据绑定的 V3/V4/集中流动性池保持 `unknown`，只发现不推普通候选。
 - Solana 需要链上池程序、base/quote 金库、mint 权限和至少 3 个独立真实卖家证据一致；Pump 原始发币事件只建候选状态，不直接推送。
+
+Launchpad 启用状态：
+
+| 链 | Venue | 状态 | 说明 |
+| --- | --- | --- | --- |
+| Robinhood | Pons V2 | `enabled` | 独立生命周期扫描；原始 `new_launch/swept/graduated` 不直推，只推 `hard_kill/rescued/green/market_ready` |
+| Robinhood | O1 | `enabled` | 官方 Factory/Hook/PoolManager 身份已固定；只接受可信股票底池并检查真实卖出 |
+| Robinhood | Pons V1 | `disabled-unverified` | `missing-verified-abi-or-event-source` |
+| Robinhood | Long | `disabled-unverified` | `missing-verified-factory` |
+| BNB Chain | Four.meme | `enabled` | 创建阶段 `record-only`；只对同交易绑定出的唯一毕业池做安全检查 |
+| BNB Chain | Flap | `enabled` | 创建阶段 `record-only`；迁移时核对 Portal V8Safe 状态、池和税配置后深检 |
+
+股票底池自身的转账政策、暂停或倍率限制单独显示为“股票底池限制”，不会据此把目标 Meme 标成貔貅。未列入可信地址清单的股票 symbol 不会启用 Launchpad 候选。
 
 链级变量使用 `ETHEREUM_`、`BASE_`、`BSC_`、`ROBINHOOD_`、`SOLANA_` 前缀。完整示例见 `.env.example`；部署与故障语义见 `docs/operations/multichain-evm.md` 和 `docs/operations/multichain-solana.md`。
 
@@ -165,7 +179,7 @@ DEXPAPRIKA_SCAN=true
 - 底层 HTTP 请求最长等待 15 秒，429 由外层退避和熔断处理，避免节点内部重试数分钟。
 - 旧 `RPC_URL` 仍可用：未填写 `ANALYSIS_RPC_URL` 时，它自动作为分析与备用节点。
 - 区间扫描或候选处理失败会保留带上下文的脱敏日志，长期运行的 `watch` 不会因此退出；日志不会打印 RPC URL 中的 API key、Token 或查询参数凭据。
-- 当前严格卖出验证只支持已注册的 V2 场所。V3、V4 和未知场所只发现、去重，不再进入付费深检；V2 Gecko 候选只有在已有市场数据证明评分最高值仍低于 `max(0, MIN_SCORE - 10)` 时才会提前跳过，缺数据一律放行。
+- 当前严格卖出验证支持已注册的 V2 场所，以及具备专用池绑定和真实卖出证据的 O1、Four.meme、Flap。普通 V3/V4、其他集中流动性池和未知场所只发现、去重，不进入付费深检；V2 Gecko 候选只有在已有市场数据证明评分最高值仍低于 `max(0, MIN_SCORE - 10)` 时才会提前跳过，缺数据一律放行。
 - analysis RPC 在有限重试后仍返回 429 时，当前链进程进入 15 分钟深检冷却；官方发现和游标推进继续运行。冷却到期只放行一次探测，成功后恢复；同一熔断周期最多发送一条 Telegram 告警。429 可能是瞬时吞吐限制，也可能是月额度耗尽，程序不会误报具体原因。
 - 官方公共 RPC 会限流；双 RPC 能减少付费调用，但不能保证完全没有节点错误。未提交区间会重试，只有完整处理成功后才推进游标。
 
