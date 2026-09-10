@@ -57,6 +57,10 @@ export const FOUR_MEME_HELPER_ABI = [
   "function getTokenInfo(address token) view returns (uint256 version,address tokenManager,address quote,uint256 lastPrice,uint256 tradingFeeRate,uint256 minTradingFee,uint256 launchTime,uint256 offers,uint256 maxOffers,uint256 funds,uint256 maxFunds,bool liquidityAdded)",
 ];
 
+export const O1_LAUNCH_FACTORY_ABI = [
+  "event Launched(address indexed token,bytes32 indexed poolId,address indexed originalCreator,address quoteToken,uint256 launchSupply,int24 tickSpacing)",
+];
+
 export const V2_ROUTER_ABI = [
   "function getAmountsOut(uint256 amountIn, address[] path) view returns (uint256[] amounts)",
 ];

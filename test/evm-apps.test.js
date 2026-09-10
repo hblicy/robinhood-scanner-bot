@@ -51,7 +51,7 @@ describe("four independent EVM applications", () => {
         "pancakeswap-infinity-cl-bsc",
         "four-meme-v2-bsc",
       ],
-      robinhood: ["uniswap-v2-robinhood", "pons-v2-robinhood"],
+      robinhood: ["uniswap-v2-robinhood", "o1-v4-robinhood", "pons-v2-robinhood"],
     };
     for (const [chain, ids] of Object.entries(expected)) {
       const app = makeApp(chain);
@@ -76,5 +76,17 @@ describe("four independent EVM applications", () => {
     assert.notEqual(base.config.dataDir, bsc.config.dataDir);
     assert.notEqual(base.config.lockPort, bsc.config.lockPort);
     assert.deepEqual(Object.keys(base).sort(), ["check", "config", "scan", "watch"]);
+  });
+
+  it("keeps unverified Robinhood launchpads disabled in the runtime registry", () => {
+    const registry = makeApp("robinhood").config.venueRegistry;
+    const ponsV1 = registry.get("pons-v1-robinhood");
+    const long = registry.get("long-robinhood");
+
+    assert.equal(ponsV1.identityStatus, "disabled-unverified");
+    assert.equal(ponsV1.securityCapability, "unsupported");
+    assert.match(ponsV1.disabledReason, /verified-abi|event-source/);
+    assert.equal(long.identityStatus, "disabled-unverified");
+    assert.equal(long.disabledReason, "missing-verified-factory");
   });
 });

@@ -233,15 +233,30 @@ export const EVM_PROFILES = deepFreeze({
       { symbol: "WETH", address: getAddress("0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73") },
       { symbol: "USDG", address: getAddress("0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168") },
     ],
-    venues: [{
-      id: "uniswap-v2-robinhood",
-      sourceKind: "dex",
-      version: 1,
-      deploymentBlock: 8_928,
-      verifiedAtBlock: 58_268_251,
-      sourceUrl: "https://developers.uniswap.org/deployments",
-      contracts: { factory: getAddress("0x8bcEaA40B9AcdfAedF85AdF4FF01F5Ad6517937f") },
-    }],
+    venues: [
+      {
+        id: "uniswap-v2-robinhood",
+        sourceKind: "dex",
+        version: 1,
+        deploymentBlock: 8_928,
+        verifiedAtBlock: 58_268_251,
+        sourceUrl: "https://developers.uniswap.org/deployments",
+        contracts: { factory: getAddress("0x8bcEaA40B9AcdfAedF85AdF4FF01F5Ad6517937f") },
+      },
+      {
+        id: "o1-v4-robinhood",
+        sourceKind: "launchpad",
+        version: 4,
+        deploymentBlock: 48_880_218,
+        verifiedAtBlock: 54_953_301,
+        sourceUrl: "https://docs.o1.exchange/launchpad/reference/launch-contract-suites.json",
+        contracts: {
+          factory: getAddress("0xcE9C48cFa068947f77738c81Be406B53338E5B0d"),
+          hook: getAddress("0x0310cFEbE1D7A69f2414f6595bBe9d17c5342aCc"),
+          poolManager: getAddress("0x8366a39CC670B4001A1121B8F6A443A643e40951"),
+        },
+      },
+    ],
   }),
 });
 

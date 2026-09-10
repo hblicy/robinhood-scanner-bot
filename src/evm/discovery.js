@@ -80,6 +80,14 @@ export async function scanEvmRange({
       lifecyclePhase: parsed.lifecyclePhase,
       sourceProvenance: `${adapter.id}@${adapter.version}`,
       metadata: parsed.metadata ?? {},
+      targetSide: parsed.targetSide ?? null,
+      pairDirection: parsed.pairDirection ?? null,
+      targetAssetKind: parsed.targetAssetKind ?? "unknown",
+      referenceAssetKind: parsed.referenceAssetKind ?? "unknown",
+      referenceAssetIssuer: parsed.referenceAssetIssuer ?? null,
+      assetSource: parsed.assetSource ?? null,
+      assetVerifiedAt: parsed.assetVerifiedAt ?? null,
+      referenceRestrictions: parsed.referenceRestrictions ?? [],
     }));
   }
   return events;

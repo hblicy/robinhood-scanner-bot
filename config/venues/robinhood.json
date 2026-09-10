@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "chain": "robinhood",
+  "verifiedAt": "2026-09-10",
+  "venues": [
+    {
+      "id": "o1-v4-robinhood",
+      "identityStatus": "verified",
+      "securityCapability": "supported",
+      "sourceUrl": "https://docs.o1.exchange/launchpad/reference/launch-contract-suites.json",
+      "contracts": {
+        "factory": "0xcE9C48cFa068947f77738c81Be406B53338E5B0d",
+        "hook": "0x0310cFEbE1D7A69f2414f6595bBe9d17c5342aCc",
+        "poolManager": "0x8366a39CC670B4001A1121B8F6A443A643e40951"
+      }
+    },
+    {
+      "id": "pons-v1-robinhood",
+      "identityStatus": "disabled-unverified",
+      "securityCapability": "unsupported",
+      "disabledReason": "missing-verified-abi-or-event-source"
+    },
+    {
+      "id": "long-robinhood",
+      "identityStatus": "disabled-unverified",
+      "securityCapability": "unsupported",
+      "disabledReason": "missing-verified-factory"
+    }
+  ]
+}

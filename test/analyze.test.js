@@ -244,7 +244,17 @@ describe("analyze data completeness", () => {
     const pairCreatedAt = NOW - 8 * 60_000;
     let honeypotInput;
     await analyze(
-      { ...event, blockNumber: 123, createdAt: NOW - 1 * 60_000 },
+      {
+        ...event,
+        blockNumber: 123,
+        createdAt: NOW - 1 * 60_000,
+        poolId: `0x${"ab".repeat(32)}`,
+        referenceAssetKind: "stock",
+        referenceAssetIssuer: "Robinhood",
+        assetSource: "official-catalog",
+        assetVerifiedAt: NOW - 60_000,
+        referenceRestrictions: ["eu-only"],
+      },
       dependencies({
         dexScreener: async () => ({ marketBound: true, pairCreatedAt }),
         honeypotCheck: async (value) => {
@@ -259,12 +269,18 @@ describe("analyze data completeness", () => {
       quote: QUOTE,
       venue: "uniswap-v2",
       pool: POOL,
+      poolId: `0x${"ab".repeat(32)}`,
       holders: [],
       blockNumber: 123,
       pairCreatedAt,
       decimals: 18,
       walletCatalog: WALLET_CATALOG,
       metadata: {},
+      referenceAssetKind: "stock",
+      referenceAssetIssuer: "Robinhood",
+      assetSource: "official-catalog",
+      assetVerifiedAt: NOW - 60_000,
+      referenceRestrictions: ["eu-only"],
     });
   });
 
