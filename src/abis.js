@@ -78,6 +78,12 @@ export const O1_LAUNCH_FACTORY_ABI = [
   "event Launched(address indexed token,bytes32 indexed poolId,address indexed originalCreator,address quoteToken,uint256 launchSupply,int24 tickSpacing)",
 ];
 
+export const B20_READ_ABI = [
+  "function multiplier() view returns (uint256)",
+  "function isPaused(uint8 feature) view returns (bool)",
+  "function policyId(bytes32 policyScope) view returns (uint64)",
+];
+
 export const V2_ROUTER_ABI = [
   "function getAmountsOut(uint256 amountIn, address[] path) view returns (uint256[] amounts)",
 ];

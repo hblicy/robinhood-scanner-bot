@@ -10,8 +10,22 @@ const html = fs.readFileSync(
   new URL("fixtures/assets/base-official-stocks.html", import.meta.url),
   "utf8"
 );
+const b20Abi = JSON.parse(fs.readFileSync(
+  new URL("../config/abis/b20.json", import.meta.url),
+  "utf8"
+));
 
 describe("Base official B20 assets", () => {
+  it("vendors only the official B20 read surface used by the scanner", () => {
+    assert.equal(b20Abi.source, "https://github.com/base/base-std/tree/main/src/interfaces");
+    assert.deepEqual(b20Abi.abi.map(({ name }) => name).sort(), [
+      "isPaused",
+      "multiplier",
+      "policyId",
+    ]);
+    assert.ok(b20Abi.abi.every(({ stateMutability }) => stateMutability === "view"));
+  });
+
   it("extracts only full Base stock contract links from the official page", () => {
     const document = parseBaseStocksPage(html, { now: () => 1_789_000_000_000 });
     assert.equal(document.assets.length, 10);

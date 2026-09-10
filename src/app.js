@@ -19,7 +19,10 @@ import { createEvmSecurityRegistry, createV2SecurityEntry } from "./security/evm
 import { createO1SecurityEntry } from "./security/evm/o1.js";
 import { createFourMemeSecurityEntry } from "./security/evm/four-meme.js";
 import { createFlapSecurityEntry } from "./security/evm/flap.js";
-import { inspectReferenceAsset } from "./security/evm/reference-asset.js";
+import {
+  inspectReferenceAsset,
+  readB20ReferencePolicies,
+} from "./security/evm/reference-asset.js";
 import { analyze, honeypotCheck } from "./analyze.js";
 import { ERC20_ABI } from "./abis.js";
 import { dexScreener } from "./market.js";
@@ -362,6 +365,8 @@ function createServices({ loaded, rpcContext, registry, projectRoot, dependencie
   const referenceAssetCache = new Map();
   const readReferencePolicies = dependencies.readReferencePolicies
     ?? (async (asset) => ({ restrictions: asset.restrictions ?? [] }));
+  const readB20 = dependencies.readB20
+    ?? ((asset) => readB20ReferencePolicies(asset, { provider }));
   const unavailable = (source) => async () => {
     throw new Error(`${source} adapter unavailable for ${profile.key}`);
   };
@@ -391,6 +396,7 @@ function createServices({ loaded, rpcContext, registry, projectRoot, dependencie
         return keccak256(code);
       },
       readPolicies: readReferencePolicies,
+      readB20: profile.key === "base" ? readB20 : undefined,
     }),
     walletCatalog,
   });
