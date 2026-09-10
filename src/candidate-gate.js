@@ -58,6 +58,8 @@ export function scoreCandidateUpperBound(candidate, thresholds = {}) {
     sells5m: market.sells5m,
   };
   if (Object.values(facts).some((value) => !Number.isFinite(value))) return null;
+  if (Object.values(facts).some((value) => value < 0)) return null;
+  if (!Number.isInteger(facts.buys5m) || !Number.isInteger(facts.sells5m)) return null;
   return scoreCandidate(facts, thresholds).score + UNREAD_CATEGORY_MAXIMUM;
 }
 

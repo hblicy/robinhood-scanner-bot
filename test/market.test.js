@@ -136,6 +136,28 @@ describe("geckoNewPools", () => {
     assert.equal(incomplete.market.scoreKnown, false);
   });
 
+  for (const [field, mutate] of [
+    ["negative liquidity", (row) => { row.attributes.reserve_in_usd = "-1"; }],
+    ["fractional buys", (row) => { row.attributes.transactions.m5.buys = "1.5"; }],
+    ["malformed market cap", (row) => { row.attributes.market_cap_usd = "bad"; }],
+  ]) {
+    it(`keeps invalid Gecko score facts unknown: ${field}`, async () => {
+      const row = geckoRow(new Date(NOW).toISOString());
+      Object.assign(row.attributes, {
+        market_cap_usd: "70000",
+        reserve_in_usd: "26000",
+        volume_usd: { m5: "13000", h1: "20000" },
+      });
+      mutate(row);
+      const [event] = await geckoNewPools(1, {
+        fetchImpl: async () => jsonResponse({ data: [row] }),
+        now: () => NOW,
+        maxAgeMinutes: 30,
+      });
+      assert.equal(event.market.scoreKnown, false);
+    });
+  }
+
   it("normalizes only the Robinhood Uniswap V2 Gecko venue alias", async () => {
     const known = geckoRow(new Date(NOW).toISOString());
     known.relationships.dex.data.id = "uniswap-v2-robinhood";

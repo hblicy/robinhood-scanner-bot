@@ -679,6 +679,20 @@ export async function runReadOnlyCandidates(events, dependencies) {
   const reports = [];
   const failures = [];
   const observedAt = dependencies.now();
+  const routeStats = dependencies.routeStats ?? createCandidateRouteStats();
+  const analyzeCandidate = dependencies.analysisCircuit
+    ? bindAnalysisCircuit({
+      circuit: dependencies.analysisCircuit,
+      analyze: async (event) => {
+        incrementCandidateRouteStat(routeStats, "paid_deep_checks");
+        return dependencies.analyze(event);
+      },
+      onOpen: dependencies.onAnalysisRpcOpen,
+    })
+    : async (event) => {
+      incrementCandidateRouteStat(routeStats, "paid_deep_checks");
+      return dependencies.analyze(event);
+    };
   const runDrain = async () => {
     return drainQueue(
       queue,
@@ -688,18 +702,37 @@ export async function runReadOnlyCandidates(events, dependencies) {
         const classified = dependencies.classifyCandidate
           ? await dependencies.classifyCandidate(event)
           : event;
+        incrementCandidateRouteStat(routeStats, "pons_official_checks");
         if (classified.identity === "pons-v2") return;
         if (classified.identity === "unknown") {
+          incrementCandidateRouteStat(routeStats, "deferred_pons_checks");
           throw new Error(`Pons identity unknown for ${event.token}: ${classified.error || "Factory read failed"}`);
         }
+        const routed = { ...classified, observedAt: classified.observedAt ?? dependencies.now() };
+        const route = routeCandidate(routed, {
+          thresholds: dependencies.scoreThresholds ?? {
+            maxAgeMinutes: dependencies.maxAgeMinutes,
+            minScore: dependencies.minScore,
+          },
+          supportsSellability: dependencies.supportsSellability ?? supportsRobinhoodSellability,
+        });
+        if (route.action === "skip") {
+          incrementCandidateRouteStat(
+            routeStats,
+            route.reason === "unsupported-sellability-venue"
+              ? "skipped_unsupported_venue"
+              : "skipped_score_upper_bound"
+          );
+          return;
+        }
         const report = await handleCandidate(
-          classified,
+          routed,
           { persistSeen: false },
           {
             now: dependencies.now,
             maxAgeMinutes: dependencies.maxAgeMinutes,
             minScore: dependencies.minScore,
-            analyze: dependencies.analyze,
+            analyze: analyzeCandidate,
             markSeen: () => {},
             alertReport: dependencies.consoleAlert,
             log: dependencies.log,
@@ -707,6 +740,10 @@ export async function runReadOnlyCandidates(events, dependencies) {
         );
         if (report) reports.push(report);
       } catch (error) {
+        if (error instanceof AnalysisRpcCooldownError) {
+          incrementCandidateRouteStat(routeStats, "analysis_rpc_cooldown_skips");
+          return;
+        }
         failures.push({ event, error });
         dependencies.log(`handle failed ${event.token} ${safeErrorMessage(error)}`);
         throw error;
@@ -1284,11 +1321,13 @@ async function scanOnceCore(supplied = null) {
   for (const report of pons) await (dependencies.consolePons || dependencies.consoleAlert)(report);
   let reports = [];
   let candidateFailure = null;
+  const routeStats = createCandidateRouteStats();
   try {
     reports = await runReadOnlyCandidates([...onchain, ...gecko], {
       maxQueueSize: settings.maxQueueSize,
       maxAgeMinutes: settings.maxAgeMinutes,
       minScore: settings.minScore,
+      scoreThresholds: settings,
       now: dependencies.now || Date.now,
       analyze: (event) => dependencies.analyze(event, { provider: analysisProvider }),
       classifyCandidate: dependencies.classifyCandidate
@@ -1296,10 +1335,15 @@ async function scanOnceCore(supplied = null) {
         : undefined,
       consoleAlert: dependencies.consoleAlert,
       log: dependencies.log,
+      supportsSellability: dependencies.supportsSellability ?? supportsRobinhoodSellability,
+      routeStats,
+      analysisCircuit: dependencies.analysisCircuit ?? createAnalysisRpcCircuit(),
+      onAnalysisRpcOpen: dependencies.onAnalysisRpcOpen,
     });
   } catch (error) {
     candidateFailure = error;
   }
+  dependencies.log(`one-shot routes ${formatCandidateRouteStats(routeStats)}`);
   if (sourceFailures.length || candidateFailure) {
     const errors = [...sourceFailures];
     if (candidateFailure instanceof AggregateError) errors.push(...candidateFailure.errors);

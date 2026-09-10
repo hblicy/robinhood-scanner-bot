@@ -30,7 +30,14 @@ function retryableAnalysisSource(error) {
 export function isAnalysisRpcRateLimitError(error) {
   if (!isRateLimitError(error)) return false;
   const source = retryableAnalysisSource(error);
-  return source == null || source === "token metadata" || source === "bytecode";
+  return source == null || new Set([
+    "token metadata",
+    "owner",
+    "bytecode",
+    "V2 pool",
+    "creator balance",
+    "honeypot",
+  ]).has(source);
 }
 
 export function bindAnalysisCircuit({ circuit, analyze, onOpen } = {}) {

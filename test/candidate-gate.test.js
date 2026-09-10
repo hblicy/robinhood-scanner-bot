@@ -77,6 +77,11 @@ describe("candidate RPC gate", () => {
     }), { action: "analyze", upperBound: null, deepInspectionFloor: 60 });
   });
 
+  it("fails open when normalized market facts contain invalid negative values", () => {
+    const value = candidate({ market: { ...candidate().market, liquidityUsd: -1 } });
+    assert.equal(scoreCandidateUpperBound(value, thresholds), null);
+  });
+
   it("does not prefilter non-Gecko candidates without complete market facts", () => {
     const value = candidate({ source: "onchain", market: undefined });
     assert.equal(scoreCandidateUpperBound(value, thresholds), null);

@@ -777,6 +777,16 @@ describe("V2 sellability evidence", () => {
     assert.equal(result.reason, "evidence-unavailable");
   });
 
+  it("propagates a pool binding rate limit to the analysis circuit", async () => {
+    const limited = Object.assign(new Error("Too Many Requests"), { status: 429 });
+    await assert.rejects(
+      () => inspectSellability(context(), {
+        provider: fakeProvider({ errors: { factory: limited } }),
+      }),
+      (error) => error === limited
+    );
+  });
+
   it("passes a 10000 Transfer-log budget and rejects an oversized injected result", async () => {
     let request;
     const repeated = transferLog({ from: POOL, to: BUYERS[0], value: 1n });

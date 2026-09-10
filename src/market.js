@@ -44,20 +44,26 @@ function isEthAddress(value) {
   return /^0x[0-9a-fA-F]{40}$/.test(String(value || ""));
 }
 
-function hasFiniteNumber(value) {
+function hasNonNegativeNumber(value) {
   if (value === null || value === undefined || value === "") return false;
-  return Number.isFinite(Number(value));
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0;
+}
+
+function hasNonNegativeInteger(value) {
+  if (!hasNonNegativeNumber(value)) return false;
+  return Number.isInteger(Number(value));
 }
 
 function hasCompleteGeckoScoreFacts(attributes) {
   const tx = attributes?.transactions?.m5;
   return (
-    (hasFiniteNumber(attributes?.market_cap_usd) || hasFiniteNumber(attributes?.fdv_usd))
-    && hasFiniteNumber(attributes?.reserve_in_usd)
-    && hasFiniteNumber(attributes?.volume_usd?.m5)
-    && hasFiniteNumber(attributes?.volume_usd?.h1)
-    && hasFiniteNumber(tx?.buys)
-    && hasFiniteNumber(tx?.sells)
+    (hasNonNegativeNumber(attributes?.market_cap_usd) || hasNonNegativeNumber(attributes?.fdv_usd))
+    && hasNonNegativeNumber(attributes?.reserve_in_usd)
+    && hasNonNegativeNumber(attributes?.volume_usd?.m5)
+    && hasNonNegativeNumber(attributes?.volume_usd?.h1)
+    && hasNonNegativeInteger(tx?.buys)
+    && hasNonNegativeInteger(tx?.sells)
   );
 }
 
