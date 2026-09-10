@@ -11,6 +11,7 @@ import {
 import {
   formatAssetRefreshResult,
   atomicWriteJsonBatch,
+  recoverAtomicJsonBatch,
   loadRefreshEnvironment,
 } from "../scripts/refresh-asset-catalog.js";
 
@@ -201,6 +202,34 @@ describe("xStocks official asset catalog", () => {
       for (const [chain, original] of Object.entries(originals)) {
         assert.deepEqual(JSON.parse(fs.readFileSync(path.join(directory, `${chain}.json`), "utf8")), original);
       }
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("recovers all old catalogs from a journal left by an interrupted commit", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "xstocks-recover-"));
+    const transactionId = "interrupted";
+    const chains = ["solana", "ethereum", "bsc"];
+    try {
+      for (const chain of chains) {
+        const target = path.join(directory, `${chain}.json`);
+        fs.writeFileSync(target, JSON.stringify({ chain, generation: chain === "solana" ? "new" : "old" }), "utf8");
+        fs.writeFileSync(`${target}.${transactionId}.bak`, JSON.stringify({ chain, generation: "old" }), "utf8");
+      }
+      fs.writeFileSync(path.join(directory, ".xstocks-refresh-transaction.json"), JSON.stringify({
+        schemaVersion: 1,
+        transactionId,
+        entries: chains.map((chain) => ({ chain, hadTarget: true })),
+      }), "utf8");
+
+      assert.equal(recoverAtomicJsonBatch({ directory }), true);
+      for (const chain of chains) {
+        const target = path.join(directory, `${chain}.json`);
+        assert.deepEqual(JSON.parse(fs.readFileSync(target, "utf8")), { chain, generation: "old" });
+        assert.equal(fs.existsSync(`${target}.${transactionId}.bak`), false);
+      }
+      assert.equal(fs.existsSync(path.join(directory, ".xstocks-refresh-transaction.json")), false);
     } finally {
       fs.rmSync(directory, { recursive: true, force: true });
     }

@@ -66,6 +66,67 @@ function atomicWriteJson(file, document) {
   }
 }
 
+const XSTOCKS_TRANSACTION_JOURNAL = ".xstocks-refresh-transaction.json";
+
+function validatedJournalEntries(journal, directory) {
+  if (journal?.schemaVersion !== 1 || !/^[A-Za-z0-9-]+$/.test(journal?.transactionId || "")) {
+    throw new Error("asset catalog transaction journal is invalid");
+  }
+  if (!Array.isArray(journal.entries) || journal.entries.length === 0) {
+    throw new Error("asset catalog transaction journal has no entries");
+  }
+  const seen = new Set();
+  return journal.entries.map(({ chain, hadTarget }) => {
+    if (!/^[a-z0-9-]+$/.test(chain || "") || seen.has(chain) || typeof hadTarget !== "boolean") {
+      throw new Error("asset catalog transaction journal entry is invalid");
+    }
+    seen.add(chain);
+    const target = path.resolve(directory, `${chain}.json`);
+    return {
+      target,
+      temporary: `${target}.${journal.transactionId}.tmp`,
+      backup: `${target}.${journal.transactionId}.bak`,
+      hadTarget,
+    };
+  });
+}
+
+export function recoverAtomicJsonBatch({
+  directory = path.resolve("config", "assets"),
+  fsImpl = fs,
+} = {}) {
+  const resolvedDirectory = path.resolve(directory);
+  const journalFile = path.join(resolvedDirectory, XSTOCKS_TRANSACTION_JOURNAL);
+  if (!fsImpl.existsSync(journalFile)) return false;
+  let journal;
+  try {
+    journal = JSON.parse(fsImpl.readFileSync(journalFile, "utf8"));
+  } catch (cause) {
+    throw new Error(`asset catalog transaction journal cannot be read: ${cause.message}`, { cause });
+  }
+  const entries = validatedJournalEntries(journal, resolvedDirectory);
+  try {
+    for (const entry of entries) {
+      if (entry.hadTarget) {
+        if (!fsImpl.existsSync(entry.backup)) {
+          throw new Error(`asset catalog backup is missing: ${entry.backup}`);
+        }
+        fsImpl.copyFileSync(entry.backup, entry.target);
+      } else if (fsImpl.existsSync(entry.target)) {
+        fsImpl.rmSync(entry.target, { force: true });
+      }
+    }
+    fsImpl.rmSync(journalFile, { force: true });
+    for (const entry of entries) {
+      if (fsImpl.existsSync(entry.temporary)) fsImpl.rmSync(entry.temporary, { force: true });
+      if (fsImpl.existsSync(entry.backup)) fsImpl.rmSync(entry.backup, { force: true });
+    }
+  } catch (cause) {
+    throw new Error(`asset catalog transaction recovery failed: ${cause.message}`, { cause });
+  }
+  return true;
+}
+
 export function atomicWriteJsonBatch(documents, {
   directory = path.resolve("config", "assets"),
   fsImpl = fs,
@@ -74,9 +135,11 @@ export function atomicWriteJsonBatch(documents, {
   if (!documents || typeof documents !== "object" || Array.isArray(documents)) {
     throw new Error("asset catalog batch must be an object");
   }
+  const resolvedDirectory = path.resolve(directory);
+  recoverAtomicJsonBatch({ directory: resolvedDirectory, fsImpl });
   const entries = Object.entries(documents).map(([chain, document]) => {
     if (!/^[a-z0-9-]+$/.test(chain)) throw new Error(`invalid asset catalog chain: ${chain}`);
-    const target = path.resolve(directory, `${chain}.json`);
+    const target = path.resolve(resolvedDirectory, `${chain}.json`);
     return {
       target,
       temporary: `${target}.${transactionId}.tmp`,
@@ -86,7 +149,9 @@ export function atomicWriteJsonBatch(documents, {
     };
   });
   if (entries.length === 0) throw new Error("asset catalog batch is empty");
-  fsImpl.mkdirSync(path.resolve(directory), { recursive: true });
+  const journalFile = path.join(resolvedDirectory, XSTOCKS_TRANSACTION_JOURNAL);
+  const journalTemporary = `${journalFile}.${transactionId}.tmp`;
+  fsImpl.mkdirSync(resolvedDirectory, { recursive: true });
   for (const entry of entries) entry.hadTarget = fsImpl.existsSync(entry.target);
   try {
     for (const entry of entries) {
@@ -95,26 +160,47 @@ export function atomicWriteJsonBatch(documents, {
     for (const entry of entries) {
       if (entry.hadTarget) fsImpl.copyFileSync(entry.target, entry.backup);
     }
+    fsImpl.writeFileSync(journalTemporary, `${JSON.stringify({
+      schemaVersion: 1,
+      transactionId,
+      entries: entries.map(({ target, hadTarget }) => ({
+        chain: path.basename(target, ".json"),
+        hadTarget,
+      })),
+    }, null, 2)}\n`, "utf8");
+    fsImpl.renameSync(journalTemporary, journalFile);
     for (const entry of entries) fsImpl.renameSync(entry.temporary, entry.target);
+    fsImpl.rmSync(journalFile, { force: true });
   } catch (cause) {
     const rollbackErrors = [];
-    for (const entry of [...entries].reverse()) {
+    if (fsImpl.existsSync(journalFile)) {
       try {
-        if (fsImpl.existsSync(entry.backup)) {
-          fsImpl.copyFileSync(entry.backup, entry.target);
-        } else if (!entry.hadTarget && fsImpl.existsSync(entry.target) && !fsImpl.existsSync(entry.temporary)) {
-          fsImpl.rmSync(entry.target, { force: true });
-        }
+        recoverAtomicJsonBatch({ directory: resolvedDirectory, fsImpl });
       } catch (rollbackCause) {
-        rollbackErrors.push(`${entry.target}: ${rollbackCause.message}`);
+        rollbackErrors.push(rollbackCause.message);
+      }
+    } else {
+      for (const entry of [...entries].reverse()) {
+        try {
+          if (fsImpl.existsSync(entry.backup)) {
+            fsImpl.copyFileSync(entry.backup, entry.target);
+          } else if (!entry.hadTarget && fsImpl.existsSync(entry.target) && !fsImpl.existsSync(entry.temporary)) {
+            fsImpl.rmSync(entry.target, { force: true });
+          }
+        } catch (rollbackCause) {
+          rollbackErrors.push(`${entry.target}: ${rollbackCause.message}`);
+        }
       }
     }
     const suffix = rollbackErrors.length ? `; rollback failed: ${rollbackErrors.join(", ")}` : "";
     throw new Error(`asset catalog batch publish failed: ${cause.message}${suffix}`, { cause });
   } finally {
-    for (const entry of entries) {
-      if (fsImpl.existsSync(entry.temporary)) fsImpl.rmSync(entry.temporary, { force: true });
-      if (fsImpl.existsSync(entry.backup)) fsImpl.rmSync(entry.backup, { force: true });
+    if (fsImpl.existsSync(journalTemporary)) fsImpl.rmSync(journalTemporary, { force: true });
+    if (!fsImpl.existsSync(journalFile)) {
+      for (const entry of entries) {
+        if (fsImpl.existsSync(entry.temporary)) fsImpl.rmSync(entry.temporary, { force: true });
+        if (fsImpl.existsSync(entry.backup)) fsImpl.rmSync(entry.backup, { force: true });
+      }
     }
   }
 }
@@ -153,6 +239,7 @@ export async function runXStocksRefresh({
   publish = (documents) => atomicWriteJsonBatch(documents),
   now = Date.now,
 } = {}) {
+  recoverAtomicJsonBatch();
   const pages = await fetchAllXStocksPages({ fetchImpl });
   const payload = combineXStocksPages(pages);
   const solanaDocument = parseXStocksAssets(payload, {
