@@ -18,6 +18,35 @@ afterEach(() => {
 });
 
 describe("Robinhood multichain application", () => {
+  it("restores and persists the chain-scoped monthly RPC counter", () => {
+    const projectRoot = tempRoot();
+    const dataDir = path.join(projectRoot, "data", "robinhood");
+    fs.mkdirSync(dataDir, { recursive: true });
+    fs.writeFileSync(path.join(dataDir, "rpc-usage.json"), JSON.stringify({
+      schemaVersion: 1,
+      month: new Date().toISOString().slice(0, 7),
+      total: 12,
+      methods: { eth_call: 12 },
+    }));
+    let rpcOptions;
+    const app = createApp({
+      chainKey: "robinhood",
+      env: {},
+      dependencies: {
+        projectRoot,
+        createRpcContext: (options) => { rpcOptions = options; return {}; },
+        commands: { watch: async () => {}, scan: async () => {}, check: async () => {} },
+      },
+    });
+    assert.equal(app.config.rpcUsageBudget.snapshot().total, 12);
+    assert.equal(rpcOptions.usageBudget, app.config.rpcUsageBudget);
+    app.config.rpcUsageBudget.record("eth_getLogs");
+    app.config.rpcUsageBudget.flush();
+    const saved = JSON.parse(fs.readFileSync(path.join(dataDir, "rpc-usage.json"), "utf8"));
+    assert.equal(saved.total, 13);
+    assert.equal(saved.methods.eth_getLogs, 1);
+  });
+
   it("assembles chain-scoped RPC, state, venues and a push-only command surface", async () => {
     const projectRoot = tempRoot();
     const calls = [];

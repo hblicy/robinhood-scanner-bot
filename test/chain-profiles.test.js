@@ -10,6 +10,12 @@ const expectedIds = {
   bsc: 56,
   robinhood: 4663,
 };
+const expectedMonthlyLimits = {
+  ethereum: 4_500_000,
+  base: 3_000_000,
+  bsc: 5_500_000,
+  robinhood: 5_000_000,
+};
 
 describe("EVM chain profiles", () => {
   for (const [key, id] of Object.entries(expectedIds)) {
@@ -23,6 +29,7 @@ describe("EVM chain profiles", () => {
       assert.ok(Object.isFrozen(profile));
       assert.ok(profile.quotes.length > 0);
       assert.ok(profile.venues.length > 0);
+      assert.equal(loadChainConfig(key, {}).rpc.monthlyLimit, expectedMonthlyLimits[key]);
       for (const venue of profile.venues) {
         assert.match(venue.sourceUrl, /^https:\/\//);
         assert.ok(Number.isInteger(venue.deploymentBlock));

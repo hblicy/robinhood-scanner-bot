@@ -29,6 +29,7 @@ import { analyzeSolanaCandidate } from "./solana/analyze.js";
 import { createAnalysisRpcCircuit } from "./analysis-rpc-circuit.js";
 import { createVenueRegistry } from "./venues/registry.js";
 import { verifyVenueDeployments } from "./venues/verify.js";
+import { createRpcUsageBudget } from "./rpc-usage-budget.js";
 
 const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const LEGACY_STATE_FILES = Object.freeze([
@@ -91,7 +92,7 @@ function migrateLegacyRobinhoodState(projectRoot, dataDir) {
   return true;
 }
 
-function rpcOptions(config) {
+function rpcOptions(config, usageBudget = null) {
   return {
     chain: {
       ...config.profile,
@@ -103,6 +104,56 @@ function rpcOptions(config) {
       analysisRpcCups: config.rpc.analysisCups,
       discoveryRpcCooldownMs: config.rpc.cooldownMs,
     },
+    usageBudget,
+  };
+}
+
+function readRpcUsage(file) {
+  if (!fs.existsSync(file)) return null;
+  try {
+    return JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch (cause) {
+    throw new Error(`cannot read RPC usage state ${file}`, { cause });
+  }
+}
+
+function writeRpcUsage(file, state) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const temporary = `${file}.${process.pid}.tmp`;
+  try {
+    fs.writeFileSync(temporary, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+    fs.renameSync(temporary, file);
+  } finally {
+    if (fs.existsSync(temporary)) fs.rmSync(temporary, { force: true });
+  }
+}
+
+function createChainUsageBudget(loaded, dataDir, dependencies) {
+  const file = path.join(dataDir, "rpc-usage.json");
+  return createRpcUsageBudget({
+    limit: loaded.rpc.monthlyLimit,
+    initial: dependencies.rpcUsageInitial ?? readRpcUsage(file),
+    persist: dependencies.persistRpcUsage ?? ((state) => writeRpcUsage(file, state)),
+    now: dependencies.now ?? Date.now,
+  });
+}
+
+function startUsageFlush(budget, { intervalMs = 60_000, logError = console.error } = {}) {
+  const flush = () => budget.flush();
+  const timer = setInterval(() => {
+    try {
+      flush();
+    } catch (error) {
+      logError(`RPC usage flush failed: ${error.message}`);
+    }
+  }, intervalMs);
+  timer.unref?.();
+  const onExit = () => flush();
+  process.once("exit", onExit);
+  return () => {
+    clearInterval(timer);
+    process.removeListener("exit", onExit);
+    flush();
   };
 }
 
@@ -363,7 +414,8 @@ export function createApp({ chainKey, command = "watch", env = process.env, depe
   if (!readOnly && chainKey === "robinhood") migrateLegacyRobinhoodState(projectRoot, dataDir);
 
   const createRpcContext = dependencies.createRpcContext ?? createChainRpcContext;
-  const rpcContext = createRpcContext(rpcOptions(loaded));
+  const rpcUsageBudget = createChainUsageBudget(loaded, dataDir, dependencies);
+  const rpcContext = createRpcContext(rpcOptions(loaded, rpcUsageBudget));
   const store = getStoreFor(dataDir, dependencies.storeSettings, { readOnly });
   const venues = loaded.profile.venues.map((venue) => instantiateVenue(loaded.profile, venue));
   if (chainKey === "robinhood") venues.push(createPonsAdapter());
@@ -390,6 +442,7 @@ export function createApp({ chainKey, command = "watch", env = process.env, depe
     securityRegistry: registry,
     venueRegistry,
     analysisRpcCircuit: createAnalysisRpcCircuit(),
+    rpcUsageBudget,
     services,
   });
   const context = Object.freeze({ config });
@@ -404,16 +457,32 @@ export function createApp({ chainKey, command = "watch", env = process.env, depe
   return Object.freeze({
     config,
     watch: async () => {
-      await ensureChain();
-      return commands.watch(context);
+      const stopUsageFlush = startUsageFlush(rpcUsageBudget, {
+        intervalMs: dependencies.rpcUsageFlushMs ?? 60_000,
+        logError: dependencies.logError ?? console.error,
+      });
+      try {
+        await ensureChain();
+        return await commands.watch(context);
+      } finally {
+        stopUsageFlush();
+      }
     },
     scan: async () => {
-      await ensureChain();
-      return commands.scan(context);
+      try {
+        await ensureChain();
+        return await commands.scan(context);
+      } finally {
+        rpcUsageBudget.flush();
+      }
     },
     check: async (token) => {
-      await ensureChain();
-      return commands.check(token, context);
+      try {
+        await ensureChain();
+        return await commands.check(token, context);
+      } finally {
+        rpcUsageBudget.flush();
+      }
     },
   });
 }
