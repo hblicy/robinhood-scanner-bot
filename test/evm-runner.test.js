@@ -26,11 +26,16 @@ function setup(overrides = {}) {
   let cursor = overrides.cursor ?? null;
   const seen = new Set();
   const alerts = [];
+  const pending = new Map();
   const store = {
     getOnchainCursor: () => cursor,
     setOnchainCursor: (value) => { cursor = value; },
     hasSeen: (key) => seen.has(key),
     markSeen: (key) => { seen.add(key); },
+    scheduleCheck: (check) => { if (!pending.has(check.id)) pending.set(check.id, { ...check, status: "pending", attempts: 0 }); },
+    listDueChecks: (at) => [...pending.values()].filter((check) => check.status === "pending" && check.nextAttemptAt <= at),
+    completeCheck: (id) => { pending.get(id).status = "completed"; },
+    rescheduleCheck: (id, update) => Object.assign(pending.get(id), update),
   };
   const config = {
     profile: { key: "base", name: "Base", id: 8453, confirmations: 2, venues: [] },
@@ -70,7 +75,7 @@ function setup(overrides = {}) {
     log: () => {},
     ...overrides.dependencies,
   };
-  return { config, dependencies, alerts, seen, cursor: () => cursor };
+  return { config, dependencies, alerts, seen, pending, cursor: () => cursor };
 }
 
 describe("generic EVM range runner", () => {
@@ -82,6 +87,7 @@ describe("generic EVM range runner", () => {
     assert.equal(value.cursor(), 100);
     assert.equal(value.alerts.length, 0);
     assert.equal(value.seen.size, 1);
+    assert.equal(value.pending.size, 0);
   });
 
   it("alerts a confirmed candidate only after recovery has a committed cursor", async () => {
@@ -101,6 +107,58 @@ describe("generic EVM range runner", () => {
     assert.equal(value.cursor(), 100);
     assert.deepEqual(value.alerts, [candidate.token]);
     assert.equal(boundaryReads, 0);
+  });
+
+  it("rechecks a resolved launchpad until observed sells become confirmed", async () => {
+    let now = 2_000;
+    let analyses = 0;
+    const launchpad = {
+      ...candidate,
+      venue: "stonks-exchange-base",
+      sourceKind: "launchpad",
+      metadata: { poolResolved: true },
+    };
+    const value = setup({
+      cursor: 99,
+      dependencies: {
+        now: () => now,
+        scanRange: async () => analyses === 0 ? [launchpad] : [],
+        analyze: async (event) => {
+          analyses += 1;
+          const confirmed = analyses > 1;
+          return {
+            ...event,
+            chainName: "Base",
+            meta: { symbol: "STONK" },
+            score: 75,
+            verdict: "review",
+            red: [],
+            honeypot: { honeypot: confirmed ? false : null },
+            sellability: {
+              status: confirmed ? "confirmed" : "unknown",
+              reason: confirmed ? null : "insufficient-meaningful-sells",
+              evidenceMode: "observed-sells",
+              bindingVerified: true,
+              buyerSamples: 0,
+              ladderSamples: 0,
+              meaningfulSellers: confirmed ? 3 : 1,
+              quoteOutflowReceipts: confirmed ? 3 : 1,
+            },
+          };
+        },
+      },
+    });
+
+    await runEvmRangeOnce(value.config, { persist: true }, value.dependencies);
+    const [check] = [...value.pending.values()];
+    assert.equal(check.status, "pending");
+    assert.equal(value.alerts.length, 0);
+
+    now = check.nextAttemptAt;
+    await runEvmRangeOnce(value.config, { persist: true }, value.dependencies);
+    assert.equal(analyses, 2);
+    assert.deepEqual(value.alerts, [launchpad.token]);
+    assert.equal(check.status, "completed");
   });
 
   it("does not advance the cursor when candidate analysis fails", async () => {

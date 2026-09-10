@@ -51,6 +51,19 @@ describe("candidate retry policy", () => {
     assert.equal(shouldScheduleCandidateRecheck(v2Event, blockedReport), false);
   });
 
+  it("schedules a resolved launchpad candidate while sell evidence is still accumulating", () => {
+    const launchpad = {
+      ...v2Event,
+      sourceKind: "launchpad",
+      venue: "stonks-exchange-base",
+      metadata: { poolResolved: true },
+    };
+    assert.equal(
+      shouldScheduleCandidateRecheck(launchpad, unknownReport("insufficient-meaningful-sells")),
+      true
+    );
+  });
+
   it("uses absolute two-, five-, and ten-minute retry slots", () => {
     const check = createCandidateRecheck(v2Event, 1_000);
     assert.deepEqual(check.retryOffsetsMs, [...CANDIDATE_RETRY_OFFSETS_MS]);

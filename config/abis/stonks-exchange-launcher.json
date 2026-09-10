@@ -1,0 +1,44 @@
+{
+  "name": "StonkLauncher2",
+  "chainId": 8453,
+  "address": "0x4714f6EC81639Ca59EEBE634490a4d8671DCe7B4",
+  "implementation": "0x6a9f14e7742e8972fcF86429C5aa7DB56589806d",
+  "verifiedAt": "2026-09-10",
+  "sources": {
+    "official": "https://www.thestonks.exchange/about",
+    "verifiedContract": "https://base.blockscout.com/address/0x6a9f14e7742e8972fcF86429C5aa7DB56589806d?tab=contract"
+  },
+  "abi": [
+    {
+      "type": "event",
+      "name": "TokenLaunched",
+      "anonymous": false,
+      "inputs": [
+        { "name": "token", "type": "address", "indexed": true },
+        { "name": "tokenId", "type": "uint256", "indexed": true },
+        { "name": "creator", "type": "address", "indexed": true },
+        { "name": "quote", "type": "address", "indexed": false },
+        { "name": "pool", "type": "address", "indexed": false },
+        { "name": "fee", "type": "uint24", "indexed": false },
+        { "name": "launchTick", "type": "int24", "indexed": false },
+        { "name": "totalSupply", "type": "uint256", "indexed": false },
+        { "name": "feeLocker", "type": "address", "indexed": false }
+      ]
+    },
+    {
+      "type": "function",
+      "name": "tokenInfo",
+      "inputs": [{ "name": "", "type": "address" }],
+      "outputs": [
+        { "name": "token", "type": "address" },
+        { "name": "creator", "type": "address" },
+        { "name": "pool", "type": "address" },
+        { "name": "quote", "type": "address" },
+        { "name": "tokenId", "type": "uint256" },
+        { "name": "fee", "type": "uint24" },
+        { "name": "createdAt", "type": "uint256" }
+      ],
+      "stateMutability": "view"
+    }
+  ]
+}

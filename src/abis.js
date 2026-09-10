@@ -84,6 +84,15 @@ export const B20_READ_ABI = [
   "function policyId(bytes32 policyScope) view returns (uint64)",
 ];
 
+export const STONKS_EXCHANGE_ABI = [
+  "event TokenLaunched(address indexed token,uint256 indexed tokenId,address indexed creator,address quote,address pool,uint24 fee,int24 launchTick,uint256 totalSupply,address feeLocker)",
+  "function tokenInfo(address) view returns (address token,address creator,address pool,address quote,uint256 tokenId,uint24 fee,uint256 createdAt)",
+];
+
+export const V3_FACTORY_STATE_ABI = [
+  "function getPool(address,address,uint24) view returns (address)",
+];
+
 export const V2_ROUTER_ABI = [
   "function getAmountsOut(uint256 amountIn, address[] path) view returns (uint256[] amounts)",
 ];
