@@ -63,7 +63,7 @@ const DISABLED_VENUES = Object.freeze({
     ["pons-v1-robinhood", "missing-verified-abi-or-event-source"],
     ["long-robinhood", "missing-verified-factory"],
   ]),
-  solana: Object.freeze([["stonk-fun-solana", "missing-verified-program"]]),
+  solana: Object.freeze([]),
 });
 
 function createConfiguredVenueRegistry(profile, security) {
@@ -80,7 +80,7 @@ function createConfiguredVenueRegistry(profile, security) {
     verifiedContracts: profile.family === "evm" ? Object.values(venue.contracts) : [],
     disabledReason: null,
   }));
-  const disabled = (DISABLED_VENUES[profile.key] ?? []).map(([id, disabledReason]) => ({
+  const disabled = profile.venueCapabilities ?? (DISABLED_VENUES[profile.key] ?? []).map(([id, disabledReason]) => ({
     chain: profile.key,
     family: profile.family,
     id,
