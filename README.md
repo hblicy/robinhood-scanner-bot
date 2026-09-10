@@ -9,7 +9,7 @@
 | 检查项 | 实现方式 |
 | --- | --- |
 | Pons V2 生命周期 | 以 Factory getter 和事件一致性确认身份，监听 Launch、Sweep、Graduated、Rescued，并核对 Hook 注册 |
-| 股票 Meme Launchpad | Robinhood 接入已验证 O1；BNB Chain 接入 Four.meme 与 Flap，原始发币只建状态，池绑定后才安全深检 |
+| 股票 Meme Launchpad | Robinhood 接入 O1；BNB Chain 接入 Four.meme 与 Flap；Base 接入 Stonks Exchange；Solana 通过已验证 Raydium 程序识别 Meme/xStock 池 |
 | 新池发现 | 链上监听 Uniswap V2 `PairCreated`、V3 `PoolCreated`、V4 `Initialize`，并读取 GeckoTerminal `new_pools` |
 | 年龄与市场数据 | 按 `MAX_AGE_MINUTES` 过滤，读取成交、买卖笔数、流动性和市值 |
 | 社交与叙事 | 读取 DexScreener 社交链接并匹配名称关键词 |
@@ -48,6 +48,9 @@ npm run scan -- --chain solana
 # 只读检查指定代币；90 秒后仍未完成的数据源会明确标记 unknown
 npm run check -- --chain ethereum 0x你的合约地址
 npm run check -- --chain solana 你的Mint地址
+
+# 从 xStocks 官方 v2 API 刷新 Solana/Ethereum/BSC 清单并做链上验证
+npm run refresh-assets -- xstocks
 ```
 
 只有 `watch`、`scan`、`check` 三个命令。`paper` 和 `live` 已移除，传入时会在连接 RPC、读取状态或发送通知前直接报错退出。
@@ -86,6 +89,8 @@ Launchpad 启用状态：
 | Base | Stonks Exchange | `enabled` | 固定 Launcher、FeeLocker、Quote Registry 与 Uniswap V3 池；只接受官方 B20 底池 |
 | Base | O1 | `disabled-unverified` | `stock-pair-route-not-supported` |
 | Base | BaseStonk | `disabled-unverified` | `missing-public-contract-registry` |
+| Solana | Raydium LaunchLab/CLMM | `enabled` | 识别 xStock 位于 base 或 quote 任一侧的 Meme 池，并绑定池、vault 与真实卖出资金流 |
+| Solana | Stonk Fun 专属身份 | `disabled-unverified` | `missing-verified-program-or-idl`；不伪造 Program 归属，底层 Raydium 池仍可被通用适配器发现 |
 
 股票底池自身的转账政策、暂停或倍率限制单独显示为“股票底池限制”，不会据此把目标 Meme 标成貔貅。未列入可信地址清单的股票 symbol 不会启用 Launchpad 候选。
 
@@ -188,7 +193,7 @@ DEXPAPRIKA_SCAN=true
 
 四条 EVM 链建议使用同一个“扫描器专用”Dwellir API Key，并在 Dwellir 控制台为该 Key 设置 `20,000,000` 次 monthly quota。默认本地软预算合计 1800 万次：Ethereum 450 万、Base 300 万、BSC 550 万、Robinhood 500 万。每条链在 `data/<chain>/rpc-usage.json` 按 UTC 月记录分析/回退 RPC 的请求数和方法分布；80% 开始节流，95% 只保留可信股票底池候选，100% 停止付费深检但继续公共节点发现。本地计数只约束单机单实例，跨主机和供应商账期的硬上限仍应由 Dwellir 控制台执行。
 
-可信资产目录来自 `config/assets/<chain>.json`，运行时成功刷新后写入 `data/<chain>/asset-catalog.json`。启动时优先读取最后一个有效运行时快照；刷新下载、校验或写入失败时继续使用旧快照。仓库内尚未验证到权威 HTTPS 清单的链保持 `disabled-unverified`，不会用 symbol 猜测股票资产，也不会因此启用对应 Launchpad。
+可信资产目录来自 `config/assets/<chain>.json`，运行时成功刷新后写入 `data/<chain>/asset-catalog.json`。启动时优先读取最后一个有效运行时快照；刷新下载、校验或写入失败时继续使用旧快照。`npm run refresh-assets -- xstocks` 从 Backed/xStocks 官方 v2 公共 API 分页读取资产，批量验证 Solana mint owner，并验证 Ethereum/BSC 字节码；三条链全部验证通过后才落盘。不会用 symbol 猜测股票资产，也不会因此启用未验证 Launchpad。
 
 旧服务器可以保留：
 

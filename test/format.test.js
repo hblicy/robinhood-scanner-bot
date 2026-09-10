@@ -150,6 +150,26 @@ describe("formatAlert", () => {
     assert.doesNotMatch(text, /undefined|null/);
   });
 
+  it("shows the full Solana xStock mint and Backed source", () => {
+    const mint = "XsaQTCgebC2KPbf27KUhdv5JFvHhQ4GDAPURwrEhAzb";
+    const text = formatAlert(makeReport({
+      chain: "solana",
+      chainName: "Solana",
+      token: "Xsc9qvGR1efVDFGLrVsmkzv3qi45LTBjeUKSPmx9qEh",
+      venue: "raydium-launchlab",
+      referenceAsset: mint,
+      referenceAssetKind: "stock",
+      referenceAssetIssuer: "Backed",
+      referenceAssetStandard: "xStocks",
+      assetSource: "backed-xstocks-api-v2",
+      dex: { quoteSymbol: "AAPLx" },
+    }));
+
+    assert.match(text, /股票底池<\/b> xStocks AAPLx/);
+    assert.match(text, new RegExp(mint));
+    assert.match(text, /backed-xstocks-api-v2/);
+  });
+
   it("renders unsafe or malformed link protocols as plain labels", () => {
     const text = formatAlert(makeReport({
       links: {

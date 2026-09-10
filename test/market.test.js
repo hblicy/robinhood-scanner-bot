@@ -61,6 +61,25 @@ describe("selectDexPair", () => {
     }), reversed);
   });
 
+  it("selects a bound Solana pair when the target mint is on the quote side", () => {
+    const meme = "Xsc9qvGR1efVDFGLrVsmkzv3qi45LTBjeUKSPmx9qEh";
+    const stock = "XsaQTCgebC2KPbf27KUhdv5JFvHhQ4GDAPURwrEhAzb";
+    const pool = "HJPjoWUrhoZzkECZGqa9vYpAT9xLj3LNG7hp3pbPB7C2";
+    const reversed = {
+      chainId: "solana",
+      pairAddress: pool,
+      baseToken: { address: stock },
+      quoteToken: { address: meme },
+      liquidity: { usd: 100 },
+    };
+    assert.equal(selectDexPair([reversed], {
+      chain: "solana",
+      token: meme,
+      pool,
+      quote: stock,
+    }), reversed);
+  });
+
   it("selects only the exact event pool and quote", () => {
     const selected = selectDexPair([pair(WRONG_POOL, 1_000_000), pair(EXACT_POOL, 100)], {
       token: TOKEN,

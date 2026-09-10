@@ -37,6 +37,12 @@ describe("Solana analysis", () => {
     const event = {
       token, quoteToken: quote, pool, venue: "raydium-cpmm", creator: null,
       createdAt: Date.now(), lifecyclePhase: "new_pool",
+      referenceAsset: quote,
+      referenceAssetKind: "stock",
+      referenceAssetIssuer: "Backed",
+      assetSource: "backed-xstocks-api-v2",
+      assetVerifiedAt: 1_789_000_000_000,
+      referenceRestrictions: ["scaled-ui-multiplier"],
       metadata: { baseVault, quoteVault },
     };
     const report = await analyzeSolanaCandidate(event, {
@@ -58,5 +64,11 @@ describe("Solana analysis", () => {
     assert.equal(report.walletSignals.count, 1);
     assert.equal(report.facts.walletSignalCount, 1);
     assert.equal(report.facts.walletSignalMatches[0].address, buyer);
+    assert.equal(report.referenceAsset, quote);
+    assert.equal(report.referenceAssetKind, "stock");
+    assert.equal(report.referenceAssetIssuer, "Backed");
+    assert.equal(report.referenceAssetStandard, "xStocks");
+    assert.equal(report.assetSource, "backed-xstocks-api-v2");
+    assert.deepEqual(report.referenceRestrictions, ["scaled-ui-multiplier"]);
   });
 });
