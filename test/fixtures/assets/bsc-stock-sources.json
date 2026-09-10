@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "chain": "bsc",
+  "checkedAt": "2026-09-10",
+  "sources": [
+    {
+      "id": "binance-bstocks-2026-06-11",
+      "issuer": "BTech Holdings",
+      "status": "verified",
+      "url": "https://www.binance.com/en-AU/support/announcement/detail/5646e3f9ea6b4c989cb76aa18bd99245",
+      "evidence": "official-addresses-and-onchain-erc20-metadata"
+    },
+    {
+      "id": "four-meme-4stock",
+      "issuer": "Four.meme",
+      "status": "disabled-unverified",
+      "url": null,
+      "disabledReason": "missing-stable-official-full-address-manifest"
+    }
+  ]
+}

@@ -3,10 +3,67 @@
   "chain": "bsc",
   "family": "evm",
   "source": {
-    "id": "bsc-versioned-manifest-pending",
-    "url": null,
-    "verifiedAt": 0,
-    "status": "disabled-unverified"
+    "id": "binance-bstocks-curated-official-announcements",
+    "url": "https://www.binance.com/en-AU/support/announcement/detail/5646e3f9ea6b4c989cb76aa18bd99245",
+    "verifiedAt": 1788969600000,
+    "status": "verified-partial",
+    "runtimeRefresh": false
   },
-  "assets": []
+  "assets": [
+    {
+      "address": "0x02Fca66C1D1aFB4E2A7884261eB00F63598a7436",
+      "symbol": "NVDAB",
+      "name": "NVIDIA Corp",
+      "decimals": 18,
+      "kind": "stock",
+      "issuer": "BTech Holdings",
+      "sourceId": "binance-bstocks-2026-06-11",
+      "sourceUrl": "https://www.binance.com/en-AU/support/announcement/detail/5646e3f9ea6b4c989cb76aa18bd99245",
+      "verifiedAt": 1788969600000
+    },
+    {
+      "address": "0x3eE4dF61bd4F867E349BEaE8bFE07bc31b4850fb",
+      "symbol": "SNDKB",
+      "name": "Sandisk Corporation",
+      "decimals": 18,
+      "kind": "stock",
+      "issuer": "BTech Holdings",
+      "sourceId": "binance-bstocks-2026-06-11",
+      "sourceUrl": "https://www.binance.com/en-AU/support/announcement/detail/5646e3f9ea6b4c989cb76aa18bd99245",
+      "verifiedAt": 1788969600000
+    },
+    {
+      "address": "0x5b1910eAaD6450E50f816082Aa078C41F10C292f",
+      "symbol": "TSLAB",
+      "name": "Tesla, Inc.",
+      "decimals": 18,
+      "kind": "stock",
+      "issuer": "BTech Holdings",
+      "sourceId": "binance-bstocks-2026-06-11",
+      "sourceUrl": "https://www.binance.com/en-AU/support/announcement/detail/5646e3f9ea6b4c989cb76aa18bd99245",
+      "verifiedAt": 1788969600000
+    },
+    {
+      "address": "0x80f3D493EBCe97e343c53D29a137942416B4ffC0",
+      "symbol": "CRCLB",
+      "name": "Circle Internet Group Inc.",
+      "decimals": 18,
+      "kind": "stock",
+      "issuer": "BTech Holdings",
+      "sourceId": "binance-bstocks-2026-06-11",
+      "sourceUrl": "https://www.binance.com/en-AU/support/announcement/detail/5646e3f9ea6b4c989cb76aa18bd99245",
+      "verifiedAt": 1788969600000
+    },
+    {
+      "address": "0xcdf2f3e0fa43C47A6662a91C9E4a7C5f69762699",
+      "symbol": "MUB",
+      "name": "Micron Technology Inc",
+      "decimals": 18,
+      "kind": "stock",
+      "issuer": "BTech Holdings",
+      "sourceId": "binance-bstocks-2026-06-11",
+      "sourceUrl": "https://www.binance.com/en-AU/support/announcement/detail/5646e3f9ea6b4c989cb76aa18bd99245",
+      "verifiedAt": 1788969600000
+    }
+  ]
 }
