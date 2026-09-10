@@ -8,6 +8,8 @@ import {
   createV2SecurityEntry,
 } from "../src/security/evm/index.js";
 import { observeSellReceipts } from "../src/security/evm/observed-sells.js";
+import { createFourMemeSecurityEntry } from "../src/security/evm/four-meme.js";
+import { EVM_PROFILES } from "../src/chains/evm-profiles.js";
 
 const fixture = JSON.parse(await readFile(new URL("./fixtures/evm/observed-sell-receipts.json", import.meta.url)));
 
@@ -104,6 +106,27 @@ describe("EVM security registry", () => {
 });
 
 describe("observed EVM sells", () => {
+  it("confirms a Four.meme graduation only after binding its migration pool", async () => {
+    const venue = EVM_PROFILES.bsc.venues.find(({ id }) => id === "four-meme-v2-bsc");
+    const entry = createFourMemeSecurityEntry(venue, { meaningfulThreshold: 50n });
+    const receipts = fixture.receipts.map((receipt) => {
+      const value = structuredClone(receipt);
+      value.logs[1].topics[2] = `0x${receipt.from.slice(2).toLowerCase().padStart(64, "0")}`;
+      return value;
+    });
+    const result = await entry.inspect(candidate({
+      chain: "bsc",
+      venue: venue.id,
+      pool: fixture.pool,
+      metadata: { poolResolved: true },
+    }), {
+      getObservedSellReceipts: async () => receipts,
+    });
+
+    assert.equal(result.status, "confirmed");
+    assert.equal(result.bindingVerified, true);
+  });
+
   it("requires token inflow and quote outflow in successful bound receipts", () => {
     const result = observeSellReceipts({
       ...fixture,

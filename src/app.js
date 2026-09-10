@@ -16,6 +16,7 @@ import { createPonsAdapter } from "./venues/evm/pons.js";
 import { createUniswapV2Adapter, createUniswapV3Adapter, createUniswapV4Adapter } from "./venues/evm/uniswap.js";
 import { createEvmSecurityRegistry, createV2SecurityEntry } from "./security/evm/index.js";
 import { createO1SecurityEntry } from "./security/evm/o1.js";
+import { createFourMemeSecurityEntry } from "./security/evm/four-meme.js";
 import { analyze, honeypotCheck } from "./analyze.js";
 import { ERC20_ABI } from "./abis.js";
 import { dexScreener } from "./market.js";
@@ -329,6 +330,8 @@ function securityRegistry(profile, assetCatalog) {
       assetCatalog,
     }));
   }
+  const fourMeme = profile.venues.find(({ id }) => id === "four-meme-v2-bsc");
+  if (fourMeme) entries.push(createFourMemeSecurityEntry(fourMeme));
   return createEvmSecurityRegistry(entries);
 }
 

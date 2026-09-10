@@ -81,6 +81,9 @@ export function routeCandidate(candidate, {
   venueRegistry = null,
   rpcUsageBudget = null,
 } = {}) {
+  if (candidate?.sourceKind === "launchpad" && candidate?.metadata?.poolResolved === false) {
+    return { action: "record-only", reason: "pool-not-resolved" };
+  }
   if (venueRegistry != null) {
     if (typeof venueRegistry.route !== "function") {
       throw new Error("candidate gate venueRegistry must expose route(venue)");
