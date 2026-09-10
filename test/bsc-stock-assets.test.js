@@ -15,10 +15,15 @@ const sources = JSON.parse(fs.readFileSync(
 
 describe("BSC trusted stock assets", () => {
   it("keeps official provenance on every admitted asset", () => {
-    assert.equal(catalog.assets.length, 5);
+    assert.equal(catalog.assets.filter(({ issuer }) => issuer === "BTech Holdings").length, 5);
+    assert.ok(catalog.assets.filter(({ issuer }) => issuer === "Backed").length > 0);
     for (const asset of catalog.assets) {
-      assert.equal(asset.issuer, "BTech Holdings");
-      assert.match(asset.sourceUrl, /^https:\/\/www\.binance\.com\//);
+      assert.ok(["BTech Holdings", "Backed"].includes(asset.issuer));
+      if (asset.issuer === "BTech Holdings") {
+        assert.match(asset.sourceUrl, /^https:\/\/www\.binance\.com\//);
+      } else {
+        assert.equal(asset.sourceUrl, "https://api.xstocks.fi/api/v2/public/assets");
+      }
       assert.ok(asset.sourceId);
       assert.ok(asset.verifiedAt > 0);
     }
