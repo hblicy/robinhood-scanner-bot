@@ -13,6 +13,7 @@ import { scanEvmRange } from "./discovery.js";
 import { safeErrorMessage } from "../safety.js";
 import {
   createCandidateRouteStats,
+  candidateRouteStatKey,
   formatCandidateRouteStats,
   incrementCandidateRouteStat,
   routeCandidate,
@@ -100,11 +101,10 @@ export async function runEvmRangeOnce(config, { persist = true } = {}, supplied 
       const route = routeCandidate(event, {
         thresholds: { ...config.settings, maxAgeMinutes },
         supportsSellability: (value) => config.securityRegistry.supports(value),
+        venueRegistry: config.venueRegistry ?? null,
       });
-      if (route.action === "skip") {
-        const stat = route.reason === "unsupported-sellability-venue"
-          ? "skipped_unsupported_venue"
-          : "skipped_score_upper_bound";
+      if (route.action !== "analyze") {
+        const stat = candidateRouteStatKey(route);
         incrementCandidateRouteStat(routeStats, stat);
         if (persist) store.markSeen(key, { token: event.token, skipped: route.reason });
         continue;

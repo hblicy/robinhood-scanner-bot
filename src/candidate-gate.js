@@ -7,6 +7,8 @@ const ROUTE_STAT_KEYS = Object.freeze([
   "skipped_score_upper_bound",
   "paid_deep_checks",
   "analysis_rpc_cooldown_skips",
+  "recorded_discovery_only",
+  "skipped_venue_disabled",
 ]);
 
 const UNREAD_CATEGORY_MAXIMUM =
@@ -27,6 +29,14 @@ export function incrementCandidateRouteStat(stats, key) {
   return stats[key];
 }
 
+export function candidateRouteStatKey(route) {
+  if (route?.action === "record-only") return "recorded_discovery_only";
+  if (route?.reason === "venue-disabled-unverified") return "skipped_venue_disabled";
+  if (route?.reason === "unsupported-sellability-venue") return "skipped_unsupported_venue";
+  if (route?.reason === "prefilter-score-upper-bound") return "skipped_score_upper_bound";
+  throw new Error(`unsupported candidate route: ${route?.action ?? "unknown"}|${route?.reason ?? "unknown"}`);
+}
+
 export function formatCandidateRouteStats(stats) {
   return [
     `pons=${stats.pons_official_checks}`,
@@ -35,6 +45,8 @@ export function formatCandidateRouteStats(stats) {
     `score=${stats.skipped_score_upper_bound}`,
     `deep=${stats.paid_deep_checks}`,
     `cooldown=${stats.analysis_rpc_cooldown_skips}`,
+    `recorded=${stats.recorded_discovery_only}`,
+    `disabled=${stats.skipped_venue_disabled}`,
   ].join(" ");
 }
 
@@ -66,7 +78,15 @@ export function scoreCandidateUpperBound(candidate, thresholds = {}) {
 export function routeCandidate(candidate, {
   thresholds = {},
   supportsSellability,
+  venueRegistry = null,
 } = {}) {
+  if (venueRegistry != null) {
+    if (typeof venueRegistry.route !== "function") {
+      throw new Error("candidate gate venueRegistry must expose route(venue)");
+    }
+    const capability = venueRegistry.route(candidate?.venue);
+    if (capability.action !== "analyze") return capability;
+  }
   if (typeof supportsSellability !== "function") {
     throw new Error("candidate gate requires sellability capability lookup");
   }

@@ -35,6 +35,7 @@ import {
 } from "./candidate-recovery.js";
 import {
   createCandidateRouteStats,
+  candidateRouteStatKey,
   formatCandidateRouteStats,
   incrementCandidateRouteStat,
   routeCandidate,
@@ -422,7 +423,7 @@ export async function classifyAuxiliaryCandidate(event, {
   }
   return {
     ...event,
-    pad: isQuote(event.quote) ? "long" : "uniswap-native",
+    pad: "uniswap-native",
     identity: "not_pons",
     protocolPhase: "not_applicable",
   };
@@ -715,14 +716,10 @@ export async function runReadOnlyCandidates(events, dependencies) {
             minScore: dependencies.minScore,
           },
           supportsSellability: dependencies.supportsSellability ?? supportsRobinhoodSellability,
+          venueRegistry: dependencies.venueRegistry ?? null,
         });
-        if (route.action === "skip") {
-          incrementCandidateRouteStat(
-            routeStats,
-            route.reason === "unsupported-sellability-venue"
-              ? "skipped_unsupported_venue"
-              : "skipped_score_upper_bound"
-          );
+        if (route.action !== "analyze") {
+          incrementCandidateRouteStat(routeStats, candidateRouteStatKey(route));
           return;
         }
         const report = await handleCandidate(
@@ -835,6 +832,7 @@ export function buildWatchCandidateDependencies({
   settings = SETTINGS,
   analysisCircuit = createAnalysisRpcCircuit(),
   onAnalysisRpcOpen,
+  venueRegistry = null,
 }) {
   if (typeof rpc?.analyzeCandidate !== "function") {
     throw new Error("watch candidate analysis RPC binding is required");
@@ -851,6 +849,7 @@ export function buildWatchCandidateDependencies({
     log,
     onAnalyzed,
     supportsSellability: supportsRobinhoodSellability,
+    venueRegistry,
     routeStats: createCandidateRouteStats(),
     analysisCircuit,
     onAnalysisRpcOpen,
@@ -887,11 +886,10 @@ export async function processWatchCandidate(event, {
       minScore: candidateDependencies.minScore,
     },
     supportsSellability: candidateDependencies.supportsSellability ?? supportsRobinhoodSellability,
+    venueRegistry: candidateDependencies.venueRegistry ?? null,
   });
-  if (route.action === "skip") {
-    const stat = route.reason === "unsupported-sellability-venue"
-      ? "skipped_unsupported_venue"
-      : "skipped_score_upper_bound";
+  if (route.action !== "analyze") {
+    const stat = candidateRouteStatKey(route);
     if (candidateDependencies.routeStats) {
       incrementCandidateRouteStat(candidateDependencies.routeStats, stat);
     }
@@ -1336,6 +1334,7 @@ async function scanOnceCore(supplied = null) {
       consoleAlert: dependencies.consoleAlert,
       log: dependencies.log,
       supportsSellability: dependencies.supportsSellability ?? supportsRobinhoodSellability,
+      venueRegistry: dependencies.venueRegistry ?? null,
       routeStats,
       analysisCircuit: dependencies.analysisCircuit ?? createAnalysisRpcCircuit(),
       onAnalysisRpcOpen: dependencies.onAnalysisRpcOpen,

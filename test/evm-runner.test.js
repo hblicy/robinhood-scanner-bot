@@ -140,6 +140,21 @@ describe("generic EVM range runner", () => {
     assert.equal(result.routeStats.skipped_unsupported_venue, 1);
   });
 
+  it("records discovery-only venues without starting paid analysis", async () => {
+    let analyzed = 0;
+    const value = setup({
+      cursor: 99,
+      dependencies: { analyze: async () => { analyzed += 1; } },
+    });
+    value.config.venueRegistry = {
+      route: () => ({ action: "record-only", reason: "venue-security-unsupported" }),
+    };
+    const result = await runEvmRangeOnce(value.config, { persist: true }, value.dependencies);
+    assert.equal(analyzed, 0);
+    assert.equal(value.seen.size, 1);
+    assert.equal(result.routeStats.recorded_discovery_only, 1);
+  });
+
   it("opens analysis cooldown on 429, then skips deep checks while advancing", async () => {
     let now = 2_000;
     let calls = 0;

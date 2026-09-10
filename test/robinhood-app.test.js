@@ -39,6 +39,9 @@ describe("Robinhood multichain application", () => {
           assert.equal(context, rpcContext);
           calls.push(["chain", chainId]);
         },
+        verifyVenueDeployments: async (entries) => {
+          calls.push(["venues", entries.length]);
+        },
         commands: {
           watch: async (context) => calls.push(["watch", context.config.dataDir]),
           scan: async (context) => calls.push(["scan", context.config.profile.id]),
@@ -54,6 +57,8 @@ describe("Robinhood multichain application", () => {
     assert.match(app.config.telegramTitle, /Robinhood/);
     assert.ok(app.config.venueIds.includes("uniswap-v2-robinhood"));
     assert.ok(app.config.venueIds.includes("pons-v2-robinhood"));
+    assert.equal(app.config.venueRegistry.route("uniswap-v2-robinhood").action, "analyze");
+    assert.equal(app.config.venueRegistry.route("long-robinhood").reason, "venue-disabled-unverified");
     assert.deepEqual(Object.keys(app).sort(), ["check", "config", "scan", "watch"]);
 
     await app.watch();
@@ -62,6 +67,7 @@ describe("Robinhood multichain application", () => {
     assert.deepEqual(calls, [
       ["rpc", 4663],
       ["chain", 4663],
+      ["venues", 2],
       ["watch", path.join(projectRoot, "data", "robinhood")],
       ["scan", 4663],
       ["check", "0x1111111111111111111111111111111111111111", 4663],

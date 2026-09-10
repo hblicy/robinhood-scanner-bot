@@ -27,6 +27,8 @@ import { createSolanaSecurityRegistry } from "./security/solana/index.js";
 import { inspectMintControls } from "./security/solana/mint.js";
 import { analyzeSolanaCandidate } from "./solana/analyze.js";
 import { createAnalysisRpcCircuit } from "./analysis-rpc-circuit.js";
+import { createVenueRegistry } from "./venues/registry.js";
+import { verifyVenueDeployments } from "./venues/verify.js";
 
 const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const LEGACY_STATE_FILES = Object.freeze([
@@ -35,6 +37,43 @@ const LEGACY_STATE_FILES = Object.freeze([
   "positions.json",
   "trades.json",
 ]);
+const DISABLED_VENUES = Object.freeze({
+  ethereum: Object.freeze([]),
+  base: Object.freeze([
+    ["o1-base", "missing-verified-factory"],
+    ["stonks-exchange-base", "missing-verified-factory"],
+    ["basestonk-base", "missing-verified-factory"],
+  ]),
+  bsc: Object.freeze([["flap-bsc", "missing-verified-factory"]]),
+  robinhood: Object.freeze([["long-robinhood", "missing-verified-factory"]]),
+  solana: Object.freeze([["stonk-fun-solana", "missing-verified-program"]]),
+});
+
+function createConfiguredVenueRegistry(profile, security) {
+  const configured = (profile.venues ?? profile.programs ?? []).map((venue) => ({
+    chain: profile.key,
+    family: profile.family,
+    id: venue.id,
+    identityStatus: "verified",
+    securityCapability: profile.family === "solana"
+      ? "supported"
+      : security.supports({ chain: profile.key, venue: venue.id })
+        ? "supported"
+        : "discovery-only",
+    verifiedContracts: profile.family === "evm" ? Object.values(venue.contracts) : [],
+    disabledReason: null,
+  }));
+  const disabled = (DISABLED_VENUES[profile.key] ?? []).map(([id, disabledReason]) => ({
+    chain: profile.key,
+    family: profile.family,
+    id,
+    identityStatus: "disabled-unverified",
+    securityCapability: "unsupported",
+    verifiedContracts: [],
+    disabledReason,
+  }));
+  return createVenueRegistry([...configured, ...disabled]);
+}
 
 function migrateLegacyRobinhoodState(projectRoot, dataDir) {
   if (LEGACY_STATE_FILES.some((name) => fs.existsSync(path.join(dataDir, name)))) return false;
@@ -264,6 +303,7 @@ function createSolanaApplication(loaded, { dependencies, projectRoot, readOnly }
   const store = getStoreFor(dataDir, dependencies.storeSettings, { readOnly });
   const venues = [...createPumpAdapters(loaded.profile), ...createRaydiumAdapters(loaded.profile)];
   const registry = createSolanaSecurityRegistry(loaded.profile);
+  const venueRegistry = createConfiguredVenueRegistry(loaded.profile, registry);
   const walletCatalog = loadWalletLabels(path.join(projectRoot, "data", "wallets", "solana.json"));
   const services = dependencies.services ?? Object.freeze({
     analyze: (event) => analyzeSolanaCandidate(event, {
@@ -295,6 +335,7 @@ function createSolanaApplication(loaded, { dependencies, projectRoot, readOnly }
     venues: Object.freeze(venues),
     venueIds: Object.freeze(venues.map((venue) => venue.id)),
     securityRegistry: registry,
+    venueRegistry,
     services,
   });
   const context = Object.freeze({ config });
@@ -327,9 +368,14 @@ export function createApp({ chainKey, command = "watch", env = process.env, depe
   const venues = loaded.profile.venues.map((venue) => instantiateVenue(loaded.profile, venue));
   if (chainKey === "robinhood") venues.push(createPonsAdapter());
   const registry = securityRegistry(loaded.profile);
+  const venueRegistry = createConfiguredVenueRegistry(loaded.profile, registry);
   const services = createServices({ loaded, rpcContext, registry, projectRoot, dependencies });
   const commands = dependencies.commands ?? defaultCommands();
   const verifyChain = dependencies.assertChain ?? assertRpcChain;
+  const verifyVenues = dependencies.verifyVenueDeployments ?? ((entries) =>
+    rpcContext.discoverySessions.run((provider) => verifyVenueDeployments(entries, {
+      getCode: (address) => provider.getCode(address),
+    })));
   const config = Object.freeze({
     ...loaded,
     dataDir,
@@ -342,13 +388,16 @@ export function createApp({ chainKey, command = "watch", env = process.env, depe
     venues: Object.freeze(venues),
     venueIds: Object.freeze(venues.map((venue) => venue.id)),
     securityRegistry: registry,
+    venueRegistry,
     analysisRpcCircuit: createAnalysisRpcCircuit(),
     services,
   });
   const context = Object.freeze({ config });
   let chainVerification;
   const ensureChain = () => {
-    chainVerification ??= Promise.resolve().then(() => verifyChain(rpcContext, loaded.profile.id));
+    chainVerification ??= Promise.resolve()
+      .then(() => verifyChain(rpcContext, loaded.profile.id))
+      .then(() => verifyVenues(venueRegistry.list()));
     return chainVerification;
   };
 

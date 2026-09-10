@@ -39,6 +39,17 @@ function candidate(overrides = {}) {
 }
 
 describe("candidate RPC gate", () => {
+  it("applies venue capability before sellability and scoring", () => {
+    let sellabilityReads = 0;
+    const result = routeCandidate(candidate(), {
+      thresholds,
+      venueRegistry: { route: () => ({ action: "record-only", reason: "venue-security-unsupported" }) },
+      supportsSellability: () => { sellabilityReads += 1; return true; },
+    });
+    assert.deepEqual(result, { action: "record-only", reason: "venue-security-unsupported" });
+    assert.equal(sellabilityReads, 0);
+  });
+
   it("skips venues without strict sellability support before analysis", () => {
     const result = routeCandidate(candidate({ venue: "uniswap-v4-base" }), {
       thresholds,
