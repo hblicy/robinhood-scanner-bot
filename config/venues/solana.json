@@ -1,0 +1,15 @@
+[
+  {
+    "chain": "solana",
+    "family": "solana",
+    "id": "stonk-fun-solana",
+    "identityStatus": "disabled-unverified",
+    "programId": null,
+    "idlRevision": null,
+    "discoveryCapability": "disabled",
+    "securityCapability": "unsupported",
+    "verifiedContracts": [],
+    "disabledReason": "missing-verified-program-or-idl",
+    "evidenceUrl": "https://www.stonksx.fun/docs"
+  }
+]

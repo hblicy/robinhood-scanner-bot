@@ -67,15 +67,20 @@ describe("pair classification", () => {
   });
 
   it("lets Solana instruction adapters use the same injected classification", () => {
-    const result = chooseTargetPair("stockMint", "memeMint", () => ({
+    let sides = null;
+    const result = chooseTargetPair("stockMint", "memeMint", (_left, _right, options) => {
+      sides = options;
+      return {
       candidateKind: "meme",
       targetToken: "memeMint",
       referenceAsset: "stockMint",
-      targetSide: "token1",
+      targetSide: "quote",
       referenceAssetKind: "stock",
-    }));
+      };
+    });
     assert.equal(result.token, "memeMint");
     assert.equal(result.quoteToken, "stockMint");
     assert.equal(result.targetIsA, false);
+    assert.deepEqual(sides, { leftSide: "base", rightSide: "quote" });
   });
 });

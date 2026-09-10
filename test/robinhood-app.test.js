@@ -18,6 +18,19 @@ afterEach(() => {
 });
 
 describe("Robinhood multichain application", () => {
+  it("fails closed when an interrupted asset refresh journal is present", () => {
+    const projectRoot = tempRoot();
+    const assetDirectory = path.join(projectRoot, "config", "assets");
+    fs.mkdirSync(assetDirectory, { recursive: true });
+    fs.writeFileSync(path.join(assetDirectory, ".xstocks-refresh-transaction.json"), "{}");
+
+    assert.throws(() => createApp({
+      chainKey: "robinhood",
+      env: {},
+      dependencies: { projectRoot, assetConfigRoot: projectRoot },
+    }), /asset catalog refresh is incomplete.*refresh-assets -- xstocks/i);
+  });
+
   it("restores and persists the chain-scoped monthly RPC counter", () => {
     const projectRoot = tempRoot();
     const dataDir = path.join(projectRoot, "data", "robinhood");

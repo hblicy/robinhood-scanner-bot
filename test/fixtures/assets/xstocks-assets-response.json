@@ -1,0 +1,48 @@
+{
+  "nodes": [
+    {
+      "id": "asset-aapl",
+      "name": "Apple xStock",
+      "symbol": "AAPLx",
+      "isin": "CH1436219451",
+      "deployments": [
+        {
+          "address": "XsaQTCgebC2KPbf27KUhdv5JFvHhQ4GDAPURwrEhAzb",
+          "network": "Solana"
+        },
+        {
+          "address": "0x1111111111111111111111111111111111111111",
+          "network": "Ethereum"
+        },
+        {
+          "address": "0x2222222222222222222222222222222222222222",
+          "network": "BinanceSmartChain"
+        }
+      ]
+    },
+    {
+      "id": "asset-nvda",
+      "name": "NVIDIA xStock",
+      "symbol": "NVDAx",
+      "isin": "CH1436219485",
+      "deployments": [
+        {
+          "address": "Xsc9qvGR1efVDFGLrVsmkzv3qi45LTBjeUKSPmx9qEh",
+          "network": "Solana"
+        },
+        {
+          "address": "0x3333333333333333333333333333333333333333",
+          "network": "Ethereum"
+        },
+        {
+          "address": "0x4444444444444444444444444444444444444444",
+          "network": "BinanceSmartChain"
+        }
+      ]
+    }
+  ],
+  "page": {
+    "currentPage": 0,
+    "hasNextPage": false
+  }
+}

@@ -1,6 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
+  dexScreener,
   geckoNewPools,
   getDexPaprikaPool,
   getDexPaprikaTopPools,
@@ -61,6 +62,25 @@ describe("selectDexPair", () => {
     }), reversed);
   });
 
+  it("selects a bound Solana pair when the target mint is on the quote side", () => {
+    const meme = "Xsc9qvGR1efVDFGLrVsmkzv3qi45LTBjeUKSPmx9qEh";
+    const stock = "XsaQTCgebC2KPbf27KUhdv5JFvHhQ4GDAPURwrEhAzb";
+    const pool = "HJPjoWUrhoZzkECZGqa9vYpAT9xLj3LNG7hp3pbPB7C2";
+    const reversed = {
+      chainId: "solana",
+      pairAddress: pool,
+      baseToken: { address: stock },
+      quoteToken: { address: meme },
+      liquidity: { usd: 100 },
+    };
+    assert.equal(selectDexPair([reversed], {
+      chain: "solana",
+      token: meme,
+      pool,
+      quote: stock,
+    }), reversed);
+  });
+
   it("selects only the exact event pool and quote", () => {
     const selected = selectDexPair([pair(WRONG_POOL, 1_000_000), pair(EXACT_POOL, 100)], {
       token: TOKEN,
@@ -95,6 +115,39 @@ describe("selectDexPair", () => {
     const basePair = { ...pair(EXACT_POOL, 100), chainId: "base" };
     assert.equal(selectDexPair([basePair], { token: TOKEN, chain: "robinhood" }), null);
     assert.equal(selectDexPair([basePair], { token: TOKEN, chain: "base" }), basePair);
+  });
+});
+
+describe("dexScreener", () => {
+  it("normalizes quote-side target price and trade direction without borrowing base-token valuation", async () => {
+    const meme = "Xsc9qvGR1efVDFGLrVsmkzv3qi45LTBjeUKSPmx9qEh";
+    const stock = "XsaQTCgebC2KPbf27KUhdv5JFvHhQ4GDAPURwrEhAzb";
+    const pool = "HJPjoWUrhoZzkECZGqa9vYpAT9xLj3LNG7hp3pbPB7C2";
+    const result = await dexScreener(meme, { pool, quote: stock }, {
+      profile: { family: "solana", dexScreenerSlug: "solana" },
+      fetchImpl: async () => jsonResponse([{
+        chainId: "solana",
+        pairAddress: pool,
+        baseToken: { address: stock, symbol: "AAPLx" },
+        quoteToken: { address: meme, symbol: "MEME" },
+        priceUsd: "200",
+        priceNative: "1000000",
+        marketCap: 1_000_000_000_000,
+        fdv: 1_000_000_000_000,
+        liquidity: { usd: 50_000 },
+        volume: { m5: 1_000, h1: 2_000, h24: 3_000 },
+        txns: { m5: { buys: 99, sells: 1 }, h1: { buys: 80, sells: 20 } },
+      }]),
+    });
+
+    assert.equal(result.symbol, "MEME");
+    assert.equal(result.priceUsd, 0.0002);
+    assert.equal(result.mcapUsd, null);
+    assert.equal(result.fdvUsd, null);
+    assert.equal(result.buys5m, 1);
+    assert.equal(result.sells5m, 99);
+    assert.equal(result.buys1h, 20);
+    assert.equal(result.sells1h, 80);
   });
 });
 

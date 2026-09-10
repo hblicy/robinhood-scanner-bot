@@ -43,6 +43,7 @@ import { createVenueRegistry } from "./venues/registry.js";
 import { verifyVenueDeployments } from "./venues/verify.js";
 import { createRpcUsageBudget } from "./rpc-usage-budget.js";
 import { createAssetCatalogCache, createAssetRefreshScheduler } from "./assets/cache.js";
+import { assertNoPendingAssetTransaction } from "./assets/transaction.js";
 import { createPairClassifier } from "./assets/pair.js";
 
 const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -63,7 +64,7 @@ const DISABLED_VENUES = Object.freeze({
     ["pons-v1-robinhood", "missing-verified-abi-or-event-source"],
     ["long-robinhood", "missing-verified-factory"],
   ]),
-  solana: Object.freeze([["stonk-fun-solana", "missing-verified-program"]]),
+  solana: Object.freeze([]),
 });
 
 function createConfiguredVenueRegistry(profile, security) {
@@ -80,7 +81,7 @@ function createConfiguredVenueRegistry(profile, security) {
     verifiedContracts: profile.family === "evm" ? Object.values(venue.contracts) : [],
     disabledReason: null,
   }));
-  const disabled = (DISABLED_VENUES[profile.key] ?? []).map(([id, disabledReason]) => ({
+  const disabled = profile.venueCapabilities ?? (DISABLED_VENUES[profile.key] ?? []).map(([id, disabledReason]) => ({
     chain: profile.key,
     family: profile.family,
     id,
@@ -157,6 +158,7 @@ function createAssetRuntime(loaded, dataDir, dependencies) {
     `${loaded.profile.key}.json`
   );
   const runtimePath = path.join(dataDir, "asset-catalog.json");
+  assertNoPendingAssetTransaction(shippedPath, fs.existsSync);
   const cache = createAssetCatalogCache({
     readJson: dependencies.readAssetJson ?? readJsonIfPresent,
     atomicWriteJson: dependencies.writeAssetJson ?? writeRpcUsage,

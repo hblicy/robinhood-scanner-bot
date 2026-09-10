@@ -3,13 +3,23 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { getAddress, JsonRpcProvider } from "ethers";
+import { Connection, PublicKey } from "@solana/web3.js";
 import { createAssetCatalog, serializeAssetCatalog } from "../src/assets/catalog.js";
+import { ASSET_TRANSACTION_JOURNAL } from "../src/assets/transaction.js";
 import { fetchJson } from "../src/assets/sources/http-json.js";
+import { readEnvFile } from "../src/env.js";
+import {
+  combineXStocksPages,
+  fetchAllXStocksPages,
+  parseXStocksAssets,
+  refreshXStocksCatalogs,
+} from "../src/assets/sources/xstocks.js";
 
 const BASE_STOCKS_URL = "https://www.base.org/stocks";
 
 // Sources remain disabled until a stable official machine-readable schema is verified.
 const SOURCES = Object.freeze({
+  xstocks: Object.freeze({ enabled: true }),
   robinhood: Object.freeze({
     enabled: false,
     reason: "no verified machine-readable stock asset source",
@@ -55,6 +65,223 @@ function atomicWriteJson(file, document) {
   } finally {
     if (fs.existsSync(temporary)) fs.rmSync(temporary, { force: true });
   }
+}
+
+function validatedJournalEntries(journal, directory) {
+  if (journal?.schemaVersion !== 1 || !/^[A-Za-z0-9-]+$/.test(journal?.transactionId || "")) {
+    throw new Error("asset catalog transaction journal is invalid");
+  }
+  if (!Array.isArray(journal.entries) || journal.entries.length === 0) {
+    throw new Error("asset catalog transaction journal has no entries");
+  }
+  const seen = new Set();
+  return journal.entries.map(({ chain, hadTarget }) => {
+    if (!/^[a-z0-9-]+$/.test(chain || "") || seen.has(chain) || typeof hadTarget !== "boolean") {
+      throw new Error("asset catalog transaction journal entry is invalid");
+    }
+    seen.add(chain);
+    const target = path.resolve(directory, `${chain}.json`);
+    return {
+      target,
+      temporary: `${target}.${journal.transactionId}.tmp`,
+      backup: `${target}.${journal.transactionId}.bak`,
+      hadTarget,
+    };
+  });
+}
+
+export function recoverAtomicJsonBatch({
+  directory = path.resolve("config", "assets"),
+  fsImpl = fs,
+} = {}) {
+  const resolvedDirectory = path.resolve(directory);
+  const journalFile = path.join(resolvedDirectory, ASSET_TRANSACTION_JOURNAL);
+  if (!fsImpl.existsSync(journalFile)) return false;
+  let journal;
+  try {
+    journal = JSON.parse(fsImpl.readFileSync(journalFile, "utf8"));
+  } catch (cause) {
+    throw new Error(`asset catalog transaction journal cannot be read: ${cause.message}`, { cause });
+  }
+  const entries = validatedJournalEntries(journal, resolvedDirectory);
+  try {
+    for (const entry of entries) {
+      if (entry.hadTarget) {
+        if (!fsImpl.existsSync(entry.backup)) {
+          throw new Error(`asset catalog backup is missing: ${entry.backup}`);
+        }
+        fsImpl.copyFileSync(entry.backup, entry.target);
+      } else if (fsImpl.existsSync(entry.target)) {
+        fsImpl.rmSync(entry.target, { force: true });
+      }
+    }
+    fsImpl.rmSync(journalFile, { force: true });
+    for (const entry of entries) {
+      if (fsImpl.existsSync(entry.temporary)) fsImpl.rmSync(entry.temporary, { force: true });
+      if (fsImpl.existsSync(entry.backup)) fsImpl.rmSync(entry.backup, { force: true });
+    }
+  } catch (cause) {
+    throw new Error(`asset catalog transaction recovery failed: ${cause.message}`, { cause });
+  }
+  return true;
+}
+
+export function atomicWriteJsonBatch(documents, {
+  directory = path.resolve("config", "assets"),
+  fsImpl = fs,
+  transactionId = randomUUID(),
+} = {}) {
+  if (!documents || typeof documents !== "object" || Array.isArray(documents)) {
+    throw new Error("asset catalog batch must be an object");
+  }
+  const resolvedDirectory = path.resolve(directory);
+  recoverAtomicJsonBatch({ directory: resolvedDirectory, fsImpl });
+  const entries = Object.entries(documents).map(([chain, document]) => {
+    if (!/^[a-z0-9-]+$/.test(chain)) throw new Error(`invalid asset catalog chain: ${chain}`);
+    const target = path.resolve(resolvedDirectory, `${chain}.json`);
+    return {
+      target,
+      temporary: `${target}.${transactionId}.tmp`,
+      backup: `${target}.${transactionId}.bak`,
+      document,
+      hadTarget: false,
+    };
+  });
+  if (entries.length === 0) throw new Error("asset catalog batch is empty");
+  const journalFile = path.join(resolvedDirectory, ASSET_TRANSACTION_JOURNAL);
+  const journalTemporary = `${journalFile}.${transactionId}.tmp`;
+  fsImpl.mkdirSync(resolvedDirectory, { recursive: true });
+  for (const entry of entries) entry.hadTarget = fsImpl.existsSync(entry.target);
+  try {
+    for (const entry of entries) {
+      fsImpl.writeFileSync(entry.temporary, `${JSON.stringify(entry.document, null, 2)}\n`, "utf8");
+    }
+    for (const entry of entries) {
+      if (entry.hadTarget) fsImpl.copyFileSync(entry.target, entry.backup);
+    }
+    fsImpl.writeFileSync(journalTemporary, `${JSON.stringify({
+      schemaVersion: 1,
+      transactionId,
+      entries: entries.map(({ target, hadTarget }) => ({
+        chain: path.basename(target, ".json"),
+        hadTarget,
+      })),
+    }, null, 2)}\n`, "utf8");
+    fsImpl.renameSync(journalTemporary, journalFile);
+    for (const entry of entries) fsImpl.renameSync(entry.temporary, entry.target);
+    fsImpl.rmSync(journalFile, { force: true });
+  } catch (cause) {
+    const rollbackErrors = [];
+    if (fsImpl.existsSync(journalFile)) {
+      try {
+        recoverAtomicJsonBatch({ directory: resolvedDirectory, fsImpl });
+      } catch (rollbackCause) {
+        rollbackErrors.push(rollbackCause.message);
+      }
+    } else {
+      for (const entry of [...entries].reverse()) {
+        try {
+          if (fsImpl.existsSync(entry.backup)) {
+            fsImpl.copyFileSync(entry.backup, entry.target);
+          } else if (!entry.hadTarget && fsImpl.existsSync(entry.target) && !fsImpl.existsSync(entry.temporary)) {
+            fsImpl.rmSync(entry.target, { force: true });
+          }
+        } catch (rollbackCause) {
+          rollbackErrors.push(`${entry.target}: ${rollbackCause.message}`);
+        }
+      }
+    }
+    const suffix = rollbackErrors.length ? `; rollback failed: ${rollbackErrors.join(", ")}` : "";
+    throw new Error(`asset catalog batch publish failed: ${cause.message}${suffix}`, { cause });
+  } finally {
+    if (fsImpl.existsSync(journalTemporary)) fsImpl.rmSync(journalTemporary, { force: true });
+    if (!fsImpl.existsSync(journalFile)) {
+      for (const entry of entries) {
+        if (fsImpl.existsSync(entry.temporary)) fsImpl.rmSync(entry.temporary, { force: true });
+        if (fsImpl.existsSync(entry.backup)) fsImpl.rmSync(entry.backup, { force: true });
+      }
+    }
+  }
+}
+
+function readJsonIfPresent(file) {
+  try {
+    return JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch (error) {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+async function solanaAccountMap(connection, addresses) {
+  const result = new Map();
+  for (let offset = 0; offset < addresses.length; offset += 100) {
+    const chunk = addresses.slice(offset, offset + 100);
+    const accounts = await connection.getMultipleAccountsInfo(
+      chunk.map((address) => new PublicKey(address)),
+      "finalized"
+    );
+    chunk.forEach((address, index) => {
+      const account = accounts[index];
+      result.set(address, {
+        exists: account != null,
+        owner: account?.owner?.toBase58?.() ?? null,
+      });
+    });
+  }
+  return result;
+}
+
+export async function runXStocksRefresh({
+  fetchImpl = fetch,
+  env = process.env,
+  publish = (documents) => atomicWriteJsonBatch(documents),
+  now = Date.now,
+} = {}) {
+  recoverAtomicJsonBatch();
+  const pages = await fetchAllXStocksPages({ fetchImpl });
+  const payload = combineXStocksPages(pages);
+  const solanaDocument = parseXStocksAssets(payload, {
+    network: "Solana", chain: "solana", family: "solana", now,
+  });
+  const solana = new Connection(env.SOLANA_RPC_URL || "https://api.mainnet-beta.solana.com", "finalized");
+  const ethereum = new JsonRpcProvider(
+    env.ETHEREUM_ANALYSIS_RPC_URL || env.ETHEREUM_DISCOVERY_RPC_URL || "https://ethereum-rpc.publicnode.com",
+    1,
+    { staticNetwork: true }
+  );
+  const bsc = new JsonRpcProvider(
+    env.BSC_ANALYSIS_RPC_URL || env.BSC_DISCOVERY_RPC_URL || "https://bsc-rpc.publicnode.com",
+    56,
+    { staticNetwork: true }
+  );
+  try {
+    const solanaAccounts = await solanaAccountMap(solana, solanaDocument.assets.map(({ address }) => address));
+    return await refreshXStocksCatalogs({
+      pages,
+      readers: {
+        solana: async (address) => solanaAccounts.get(address),
+        ethereum: (address) => ethereum.getCode(address),
+        bsc: (address) => bsc.getCode(address),
+      },
+      existingDocuments: Object.fromEntries(["solana", "ethereum", "bsc"].map((chain) => [
+        chain,
+        readJsonIfPresent(path.resolve("config", "assets", `${chain}.json`)),
+      ])),
+      publish,
+      now,
+    });
+  } finally {
+    ethereum.destroy();
+    bsc.destroy();
+  }
+}
+
+export function loadRefreshEnvironment({
+  file = path.resolve(".env"),
+  processEnv = process.env,
+} = {}) {
+  return { ...readEnvFile(file), ...processEnv };
 }
 
 function attributeValue(attributes, name) {
@@ -197,15 +424,19 @@ export async function refreshAssetCatalog({
   return serialized;
 }
 
-export async function runAssetRefresh(argv = process.argv.slice(2)) {
+export async function runAssetRefresh(
+  argv = process.argv.slice(2),
+  { env = loadRefreshEnvironment() } = {}
+) {
   const chain = argv[0];
   const source = SOURCES[chain];
   if (!source) throw new Error(`unsupported asset source ${chain || "<missing>"}`);
   if (!source.enabled) throw new Error(`asset source ${chain} disabled-unverified: ${source.reason}`);
+  if (chain === "xstocks") return runXStocksRefresh({ env });
   const output = path.resolve("config", "assets", `${chain}.json`);
   if (chain === "base") {
-    const rpcUrl = process.env.BASE_ANALYSIS_RPC_URL
-      || process.env.BASE_DISCOVERY_RPC_URL
+    const rpcUrl = env.BASE_ANALYSIS_RPC_URL
+      || env.BASE_DISCOVERY_RPC_URL
       || "https://mainnet.base.org";
     const provider = new JsonRpcProvider(rpcUrl, 8453, { staticNetwork: true });
     try {
@@ -221,11 +452,22 @@ export async function runAssetRefresh(argv = process.argv.slice(2)) {
   return refreshAssetCatalog({ ...source, chain, write: (document) => atomicWriteJson(output, document) });
 }
 
+export function formatAssetRefreshResult(result) {
+  if (result?.chain && Array.isArray(result.assets)) {
+    return `asset catalog refreshed: ${result.chain} assets=${result.assets.length}`;
+  }
+  const chains = ["solana", "ethereum", "bsc"];
+  if (chains.every((chain) => Array.isArray(result?.[chain]?.assets))) {
+    return `asset catalogs refreshed: ${chains.map((chain) => `${chain}=${result[chain].assets.length}`).join(" ")}`;
+  }
+  throw new Error("asset refresh returned an invalid result");
+}
+
 const isMain = process.argv[1]
   && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url;
 if (isMain) {
   runAssetRefresh().then(
-    (catalog) => console.log(`asset catalog refreshed: ${catalog.chain} assets=${catalog.assets.length}`),
+    (catalog) => console.log(formatAssetRefreshResult(catalog)),
     (error) => {
       console.error(error.message);
       process.exitCode = 1;

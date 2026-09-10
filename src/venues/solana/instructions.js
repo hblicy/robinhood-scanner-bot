@@ -63,19 +63,23 @@ export function requireAccounts(context, instruction, count, adapterId) {
   return instruction.accounts;
 }
 
-export function chooseTargetPair(mintA, mintB, quoteMints) {
+export function pickPoolAssets(mintA, mintB, quoteMints) {
   if (typeof quoteMints === "function") {
-    const classified = quoteMints(mintA, mintB);
+    const classified = quoteMints(mintA, mintB, { leftSide: "base", rightSide: "quote" });
     if (!classified || classified.candidateKind !== "meme") return null;
     return {
       ...classified,
       token: classified.targetToken,
       quoteToken: classified.referenceAsset,
-      targetIsA: classified.targetToken === mintA,
+      targetIsA: classified.targetSide === "base",
     };
   }
   const aQuote = quoteMints.has(mintA);
   const bQuote = quoteMints.has(mintB);
   if (aQuote === bQuote) return null;
-  return aQuote ? { token: mintB, quoteToken: mintA, targetIsA: false } : { token: mintA, quoteToken: mintB, targetIsA: true };
+  return aQuote
+    ? { token: mintB, quoteToken: mintA, targetToken: mintB, referenceAsset: mintA, targetSide: "quote", targetIsA: false }
+    : { token: mintA, quoteToken: mintB, targetToken: mintA, referenceAsset: mintB, targetSide: "base", targetIsA: true };
 }
+
+export const chooseTargetPair = pickPoolAssets;

@@ -197,6 +197,15 @@ export async function dexScreener(token, binding = {}, { profile = CHAIN, fetchI
     || String(profile.family).toLowerCase() === "solana" && p.baseToken?.address === token;
   const target = targetIsBase ? p.baseToken : p.quoteToken;
   const reference = targetIsBase ? p.quoteToken : p.baseToken;
+  const basePriceUsd = num(p.priceUsd);
+  const basePriceInQuote = Number(p.priceNative);
+  const targetPriceUsd = targetIsBase
+    ? basePriceUsd
+    : Number.isFinite(basePriceInQuote) && basePriceInQuote > 0
+      ? basePriceUsd / basePriceInQuote
+      : null;
+  const tx5m = p.txns?.m5 ?? {};
+  const tx1h = p.txns?.h1 ?? {};
   const socials = p.info?.socials || [];
   const websites = p.info?.websites || [];
   return {
@@ -209,17 +218,17 @@ export async function dexScreener(token, binding = {}, { profile = CHAIN, fetchI
     baseAddress: target?.address || null,
     quoteAddress: reference?.address || null,
     marketBound: Boolean(binding.pool && binding.quote),
-    priceUsd: num(p.priceUsd),
-    mcapUsd: num(p.marketCap) || num(p.fdv),
-    fdvUsd: num(p.fdv),
+    priceUsd: targetPriceUsd,
+    mcapUsd: targetIsBase ? num(p.marketCap) || num(p.fdv) : null,
+    fdvUsd: targetIsBase ? num(p.fdv) : null,
     liquidityUsd: num(p.liquidity?.usd),
     volume5m: num(p.volume?.m5),
     volume1h: num(p.volume?.h1),
     volume24h: num(p.volume?.h24),
-    buys5m: p.txns?.m5?.buys || 0,
-    sells5m: p.txns?.m5?.sells || 0,
-    buys1h: p.txns?.h1?.buys || 0,
-    sells1h: p.txns?.h1?.sells || 0,
+    buys5m: (targetIsBase ? tx5m.buys : tx5m.sells) || 0,
+    sells5m: (targetIsBase ? tx5m.sells : tx5m.buys) || 0,
+    buys1h: (targetIsBase ? tx1h.buys : tx1h.sells) || 0,
+    sells1h: (targetIsBase ? tx1h.sells : tx1h.buys) || 0,
     pairCreatedAt: p.pairCreatedAt || null,
     twitter: socials.find((s) => s.type === "twitter")?.url || null,
     telegram: socials.find((s) => s.type === "telegram")?.url || null,

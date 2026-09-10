@@ -1,4 +1,5 @@
 import { PublicKey } from "@solana/web3.js";
+import fs from "node:fs";
 
 function deepFreeze(value) {
   if (!value || typeof value !== "object" || Object.isFrozen(value)) return value;
@@ -23,6 +24,10 @@ function defineProgram(value) {
 const PUMP_REVISION = "9c82f61cb711b044a17f770ab8ce9f9bdf78f333";
 const RAYDIUM_REVISION = "28411d09ad17e598f83885f65c4b6d25a172ced0";
 const VERIFIED_AT_SLOT = 445_546_375;
+const VENUE_CAPABILITIES = JSON.parse(fs.readFileSync(
+  new URL("../../config/venues/solana.json", import.meta.url),
+  "utf8"
+));
 
 export const SOLANA_PROFILE = deepFreeze({
   key: "solana",
@@ -39,6 +44,7 @@ export const SOLANA_PROFILE = deepFreeze({
     { symbol: "USDC", address: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" },
     { symbol: "USDT", address: "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB" },
   ],
+  venueCapabilities: VENUE_CAPABILITIES,
   programs: [
     defineProgram({
       id: "pump-bonding-curve",
