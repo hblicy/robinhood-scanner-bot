@@ -50,6 +50,7 @@ describe("four independent EVM applications", () => {
         "pancakeswap-v3-bsc",
         "pancakeswap-infinity-cl-bsc",
         "four-meme-v2-bsc",
+        "flap-v5-bsc",
       ],
       robinhood: ["uniswap-v2-robinhood", "o1-v4-robinhood", "pons-v2-robinhood"],
     };

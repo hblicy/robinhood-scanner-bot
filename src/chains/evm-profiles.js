@@ -213,6 +213,21 @@ export const EVM_PROFILES = deepFreeze({
           helper: getAddress("0xF251F83e40a78868FcfA3FA4599Dad6494E46034"),
         },
       },
+      {
+        id: "flap-v5-bsc",
+        sourceKind: "launchpad",
+        version: 1,
+        protocolVersion: "v5.23.0",
+        docsVersion: "v5.14.16",
+        deploymentBlock: 0,
+        verifiedAtBlock: 121_047_803,
+        sourceUrl: "https://docs.flap.sh/flap/developers/deployed-contract-addresses",
+        contracts: {
+          portal: getAddress("0xe2cE6ab80874Fa9Fa2aAE65D277Dd6B8e65C9De0"),
+          vaultPortal: getAddress("0x90497450f2a706f1951b5bdda52B4E5d16f34C06"),
+          taxTokenV3: getAddress("0x024f18294970B5c76c0691b87f138A0317156422"),
+        },
+      },
     ],
   }),
   robinhood: defineEvmProfile({

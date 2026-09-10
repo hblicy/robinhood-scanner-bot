@@ -10,6 +10,7 @@ import { instanceLockPort } from "./instance-lock.js";
 import { createAerodromeClassicAdapter, createAerodromeSlipstreamAdapter } from "./venues/evm/aerodrome.js";
 import { createClankerAdapter } from "./venues/evm/clanker.js";
 import { createFourMemeAdapter } from "./venues/evm/four-meme.js";
+import { createFlapAdapter } from "./venues/evm/flap.js";
 import { createO1Adapter } from "./venues/evm/o1.js";
 import { createPancakeInfinityAdapter, createPancakeV2Adapter, createPancakeV3Adapter } from "./venues/evm/pancakeswap.js";
 import { createPonsAdapter } from "./venues/evm/pons.js";
@@ -17,6 +18,7 @@ import { createUniswapV2Adapter, createUniswapV3Adapter, createUniswapV4Adapter 
 import { createEvmSecurityRegistry, createV2SecurityEntry } from "./security/evm/index.js";
 import { createO1SecurityEntry } from "./security/evm/o1.js";
 import { createFourMemeSecurityEntry } from "./security/evm/four-meme.js";
+import { createFlapSecurityEntry } from "./security/evm/flap.js";
 import { analyze, honeypotCheck } from "./analyze.js";
 import { ERC20_ABI } from "./abis.js";
 import { dexScreener } from "./market.js";
@@ -50,7 +52,7 @@ const DISABLED_VENUES = Object.freeze({
     ["stonks-exchange-base", "missing-verified-factory"],
     ["basestonk-base", "missing-verified-factory"],
   ]),
-  bsc: Object.freeze([["flap-bsc", "missing-verified-factory"]]),
+  bsc: Object.freeze([]),
   robinhood: Object.freeze([
     ["pons-v1-robinhood", "missing-verified-abi-or-event-source"],
     ["long-robinhood", "missing-verified-factory"],
@@ -300,6 +302,15 @@ function instantiateVenue(profile, venue, classifyPair) {
       version: venue.version,
     });
   }
+  if (venue.id === "flap-v5-bsc") {
+    return createFlapAdapter({
+      id: venue.id,
+      ...venue.contracts,
+      wrappedNative: profile.wrappedNative,
+      classifyPair,
+      version: venue.version,
+    });
+  }
   if (venue.id === "o1-v4-robinhood") {
     return createO1Adapter({
       id: venue.id,
@@ -311,7 +322,7 @@ function instantiateVenue(profile, venue, classifyPair) {
   throw new Error(`no discovery adapter for ${profile.key}|${venue.id}`);
 }
 
-function securityRegistry(profile, assetCatalog) {
+function securityRegistry(profile, assetCatalog, settings = {}) {
   const entries = profile.venues
     .filter(({ id }) => id.startsWith("uniswap-v2-") || id === "pancakeswap-v2-bsc")
     .map((venue) => createV2SecurityEntry({
@@ -332,6 +343,13 @@ function securityRegistry(profile, assetCatalog) {
   }
   const fourMeme = profile.venues.find(({ id }) => id === "four-meme-v2-bsc");
   if (fourMeme) entries.push(createFourMemeSecurityEntry(fourMeme));
+  const flap = profile.venues.find(({ id }) => id === "flap-v5-bsc");
+  if (flap) {
+    entries.push(createFlapSecurityEntry(flap, {
+      assetCatalog,
+      maxTaxBps: settings.maxTaxBps,
+    }));
+  }
   return createEvmSecurityRegistry(entries);
 }
 
@@ -526,7 +544,7 @@ export function createApp({ chainKey, command = "watch", env = process.env, depe
   const venues = loaded.profile.venues.map((venue) =>
     instantiateVenue(loaded.profile, venue, assets.classifyPair));
   if (chainKey === "robinhood") venues.push(createPonsAdapter());
-  const registry = securityRegistry(loaded.profile, assets.catalog);
+  const registry = securityRegistry(loaded.profile, assets.catalog, loaded.settings);
   const venueRegistry = createConfiguredVenueRegistry(loaded.profile, registry);
   const services = createServices({ loaded, rpcContext, registry, projectRoot, dependencies });
   const commands = dependencies.commands ?? defaultCommands();

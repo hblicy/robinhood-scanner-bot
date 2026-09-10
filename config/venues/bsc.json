@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "chain": "bsc",
+  "verifiedAt": "2026-09-10",
+  "venues": [
+    {
+      "id": "four-meme-v2-bsc",
+      "identityStatus": "verified",
+      "securityCapability": "supported",
+      "sourceUrl": "https://github.com/Four-Meme/Four-Smart-Contracts"
+    },
+    {
+      "id": "flap-v5-bsc",
+      "identityStatus": "verified",
+      "securityCapability": "supported",
+      "sourceUrl": "https://docs.flap.sh/flap/developers/deployed-contract-addresses",
+      "docsVersion": "v5.14.16",
+      "protocolVersion": "v5.23.0",
+      "contracts": {
+        "portal": "0xe2cE6ab80874Fa9Fa2aAE65D277Dd6B8e65C9De0",
+        "vaultPortal": "0x90497450f2a706f1951b5bdda52B4E5d16f34C06",
+        "taxTokenV3": "0x024f18294970B5c76c0691b87f138A0317156422"
+      }
+    }
+  ]
+}
