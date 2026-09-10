@@ -69,6 +69,17 @@ describe("analysis RPC circuit", () => {
     assert.deepEqual(await circuit.run(async () => 1), { status: "ok", value: 1 });
   });
 
+  it("does not mistake a DexScreener 429 for an analysis RPC limit", async () => {
+    const circuit = createAnalysisRpcCircuit();
+    const externalLimit = Object.assign(new Error("DexScreener unavailable"), {
+      code: "RETRYABLE_ANALYSIS",
+      source: "DexScreener pool",
+      cause: Object.assign(new Error("HTTP 429"), { status: 429 }),
+    });
+    await assert.rejects(() => circuit.run(async () => { throw externalLimit; }), (error) => error === externalLimit);
+    assert.deepEqual(await circuit.run(async () => 1), { status: "ok", value: 1 });
+  });
+
   it("exposes a typed local cooldown without calling analysis", async () => {
     let calls = 0;
     const circuit = createAnalysisRpcCircuit({ cooldownMs: 10_000 });

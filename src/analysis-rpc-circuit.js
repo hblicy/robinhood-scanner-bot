@@ -10,6 +10,29 @@ export class AnalysisRpcCooldownError extends Error {
   }
 }
 
+function retryableAnalysisSource(error) {
+  const pending = [error];
+  const visited = new Set();
+  while (pending.length) {
+    const current = pending.shift();
+    if (!current || visited.has(current)) continue;
+    if (typeof current === "object") {
+      visited.add(current);
+      if (current.code === "RETRYABLE_ANALYSIS" && typeof current.source === "string") {
+        return current.source;
+      }
+      pending.push(current.cause, current.error, current.info?.error);
+    }
+  }
+  return null;
+}
+
+export function isAnalysisRpcRateLimitError(error) {
+  if (!isRateLimitError(error)) return false;
+  const source = retryableAnalysisSource(error);
+  return source == null || source === "token metadata" || source === "bytecode";
+}
+
 export function bindAnalysisCircuit({ circuit, analyze, onOpen } = {}) {
   if (!circuit || typeof circuit.run !== "function") {
     throw new Error("analysis RPC circuit is required");
@@ -25,7 +48,7 @@ export function bindAnalysisCircuit({ circuit, analyze, onOpen } = {}) {
 export function createAnalysisRpcCircuit({
   now = Date.now,
   cooldownMs = ANALYSIS_RPC_COOLDOWN_MS,
-  isRateLimit = isRateLimitError,
+  isRateLimit = isAnalysisRpcRateLimitError,
 } = {}) {
   if (typeof now !== "function") throw new Error("analysis RPC circuit requires a clock");
   if (!Number.isFinite(cooldownMs) || cooldownMs <= 0) {
