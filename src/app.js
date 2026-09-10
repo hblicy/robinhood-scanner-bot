@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { Contract, getAddress } from "ethers";
+import { Contract, getAddress, keccak256 } from "ethers";
 import { createChainRpcContext } from "./chain.js";
 import { bytecodeFlags, readOwner, readTokenMeta, readV2Pool } from "./chain.js";
 import { loadChainConfig } from "./chains/load-chain.js";
@@ -19,6 +19,7 @@ import { createEvmSecurityRegistry, createV2SecurityEntry } from "./security/evm
 import { createO1SecurityEntry } from "./security/evm/o1.js";
 import { createFourMemeSecurityEntry } from "./security/evm/four-meme.js";
 import { createFlapSecurityEntry } from "./security/evm/flap.js";
+import { inspectReferenceAsset } from "./security/evm/reference-asset.js";
 import { analyze, honeypotCheck } from "./analyze.js";
 import { ERC20_ABI } from "./abis.js";
 import { dexScreener } from "./market.js";
@@ -358,6 +359,9 @@ function createServices({ loaded, rpcContext, registry, projectRoot, dependencie
   const provider = rpcContext.analysisProvider;
   const profile = loaded.profile;
   const walletCatalog = loadWalletLabels(path.join(projectRoot, "data", "wallets", "evm.json"));
+  const referenceAssetCache = new Map();
+  const readReferencePolicies = dependencies.readReferencePolicies
+    ?? (async (asset) => ({ restrictions: asset.restrictions ?? [] }));
   const unavailable = (source) => async () => {
     throw new Error(`${source} adapter unavailable for ${profile.key}`);
   };
@@ -378,6 +382,15 @@ function createServices({ loaded, rpcContext, registry, projectRoot, dependencie
     honeypotCheck: (input) => honeypotCheck(input, {
       provider,
       securityRegistry: registry,
+    }),
+    inspectReferenceAsset: (asset) => inspectReferenceAsset(asset, {
+      cache: referenceAssetCache,
+      readBytecodeHash: async ({ address }) => {
+        const code = await provider.getCode(address);
+        if (code === "0x") throw new Error(`reference asset has no code: ${address}`);
+        return keccak256(code);
+      },
+      readPolicies: readReferencePolicies,
     }),
     walletCatalog,
   });

@@ -42,6 +42,12 @@ export function formatAlert(report) {
   lines.push(
     `<b>创建者</b> ${creator ? `<code>${short(creator)}</code>` : "?"} 持仓 ${facts.creatorPct?.toFixed(1) ?? "?"}%  · 历史发币 ${facts.deployerTokens ?? "未知"}`
   );
+  const referenceRestrictions = [...new Set(
+    Array.isArray(report.referenceRestrictions) ? report.referenceRestrictions : []
+  )];
+  if (report.referenceAssetKind === "stock" && referenceRestrictions.length > 0) {
+    lines.push(`<b>股票底池限制</b> ${referenceRestrictions.map(esc).join("、")}`);
+  }
   lines.push(
     `<b>卖出安全</b> ${sellabilityLabel(sellability.status)}  原因 ${sellabilityReason}  买家样本 ${sellability.buyerSamples}  额度样本 ${sellability.ladderSamples}  真实卖家 ${sellability.meaningfulSellers}`
   );

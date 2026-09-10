@@ -115,6 +115,17 @@ describe("formatAlert", () => {
     assert.match(text, /不包含模拟或实盘交易功能/);
   });
 
+  it("prints stock reference restrictions without calling the meme a blocked honeypot", () => {
+    const text = formatAlert(makeReport({
+      referenceAssetKind: "stock",
+      referenceRestrictions: ["transfer-policy"],
+      sellability: { status: "confirmed", reason: null },
+    }));
+
+    assert.match(text, /股票底池限制<\/b> transfer-policy/);
+    assert.doesNotMatch(text, /卖出安全<\/b> 已阻断|风险 已阻断/);
+  });
+
   it("renders unsafe or malformed link protocols as plain labels", () => {
     const text = formatAlert(makeReport({
       links: {

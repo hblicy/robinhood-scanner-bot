@@ -477,4 +477,29 @@ describe("analyze data completeness", () => {
     }));
     assert.match(report.checks.find((check) => check.key === "honeypot").detail, /买税 0bps \/ 卖税 0bps/);
   });
+
+  it("preserves launchpad tax evidence carried by the sellability adapter", async () => {
+    const report = await analyze(event, dependencies({
+      honeypotCheck: async () => ({
+        honeypot: false,
+        complete: true,
+        sellOk: true,
+        reason: "confirmed real sells",
+        buyTaxBps: null,
+        sellTaxBps: null,
+        sellability: {
+          status: "confirmed",
+          reason: null,
+          buyerSamples: 3,
+          ladderSamples: 2,
+          meaningfulSellers: 3,
+          buyTaxBps: 100,
+          sellTaxBps: 200,
+        },
+      }),
+    }));
+
+    assert.equal(report.facts.buyTaxBps, 100);
+    assert.equal(report.facts.sellTaxBps, 200);
+  });
 });

@@ -278,6 +278,14 @@ export function sellabilityResult(status, reason, evidence = {}) {
       ? evidence.quoteOutflowReceipts
       : 0;
   }
+  for (const field of ["buyTaxBps", "sellTaxBps"]) {
+    if (Number.isFinite(evidence[field]) && evidence[field] >= 0 && evidence[field] <= 10_000) {
+      result[field] = evidence[field];
+    }
+  }
+  if (typeof evidence.taxModel === "string" && evidence.taxModel !== "") {
+    result.taxModel = evidence.taxModel;
+  }
   return result;
 }
 
@@ -300,6 +308,9 @@ export function normalizeSellabilityEvidence(sellability, legacyHoneypot = null)
     evidenceMode: evidence.evidenceMode,
     bindingVerified: evidence.bindingVerified,
     quoteOutflowReceipts: evidence.quoteOutflowReceipts,
+    buyTaxBps: evidence.buyTaxBps,
+    sellTaxBps: evidence.sellTaxBps,
+    taxModel: evidence.taxModel,
   });
 
   const observedEvidenceComplete = normalized.evidenceMode === "observed-sells"
