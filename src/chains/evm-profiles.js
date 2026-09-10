@@ -152,6 +152,22 @@ export const EVM_PROFILES = deepFreeze({
           poolManager: getAddress("0x498581fF718922c3f8e6A244956aF099B2652b2b"),
         },
       },
+      {
+        id: "stonks-exchange-base",
+        sourceKind: "launchpad",
+        version: 1,
+        deploymentBlock: 50_140_059,
+        verifiedAtBlock: 51_121_229,
+        sourceUrl: "https://www.thestonks.exchange/about",
+        contracts: {
+          launcher: getAddress("0x4714f6EC81639Ca59EEBE634490a4d8671DCe7B4"),
+          launcherImplementation: getAddress("0x6a9f14e7742e8972fcF86429C5aa7DB56589806d"),
+          feeLocker: getAddress("0x71D1D363176723f85d98B8B430DF33cde89f0A7f"),
+          quoteRegistry: getAddress("0x4db9F13325A83662cf992184bc070755a212e95B"),
+          uniswapV3Factory: getAddress("0x33128a8fC17869897dcE68Ed026d694621f6FDfD"),
+          positionManager: getAddress("0x03a520b32C04BF3bEEf7BEb72E919cf822Ed34f1"),
+        },
+      },
     ],
   }),
   bsc: defineEvmProfile({

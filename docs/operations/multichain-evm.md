@@ -57,8 +57,11 @@ npm run watch:robinhood
 | Robinhood | Long | `disabled-unverified` | `missing-verified-factory` |
 | BNB Chain | Four.meme | `enabled` | 创建事件仅记录；毕业事件必须绑定同交易唯一 Pancake 池 |
 | BNB Chain | Flap | `enabled` | 创建事件仅记录；迁移后用 Portal `getTokenV8Safe` 校验底池、池地址及买卖税 |
+| Base | Stonks Exchange | `enabled` | Launcher 状态与 Uniswap V3 Factory 必须同时绑定事件池，只接受 Base 官方 B20 底池 |
+| Base | O1 | `disabled-unverified` | `stock-pair-route-not-supported` |
+| Base | BaseStonk | `disabled-unverified` | `missing-public-contract-registry` |
 
-O1、Four.meme 和 Flap 的 `enabled` 不代表原始发币立即推送：未解析池的 Launchpad 候选统一 `record-only`。股票底池自己的合规转账政策、暂停或倍率限制单独报告，不会改写目标 Meme 的 sellability；读取失败显示 `reference-check-unavailable`。Flap 配置税率超过 `MAX_TAX_BPS` 时直接标记 `blocked:excessive-tax`。
+O1、Four.meme、Flap 和 Stonks Exchange 的 `enabled` 不代表原始发币立即推送：未解析池的 Launchpad 候选统一 `record-only`；已解析池仍需至少 3 个独立真实卖家。卖出取证只回看最近 250 个区块，每个候选最多读取 500 条目标转入日志和 30 笔回执。股票底池自己的合规转账政策、暂停或倍率限制单独报告，不会改写目标 Meme 的 sellability；读取失败显示 `reference-check-unavailable`。Flap 配置税率超过 `MAX_TAX_BPS` 时直接标记 `blocked:excessive-tax`。
 
 ## 状态与回滚
 

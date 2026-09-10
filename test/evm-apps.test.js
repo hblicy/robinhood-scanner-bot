@@ -44,6 +44,7 @@ describe("four independent EVM applications", () => {
         "aerodrome-slipstream-v2-base",
         "aerodrome-slipstream-v3-base",
         "clanker-v4-base",
+        "stonks-exchange-base",
       ],
       bsc: [
         "pancakeswap-v2-bsc",

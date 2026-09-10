@@ -8,7 +8,7 @@ export function shouldScheduleCandidateRecheck(event, report) {
     report?.sellability,
     report?.honeypot?.honeypot
   );
-  return event?.venue === "uniswap-v2"
+  return Boolean(event?.token && (event?.pool || event?.poolId))
     && sellability.status === "unknown"
     && !["prefilter-score", "unsupported-venue"].includes(sellability.reason);
 }

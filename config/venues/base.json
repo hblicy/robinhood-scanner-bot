@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "chain": "base",
+  "verifiedAt": "2026-09-10",
+  "venues": [
+    {
+      "id": "o1-base",
+      "identityStatus": "disabled-unverified",
+      "discoveryCapability": "disabled",
+      "lifecycleCapability": "disabled",
+      "securityCapability": "unsupported",
+      "verifiedContracts": [],
+      "disabledReason": "stock-pair-route-not-supported",
+      "sourceUrl": "https://docs.o1.exchange/launchpad"
+    },
+    {
+      "id": "stonks-exchange-base",
+      "identityStatus": "verified",
+      "discoveryCapability": "supported",
+      "lifecycleCapability": "record-only",
+      "securityCapability": "supported",
+      "verifiedContracts": [
+        "0x4714f6EC81639Ca59EEBE634490a4d8671DCe7B4",
+        "0x6a9f14e7742e8972fcF86429C5aa7DB56589806d",
+        "0x71D1D363176723f85d98B8B430DF33cde89f0A7f",
+        "0x4db9F13325A83662cf992184bc070755a212e95B",
+        "0x33128a8fC17869897dcE68Ed026d694621f6FDfD",
+        "0x03a520b32C04BF3bEEf7BEb72E919cf822Ed34f1"
+      ],
+      "sourceUrl": "https://www.thestonks.exchange/about"
+    },
+    {
+      "id": "basestonk-base",
+      "identityStatus": "disabled-unverified",
+      "discoveryCapability": "disabled",
+      "lifecycleCapability": "disabled",
+      "securityCapability": "unsupported",
+      "verifiedContracts": [],
+      "disabledReason": "missing-public-contract-registry",
+      "sourceUrl": "https://basestonk.io/"
+    }
+  ]
+}

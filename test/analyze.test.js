@@ -478,6 +478,31 @@ describe("analyze data completeness", () => {
     assert.match(report.checks.find((check) => check.key === "honeypot").detail, /买税 0bps \/ 卖税 0bps/);
   });
 
+  it("preserves every B20 control needed by the Telegram report", async () => {
+    const report = await analyze({
+      ...event,
+      chain: "base",
+      referenceAsset: QUOTE,
+      referenceAssetKind: "stock",
+      referenceAssetIssuer: "Coinbase",
+      assetSource: "base-official-stocks",
+    }, dependencies({
+      inspectReferenceAsset: async () => ({
+        status: "complete",
+        standard: "B20",
+        multiplier: "1000000000000000000",
+        paused: true,
+        policyIds: ["5", "5", "5"],
+        restrictions: ["transfer-policy", "reference-asset-restricted"],
+      }),
+    }));
+
+    assert.equal(report.referenceAssetStandard, "B20");
+    assert.equal(report.referenceAssetMultiplier, "1000000000000000000");
+    assert.equal(report.referenceAssetPaused, true);
+    assert.deepEqual(report.referenceAssetPolicyIds, ["5", "5", "5"]);
+  });
+
   it("preserves launchpad tax evidence carried by the sellability adapter", async () => {
     const report = await analyze(event, dependencies({
       honeypotCheck: async () => ({

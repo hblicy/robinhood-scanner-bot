@@ -12,6 +12,7 @@ import { createClankerAdapter } from "./venues/evm/clanker.js";
 import { createFourMemeAdapter } from "./venues/evm/four-meme.js";
 import { createFlapAdapter } from "./venues/evm/flap.js";
 import { createO1Adapter } from "./venues/evm/o1.js";
+import { createStonksExchangeAdapter } from "./venues/evm/stonks-exchange.js";
 import { createPancakeInfinityAdapter, createPancakeV2Adapter, createPancakeV3Adapter } from "./venues/evm/pancakeswap.js";
 import { createPonsAdapter } from "./venues/evm/pons.js";
 import { createUniswapV2Adapter, createUniswapV3Adapter, createUniswapV4Adapter } from "./venues/evm/uniswap.js";
@@ -19,7 +20,12 @@ import { createEvmSecurityRegistry, createV2SecurityEntry } from "./security/evm
 import { createO1SecurityEntry } from "./security/evm/o1.js";
 import { createFourMemeSecurityEntry } from "./security/evm/four-meme.js";
 import { createFlapSecurityEntry } from "./security/evm/flap.js";
-import { inspectReferenceAsset } from "./security/evm/reference-asset.js";
+import { createStonksExchangeSecurityEntry } from "./security/evm/stonks-exchange.js";
+import { readObservedSellReceipts } from "./security/evm/receipt-reader.js";
+import {
+  inspectReferenceAsset,
+  readB20ReferencePolicies,
+} from "./security/evm/reference-asset.js";
 import { analyze, honeypotCheck } from "./analyze.js";
 import { ERC20_ABI } from "./abis.js";
 import { dexScreener } from "./market.js";
@@ -49,9 +55,8 @@ const LEGACY_STATE_FILES = Object.freeze([
 const DISABLED_VENUES = Object.freeze({
   ethereum: Object.freeze([]),
   base: Object.freeze([
-    ["o1-base", "missing-verified-factory"],
-    ["stonks-exchange-base", "missing-verified-factory"],
-    ["basestonk-base", "missing-verified-factory"],
+    ["o1-base", "stock-pair-route-not-supported"],
+    ["basestonk-base", "missing-public-contract-registry"],
   ]),
   bsc: Object.freeze([]),
   robinhood: Object.freeze([
@@ -284,6 +289,14 @@ function instantiateVenue(profile, venue, classifyPair) {
       poolManagerAddress: venue.contracts.poolManager,
     });
   }
+  if (venue.id === "stonks-exchange-base") {
+    return createStonksExchangeAdapter({
+      id: venue.id,
+      ...venue.contracts,
+      classifyPair,
+      version: venue.version,
+    });
+  }
   if (venue.id === "pancakeswap-v2-bsc") {
     return createPancakeV2Adapter({ ...common, address: venue.contracts.factory });
   }
@@ -351,6 +364,10 @@ function securityRegistry(profile, assetCatalog, settings = {}) {
       maxTaxBps: settings.maxTaxBps,
     }));
   }
+  const stonksExchange = profile.venues.find(({ id }) => id === "stonks-exchange-base");
+  if (stonksExchange) {
+    entries.push(createStonksExchangeSecurityEntry(stonksExchange, { assetCatalog }));
+  }
   return createEvmSecurityRegistry(entries);
 }
 
@@ -362,6 +379,10 @@ function createServices({ loaded, rpcContext, registry, projectRoot, dependencie
   const referenceAssetCache = new Map();
   const readReferencePolicies = dependencies.readReferencePolicies
     ?? (async (asset) => ({ restrictions: asset.restrictions ?? [] }));
+  const readB20 = dependencies.readB20
+    ?? ((asset) => readB20ReferencePolicies(asset, { provider }));
+  const getObservedSellReceipts = dependencies.getObservedSellReceipts
+    ?? ((candidate, binding) => readObservedSellReceipts(candidate, binding, { provider }));
   const unavailable = (source) => async () => {
     throw new Error(`${source} adapter unavailable for ${profile.key}`);
   };
@@ -382,6 +403,7 @@ function createServices({ loaded, rpcContext, registry, projectRoot, dependencie
     honeypotCheck: (input) => honeypotCheck(input, {
       provider,
       securityRegistry: registry,
+      getObservedSellReceipts,
     }),
     inspectReferenceAsset: (asset) => inspectReferenceAsset(asset, {
       cache: referenceAssetCache,
@@ -391,6 +413,7 @@ function createServices({ loaded, rpcContext, registry, projectRoot, dependencie
         return keccak256(code);
       },
       readPolicies: readReferencePolicies,
+      readB20: profile.key === "base" ? readB20 : undefined,
     }),
     walletCatalog,
   });

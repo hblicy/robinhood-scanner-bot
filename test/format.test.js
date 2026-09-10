@@ -126,6 +126,30 @@ describe("formatAlert", () => {
     assert.doesNotMatch(text, /卖出安全<\/b> 已阻断|风险 已阻断/);
   });
 
+  it("shows the verified Base B20 symbol, address, and catalog source", () => {
+    const text = formatAlert(makeReport({
+      chain: "base",
+      chainName: "Base",
+      venue: "stonks-exchange-base",
+      referenceAsset: "0xb200000000000000000000C2e324d24d7eEcd1fb",
+      referenceAssetKind: "stock",
+      referenceAssetStandard: "B20",
+      referenceAssetMultiplier: "1000000000000000000",
+      referenceAssetPaused: false,
+      referenceAssetPolicyIds: ["5", "5", "5"],
+      assetSource: "base-official-stocks",
+      dex: { quoteSymbol: "AAPLc" },
+    }));
+
+    assert.match(text, /股票底池<\/b> B20 AAPLc/);
+    assert.match(text, /0xb200000000000000000000C2e324d24d7eEcd1fb/);
+    assert.match(text, /base-official-stocks/);
+    assert.match(text, /multiplier 1000000000000000000/);
+    assert.match(text, /paused false/);
+    assert.match(text, /policyIds 5\/5\/5/);
+    assert.doesNotMatch(text, /undefined|null/);
+  });
+
   it("renders unsafe or malformed link protocols as plain labels", () => {
     const text = formatAlert(makeReport({
       links: {

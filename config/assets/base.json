@@ -3,10 +3,101 @@
   "chain": "base",
   "family": "evm",
   "source": {
-    "id": "base-versioned-manifest-pending",
-    "url": null,
-    "verifiedAt": 0,
-    "status": "disabled-unverified"
+    "id": "base-official-stocks",
+    "url": "https://www.base.org/stocks",
+    "verifiedAt": 1789036044232,
+    "status": "verified"
   },
-  "assets": []
+  "assets": [
+    {
+      "address": "0xb20000000000000000000078ee7ce2fe4908108c",
+      "symbol": "NVDAc",
+      "kind": "stock",
+      "issuer": "Coinbase",
+      "sourceId": "base-official-stocks",
+      "sourceUrl": "https://www.base.org/stocks",
+      "verifiedAt": 1789036044232
+    },
+    {
+      "address": "0xb2000000000000000000008bc8786b856e61707c",
+      "symbol": "METAc",
+      "kind": "stock",
+      "issuer": "Coinbase",
+      "sourceId": "base-official-stocks",
+      "sourceUrl": "https://www.base.org/stocks",
+      "verifiedAt": 1789036044232
+    },
+    {
+      "address": "0xb200000000000000000000c2e324d24d7eecd1fb",
+      "symbol": "AAPLc",
+      "kind": "stock",
+      "issuer": "Coinbase",
+      "sourceId": "base-official-stocks",
+      "sourceUrl": "https://www.base.org/stocks",
+      "verifiedAt": 1789036044232
+    },
+    {
+      "address": "0xb2000000000000000000002d0ba3164cc74f58b7",
+      "symbol": "GOOGLc",
+      "kind": "stock",
+      "issuer": "Coinbase",
+      "sourceId": "base-official-stocks",
+      "sourceUrl": "https://www.base.org/stocks",
+      "verifiedAt": 1789036044232
+    },
+    {
+      "address": "0xb200000000000000000000d9192b6b456483c2e8",
+      "symbol": "AMZNc",
+      "kind": "stock",
+      "issuer": "Coinbase",
+      "sourceId": "base-official-stocks",
+      "sourceUrl": "https://www.base.org/stocks",
+      "verifiedAt": 1789036044232
+    },
+    {
+      "address": "0xb200000000000000000000ab99cfa739e253872b",
+      "symbol": "MSFTc",
+      "kind": "stock",
+      "issuer": "Coinbase",
+      "sourceId": "base-official-stocks",
+      "sourceUrl": "https://www.base.org/stocks",
+      "verifiedAt": 1789036044232
+    },
+    {
+      "address": "0xb2000000000000000000004884b426556b92883d",
+      "symbol": "MSTRc",
+      "kind": "stock",
+      "issuer": "Coinbase",
+      "sourceId": "base-official-stocks",
+      "sourceUrl": "https://www.base.org/stocks",
+      "verifiedAt": 1789036044232
+    },
+    {
+      "address": "0xb200000000000000000000397293cb8cda9a10c5",
+      "symbol": "SNDKc",
+      "kind": "stock",
+      "issuer": "Coinbase",
+      "sourceId": "base-official-stocks",
+      "sourceUrl": "https://www.base.org/stocks",
+      "verifiedAt": 1789036044232
+    },
+    {
+      "address": "0xb2000000000000000000007b9fcbd005511acbd5",
+      "symbol": "SPCXc",
+      "kind": "stock",
+      "issuer": "Coinbase",
+      "sourceId": "base-official-stocks",
+      "sourceUrl": "https://www.base.org/stocks",
+      "verifiedAt": 1789036044232
+    },
+    {
+      "address": "0xb2000000000000000000001e800a7f5189430cd0",
+      "symbol": "TSLAc",
+      "kind": "stock",
+      "issuer": "Coinbase",
+      "sourceId": "base-official-stocks",
+      "sourceUrl": "https://www.base.org/stocks",
+      "verifiedAt": 1789036044232
+    }
+  ]
 }

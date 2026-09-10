@@ -1,0 +1,30 @@
+{
+  "name": "Base B20 read surface",
+  "chainId": 8453,
+  "scope": "reference-asset-risk",
+  "verifiedAt": "2026-09-10",
+  "source": "https://github.com/base/base-std/tree/main/src/interfaces",
+  "abi": [
+    {
+      "type": "function",
+      "name": "multiplier",
+      "inputs": [],
+      "outputs": [{ "name": "", "type": "uint256" }],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "isPaused",
+      "inputs": [{ "name": "feature", "type": "uint8" }],
+      "outputs": [{ "name": "", "type": "bool" }],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "policyId",
+      "inputs": [{ "name": "policyScope", "type": "bytes32" }],
+      "outputs": [{ "name": "", "type": "uint64" }],
+      "stateMutability": "view"
+    }
+  ]
+}

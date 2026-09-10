@@ -411,6 +411,12 @@ export async function analyze(event, overrides = {}) {
     sellability,
     walletSignals,
     referenceAssetStatus: referenceInspection.status,
+    referenceAssetStandard: referenceInspection.standard ?? null,
+    referenceAssetMultiplier: referenceInspection.multiplier ?? null,
+    referenceAssetPaused: referenceInspection.paused ?? null,
+    referenceAssetPolicyIds: Array.isArray(referenceInspection.policyIds)
+      ? [...referenceInspection.policyIds]
+      : [],
     referenceRestrictions,
     marketBound,
     securityComplete,
