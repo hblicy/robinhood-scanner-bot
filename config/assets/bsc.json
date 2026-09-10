@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "chain": "bsc",
+  "family": "evm",
+  "source": {
+    "id": "bsc-versioned-manifest-pending",
+    "url": null,
+    "verifiedAt": 0,
+    "status": "disabled-unverified"
+  },
+  "assets": []
+}

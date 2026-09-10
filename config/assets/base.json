@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "chain": "base",
+  "family": "evm",
+  "source": {
+    "id": "base-versioned-manifest-pending",
+    "url": null,
+    "verifiedAt": 0,
+    "status": "disabled-unverified"
+  },
+  "assets": []
+}
