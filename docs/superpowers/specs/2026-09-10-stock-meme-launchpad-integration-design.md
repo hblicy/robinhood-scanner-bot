@@ -180,6 +180,7 @@ referenceRestrictions   股票底池自身的合规或转账限制
 
 - EVM 地址统一 checksummed，查询键使用规范化小写地址；
 - Solana mint 保留 base58 原文；
+- 每条资产独立保存 `sourceId`、`sourceUrl` 和 `verifiedAt`，允许同一链合并多个可信发行方；
 - 同一资产不得在互斥类别中重复；
 - 更新先写临时快照、完整验证后原子替换；
 - 默认刷新周期 6 小时；
