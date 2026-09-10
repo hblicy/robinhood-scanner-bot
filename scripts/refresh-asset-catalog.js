@@ -3,13 +3,21 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { getAddress, JsonRpcProvider } from "ethers";
+import { Connection, PublicKey } from "@solana/web3.js";
 import { createAssetCatalog, serializeAssetCatalog } from "../src/assets/catalog.js";
 import { fetchJson } from "../src/assets/sources/http-json.js";
+import {
+  combineXStocksPages,
+  fetchAllXStocksPages,
+  parseXStocksAssets,
+  refreshXStocksCatalogs,
+} from "../src/assets/sources/xstocks.js";
 
 const BASE_STOCKS_URL = "https://www.base.org/stocks";
 
 // Sources remain disabled until a stable official machine-readable schema is verified.
 const SOURCES = Object.freeze({
+  xstocks: Object.freeze({ enabled: true }),
   robinhood: Object.freeze({
     enabled: false,
     reason: "no verified machine-readable stock asset source",
@@ -54,6 +62,78 @@ function atomicWriteJson(file, document) {
     fs.renameSync(temporary, target);
   } finally {
     if (fs.existsSync(temporary)) fs.rmSync(temporary, { force: true });
+  }
+}
+
+function readJsonIfPresent(file) {
+  try {
+    return JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch (error) {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+async function solanaAccountMap(connection, addresses) {
+  const result = new Map();
+  for (let offset = 0; offset < addresses.length; offset += 100) {
+    const chunk = addresses.slice(offset, offset + 100);
+    const accounts = await connection.getMultipleAccountsInfo(
+      chunk.map((address) => new PublicKey(address)),
+      "finalized"
+    );
+    chunk.forEach((address, index) => {
+      const account = accounts[index];
+      result.set(address, {
+        exists: account != null,
+        owner: account?.owner?.toBase58?.() ?? null,
+      });
+    });
+  }
+  return result;
+}
+
+export async function runXStocksRefresh({
+  fetchImpl = fetch,
+  env = process.env,
+  write = (chain, document) => atomicWriteJson(path.resolve("config", "assets", `${chain}.json`), document),
+  now = Date.now,
+} = {}) {
+  const pages = await fetchAllXStocksPages({ fetchImpl });
+  const payload = combineXStocksPages(pages);
+  const solanaDocument = parseXStocksAssets(payload, {
+    network: "Solana", chain: "solana", family: "solana", now,
+  });
+  const solana = new Connection(env.SOLANA_RPC_URL || "https://api.mainnet-beta.solana.com", "finalized");
+  const ethereum = new JsonRpcProvider(
+    env.ETHEREUM_ANALYSIS_RPC_URL || env.ETHEREUM_DISCOVERY_RPC_URL || "https://ethereum-rpc.publicnode.com",
+    1,
+    { staticNetwork: true }
+  );
+  const bsc = new JsonRpcProvider(
+    env.BSC_ANALYSIS_RPC_URL || env.BSC_DISCOVERY_RPC_URL || "https://bsc-rpc.publicnode.com",
+    56,
+    { staticNetwork: true }
+  );
+  try {
+    const solanaAccounts = await solanaAccountMap(solana, solanaDocument.assets.map(({ address }) => address));
+    return await refreshXStocksCatalogs({
+      pages,
+      readers: {
+        solana: async (address) => solanaAccounts.get(address),
+        ethereum: (address) => ethereum.getCode(address),
+        bsc: (address) => bsc.getCode(address),
+      },
+      existingDocuments: Object.fromEntries(["solana", "ethereum", "bsc"].map((chain) => [
+        chain,
+        readJsonIfPresent(path.resolve("config", "assets", `${chain}.json`)),
+      ])),
+      write,
+      now,
+    });
+  } finally {
+    ethereum.destroy();
+    bsc.destroy();
   }
 }
 
@@ -202,6 +282,7 @@ export async function runAssetRefresh(argv = process.argv.slice(2)) {
   const source = SOURCES[chain];
   if (!source) throw new Error(`unsupported asset source ${chain || "<missing>"}`);
   if (!source.enabled) throw new Error(`asset source ${chain} disabled-unverified: ${source.reason}`);
+  if (chain === "xstocks") return runXStocksRefresh();
   const output = path.resolve("config", "assets", `${chain}.json`);
   if (chain === "base") {
     const rpcUrl = process.env.BASE_ANALYSIS_RPC_URL
@@ -221,11 +302,22 @@ export async function runAssetRefresh(argv = process.argv.slice(2)) {
   return refreshAssetCatalog({ ...source, chain, write: (document) => atomicWriteJson(output, document) });
 }
 
+export function formatAssetRefreshResult(result) {
+  if (result?.chain && Array.isArray(result.assets)) {
+    return `asset catalog refreshed: ${result.chain} assets=${result.assets.length}`;
+  }
+  const chains = ["solana", "ethereum", "bsc"];
+  if (chains.every((chain) => Array.isArray(result?.[chain]?.assets))) {
+    return `asset catalogs refreshed: ${chains.map((chain) => `${chain}=${result[chain].assets.length}`).join(" ")}`;
+  }
+  throw new Error("asset refresh returned an invalid result");
+}
+
 const isMain = process.argv[1]
   && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url;
 if (isMain) {
   runAssetRefresh().then(
-    (catalog) => console.log(`asset catalog refreshed: ${catalog.chain} assets=${catalog.assets.length}`),
+    (catalog) => console.log(formatAssetRefreshResult(catalog)),
     (error) => {
       console.error(error.message);
       process.exitCode = 1;
