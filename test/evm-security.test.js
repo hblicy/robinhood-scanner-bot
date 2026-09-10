@@ -32,6 +32,8 @@ describe("EVM security registry", () => {
     }]);
 
     assert.equal((await registry.inspect(candidate())).marker, "base-v3");
+    assert.equal(registry.supports(candidate()), true);
+    assert.equal(registry.supports(candidate({ chain: "ethereum" })), false);
     assert.deepEqual((await registry.inspect(candidate({ chain: "ethereum" }))).status, "unknown");
     assert.deepEqual((await registry.inspect(candidate({ venue: "clanker-v4-base" }))).reason, "unsupported-venue");
   });

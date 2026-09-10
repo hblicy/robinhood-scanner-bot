@@ -44,6 +44,23 @@ function isEthAddress(value) {
   return /^0x[0-9a-fA-F]{40}$/.test(String(value || ""));
 }
 
+function hasFiniteNumber(value) {
+  if (value === null || value === undefined || value === "") return false;
+  return Number.isFinite(Number(value));
+}
+
+function hasCompleteGeckoScoreFacts(attributes) {
+  const tx = attributes?.transactions?.m5;
+  return (
+    (hasFiniteNumber(attributes?.market_cap_usd) || hasFiniteNumber(attributes?.fdv_usd))
+    && hasFiniteNumber(attributes?.reserve_in_usd)
+    && hasFiniteNumber(attributes?.volume_usd?.m5)
+    && hasFiniteNumber(attributes?.volume_usd?.h1)
+    && hasFiniteNumber(tx?.buys)
+    && hasFiniteNumber(tx?.sells)
+  );
+}
+
 export async function geckoNewPools(
   pages = 1,
   {
@@ -100,6 +117,7 @@ export async function geckoNewPools(
         quote,
         createdAt,
         market: {
+          scoreKnown: hasCompleteGeckoScoreFacts(a),
           name: a.name || "",
           priceUsd: num(a.base_token_price_usd),
           fdvUsd: num(a.fdv_usd),
