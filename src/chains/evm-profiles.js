@@ -219,7 +219,7 @@ export const EVM_PROFILES = deepFreeze({
         version: 1,
         protocolVersion: "v5.23.0",
         docsVersion: "v5.14.16",
-        deploymentBlock: 0,
+        deploymentBlock: 39_980_228,
         verifiedAtBlock: 121_047_803,
         sourceUrl: "https://docs.flap.sh/flap/developers/deployed-contract-addresses",
         contracts: {
