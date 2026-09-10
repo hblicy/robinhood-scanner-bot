@@ -160,7 +160,7 @@ EVM_ANALYSIS_RPC_MONTHLY_LIMIT=20000000
 - `pons_official_checks`：官方 RPC 身份识别次数；
 - `skipped_unsupported_venue`：因场所不支持而跳过数量；
 - `skipped_score_upper_bound`：因理论最高分不足而跳过数量；
-- `alchemy_deep_checks`：真正进入 Alchemy 深检的数量；
+- `paid_deep_checks`：真正进入付费 RPC 深检的数量；
 - `deferred_pons_checks`：身份读取失败并延迟恢复的数量。
 - `rpc_budget_skips`：月度付费预算耗尽后静默跳过的候选数量。
 
@@ -203,7 +203,7 @@ EVM_ANALYSIS_RPC_MONTHLY_LIMIT=20000000
 17. Solana Provider 不读取或消耗 EVM 预算。
 18. 完整运行 `npm test` 与 `git diff --check`。
 
-建议部署后运行至少 12 小时，比较 `alchemy_deep_checks / 候选总数`、共享预算的保守预留量与 Dwellir 控制台响应数。验收目标是 V3/V4 候选不再产生付费深检，四条 EVM 链的本月预留量永不超过 20,000,000，同时 V2 合格候选和既有重要状态通知不受影响；不承诺固定节省百分比，因为候选构成会随市场变化。
+建议部署后运行至少 12 小时，比较 `paid_deep_checks / 候选总数`、共享预算的保守预留量与 Dwellir 控制台响应数。验收目标是 V3/V4 候选不再产生付费深检，四条 EVM 链的本月预留量永不超过 20,000,000，同时 V2 合格候选和既有重要状态通知不受影响；不承诺固定节省百分比，因为候选构成会随市场变化。
 
 ## 文档
 
