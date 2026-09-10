@@ -26,6 +26,7 @@ import { createRaydiumAdapters } from "./venues/solana/raydium.js";
 import { createSolanaSecurityRegistry } from "./security/solana/index.js";
 import { inspectMintControls } from "./security/solana/mint.js";
 import { analyzeSolanaCandidate } from "./solana/analyze.js";
+import { createAnalysisRpcCircuit } from "./analysis-rpc-circuit.js";
 
 const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const LEGACY_STATE_FILES = Object.freeze([
@@ -197,6 +198,17 @@ function createServices({ loaded, rpcContext, registry, projectRoot, dependencie
   return Object.freeze({
     analyze: analyzeCandidate,
     alertReport,
+    async notifyAnalysisRpcLimited() {
+      try {
+        return await sendTelegramWith(
+          `⚠️ ${profile.name} 分析 RPC 被限流或额度耗尽，深检暂时暂停；官方发现仍在运行。`,
+          { settings: { telegramToken: loaded.telegram.token, telegramChat: loaded.telegram.chatId } }
+        );
+      } catch (error) {
+        console.error(`[${profile.key}] analysis RPC alert failed`);
+        return false;
+      }
+    },
     async check(token) {
       const [meta, owner, flags] = await Promise.all([
         readTokenMeta(token, { provider }),
@@ -330,6 +342,7 @@ export function createApp({ chainKey, command = "watch", env = process.env, depe
     venues: Object.freeze(venues),
     venueIds: Object.freeze(venues.map((venue) => venue.id)),
     securityRegistry: registry,
+    analysisRpcCircuit: createAnalysisRpcCircuit(),
     services,
   });
   const context = Object.freeze({ config });

@@ -2,6 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   createCandidateRouteStats,
+  formatCandidateRouteStats,
   incrementCandidateRouteStat,
   routeCandidate,
   scoreCandidateUpperBound,
@@ -86,6 +87,7 @@ describe("candidate RPC gate", () => {
     incrementCandidateRouteStat(stats, "paid_deep_checks");
     incrementCandidateRouteStat(stats, "paid_deep_checks");
     assert.equal(stats.paid_deep_checks, 2);
+    assert.match(formatCandidateRouteStats(stats), /deep=2/);
     assert.throws(() => incrementCandidateRouteStat(stats, "typo"), /unknown candidate route stat/i);
   });
 });

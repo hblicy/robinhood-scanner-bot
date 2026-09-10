@@ -11,6 +11,16 @@ import {
 } from "../chain.js";
 import { scanEvmRange } from "./discovery.js";
 import { safeErrorMessage } from "../safety.js";
+import {
+  createCandidateRouteStats,
+  formatCandidateRouteStats,
+  incrementCandidateRouteStat,
+  routeCandidate,
+} from "../candidate-gate.js";
+import {
+  AnalysisRpcCooldownError,
+  bindAnalysisCircuit,
+} from "../analysis-rpc-circuit.js";
 
 async function blockTimes({ provider, blockNumbers }) {
   const values = await Promise.all(blockNumbers.map(async (blockNumber) => {
@@ -38,6 +48,8 @@ function defaultDependencies(config) {
     }),
     analyze: config.services?.analyze,
     alertReport: config.services?.alertReport,
+    analysisRpcCircuit: config.analysisRpcCircuit,
+    notifyAnalysisRpcLimited: config.services?.notifyAnalysisRpcLimited,
     log: console.log,
     sleep,
   };
@@ -56,12 +68,13 @@ export async function runEvmRangeOnce(config, { persist = true } = {}, supplied 
   const savedCursor = store.getOnchainCursor();
   const configuredMode = config.settings.alertMode;
   const mode = persist && savedCursor == null ? "recovery" : configuredMode;
+  const routeStats = createCandidateRouteStats();
 
   return config.rpcContext.discoverySessions.run(async (provider) => {
     const latest = await dependencies.getBlockNumber(provider);
     const confirmations = config.settings.confirmationBlocks ?? config.profile.confirmations ?? 0;
     const head = latest - confirmations;
-    if (head < 0) return { mode, fromBlock: null, toBlock: head, candidates: 0, reports: [] };
+    if (head < 0) return { mode, fromBlock: null, toBlock: head, candidates: 0, reports: [], routeStats };
     const maxAgeMinutes = config.settings.maxAgeMinutes ?? 30;
     const fromBlock = savedCursor == null
       ? await dependencies.findFirstBlockAtOrAfter(
@@ -70,7 +83,7 @@ export async function runEvmRangeOnce(config, { persist = true } = {}, supplied 
         provider
       )
       : savedCursor + 1;
-    if (fromBlock > head) return { mode, fromBlock, toBlock: head, candidates: 0, reports: [] };
+    if (fromBlock > head) return { mode, fromBlock, toBlock: head, candidates: 0, reports: [], routeStats };
 
     const candidates = await dependencies.scanRange({ provider, fromBlock, toBlock: head, config });
     const reports = [];
@@ -82,21 +95,52 @@ export async function runEvmRangeOnce(config, { persist = true } = {}, supplied 
         source: candidate.source || candidate.sourceKind,
         quote: candidate.quote ?? candidate.quoteToken,
         blockNumber: candidate.blockNumber ?? candidate.blockOrSlot,
+        observedAt: dependencies.now(),
       };
-      const report = await handleCandidate(event, { persistSeen: persist }, {
-        now: dependencies.now,
-        maxAgeMinutes,
-        minScore: config.settings.minScore,
-        mode,
-        analyze: dependencies.analyze,
-        markSeen: (seenKey, payload) => store.markSeen(seenKey, payload),
-        alertReport: dependencies.alertReport,
-        log: dependencies.log,
+      const route = routeCandidate(event, {
+        thresholds: { ...config.settings, maxAgeMinutes },
+        supportsSellability: (value) => config.securityRegistry.supports(value),
       });
+      if (route.action === "skip") {
+        const stat = route.reason === "unsupported-sellability-venue"
+          ? "skipped_unsupported_venue"
+          : "skipped_score_upper_bound";
+        incrementCandidateRouteStat(routeStats, stat);
+        if (persist) store.markSeen(key, { token: event.token, skipped: route.reason });
+        continue;
+      }
+      const analyzeCandidate = dependencies.analysisRpcCircuit
+        ? bindAnalysisCircuit({
+          circuit: dependencies.analysisRpcCircuit,
+          analyze: async (value) => {
+            incrementCandidateRouteStat(routeStats, "paid_deep_checks");
+            return dependencies.analyze(value);
+          },
+          onOpen: mode === "live" ? dependencies.notifyAnalysisRpcLimited : undefined,
+        })
+        : dependencies.analyze;
+      let report;
+      try {
+        report = await handleCandidate(event, { persistSeen: persist }, {
+          now: dependencies.now,
+          maxAgeMinutes,
+          minScore: config.settings.minScore,
+          mode,
+          analyze: analyzeCandidate,
+          markSeen: (seenKey, payload) => store.markSeen(seenKey, payload),
+          alertReport: dependencies.alertReport,
+          log: dependencies.log,
+        });
+      } catch (error) {
+        if (!(error instanceof AnalysisRpcCooldownError)) throw error;
+        incrementCandidateRouteStat(routeStats, "analysis_rpc_cooldown_skips");
+        if (persist) store.markSeen(key, { token: event.token, skipped: "analysis-rpc-cooldown" });
+        continue;
+      }
       if (report) reports.push(report);
     }
     if (persist) store.setOnchainCursor(head);
-    return { mode, fromBlock, toBlock: head, candidates: candidates.length, reports };
+    return { mode, fromBlock, toBlock: head, candidates: candidates.length, reports, routeStats };
   });
 }
 
@@ -108,7 +152,7 @@ export async function watchEvm(config, supplied = {}) {
       try {
         const result = await runEvmRangeOnce(config, { persist: true }, dependencies);
         dependencies.log(
-          `${config.profile.key}: blocks ${result.fromBlock ?? "none"}-${result.toBlock} candidates=${result.candidates} mode=${result.mode}`
+          `${config.profile.key}: blocks ${result.fromBlock ?? "none"}-${result.toBlock} candidates=${result.candidates} mode=${result.mode} routes ${formatCandidateRouteStats(result.routeStats)}`
         );
       } catch (error) {
         if (!isDiscoveryFallbackError(error)) throw error;

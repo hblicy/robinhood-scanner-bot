@@ -27,6 +27,21 @@ export function incrementCandidateRouteStat(stats, key) {
   return stats[key];
 }
 
+export function formatCandidateRouteStats(stats) {
+  return [
+    `pons=${stats.pons_official_checks}`,
+    `deferred=${stats.deferred_pons_checks}`,
+    `unsupported=${stats.skipped_unsupported_venue}`,
+    `score=${stats.skipped_score_upper_bound}`,
+    `deep=${stats.paid_deep_checks}`,
+    `cooldown=${stats.analysis_rpc_cooldown_skips}`,
+  ].join(" ");
+}
+
+export function supportsRobinhoodSellability(candidate) {
+  return candidate?.venue === "uniswap-v2";
+}
+
 export function scoreCandidateUpperBound(candidate, thresholds = {}) {
   const market = candidate?.market;
   if (candidate?.source !== "gecko" || market?.scoreKnown !== true) return null;

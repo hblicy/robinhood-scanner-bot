@@ -1,6 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { runEvmRangeOnce, watchEvm } from "../src/evm/runner.js";
+import { createAnalysisRpcCircuit } from "../src/analysis-rpc-circuit.js";
 
 const candidate = {
   chain: "base",
@@ -36,6 +37,9 @@ function setup(overrides = {}) {
     settings: { minScore: 70, confirmationBlocks: 2, alertMode: "live" },
     store,
     venues: [],
+    securityRegistry: { supports: () => true },
+    analysisRpcCircuit: createAnalysisRpcCircuit({ cooldownMs: 60_000 }),
+    services: { notifyAnalysisRpcLimited: async () => {} },
     rpcContext: {
       analysisProvider: { role: "analysis" },
       discoverySessions: { run: async (work) => work({ role: "discovery" }) },
@@ -118,6 +122,53 @@ describe("generic EVM range runner", () => {
     assert.equal(value.cursor(), 99);
     assert.equal(value.seen.size, 0);
     assert.deepEqual(value.alerts, [candidate.token]);
+  });
+
+  it("marks an unsupported venue seen without analysis and advances discovery", async () => {
+    let analyzed = 0;
+    const value = setup({
+      cursor: 99,
+      dependencies: { analyze: async () => { analyzed += 1; } },
+    });
+    value.config.securityRegistry = { supports: () => false };
+
+    const result = await runEvmRangeOnce(value.config, { persist: true }, value.dependencies);
+
+    assert.equal(analyzed, 0);
+    assert.equal(value.seen.size, 1);
+    assert.equal(value.cursor(), 100);
+    assert.equal(result.routeStats.skipped_unsupported_venue, 1);
+  });
+
+  it("opens analysis cooldown on 429, then skips deep checks while advancing", async () => {
+    let now = 2_000;
+    let calls = 0;
+    let notices = 0;
+    const value = setup({
+      cursor: 99,
+      dependencies: {
+        now: () => now,
+        analyze: async () => {
+          calls += 1;
+          throw Object.assign(new Error("Too Many Requests"), { status: 429 });
+        },
+        notifyAnalysisRpcLimited: async () => { notices += 1; },
+      },
+    });
+    value.config.analysisRpcCircuit = createAnalysisRpcCircuit({ now: () => now, cooldownMs: 60_000 });
+
+    await assert.rejects(
+      () => runEvmRangeOnce(value.config, { persist: true }, value.dependencies),
+      /Too Many Requests/
+    );
+    assert.equal(value.cursor(), 99);
+    assert.equal(notices, 1);
+
+    now += 1_000;
+    const result = await runEvmRangeOnce(value.config, { persist: true }, value.dependencies);
+    assert.equal(calls, 1);
+    assert.equal(value.cursor(), 100);
+    assert.equal(result.routeStats.analysis_rpc_cooldown_skips, 1);
   });
 
   it("retries a recoverable discovery failure without exiting the watcher", async () => {

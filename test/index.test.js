@@ -57,6 +57,7 @@ function watchCandidateDependencies(overrides = {}) {
     markSeen: () => {},
     alertReport: async () => {},
     log: () => {},
+    supportsSellability: (event) => event.venue === "uniswap-v2",
     ...overrides,
   };
 }
@@ -324,12 +325,60 @@ describe("scanner orchestration", () => {
     assert.equal(seen[0][1].skipped, "pons-v2");
   });
 
+  it("records an unsupported venue without generic analysis", async () => {
+    const scanner = await import("../src/scanner.js");
+    let analyzed = 0;
+    const seen = [];
+    const event = { ...watchCandidateEvent(), venue: "uniswap-v4" };
+
+    const report = await scanner.processWatchCandidate(event, {
+      classifyCandidate: async (value) => ({ ...value, identity: "not_pons" }),
+      candidateDependencies: watchCandidateDependencies({
+        analyze: async () => { analyzed += 1; },
+        markSeen: (key, payload) => seen.push([key, payload]),
+      }),
+    });
+
+    assert.equal(report, null);
+    assert.equal(analyzed, 0);
+    assert.equal(seen[0][1].skipped, "unsupported-sellability-venue");
+  });
+
+  it("opens analysis cooldown on 429 and quietly completes later candidates", async () => {
+    const scanner = await import("../src/scanner.js");
+    const { createAnalysisRpcCircuit } = await import("../src/analysis-rpc-circuit.js");
+    let calls = 0;
+    let notices = 0;
+    const seen = [];
+    const candidateDependencies = watchCandidateDependencies({
+      analysisCircuit: createAnalysisRpcCircuit({ cooldownMs: 60_000 }),
+      analyze: async () => {
+        calls += 1;
+        throw Object.assign(new Error("Too Many Requests"), { status: 429 });
+      },
+      onAnalysisRpcOpen: async () => { notices += 1; },
+      markSeen: (key, payload) => seen.push([key, payload]),
+    });
+    const options = {
+      classifyCandidate: async (value) => ({ ...value, identity: "not_pons" }),
+      candidateDependencies,
+    };
+
+    await assert.rejects(() => scanner.processWatchCandidate(watchCandidateEvent(), options), /Too Many Requests/);
+    const second = { ...watchCandidateEvent(), token: "0x3000000000000000000000000000000000000003" };
+    assert.equal(await scanner.processWatchCandidate(second, options), null);
+    assert.equal(calls, 1);
+    assert.equal(notices, 1);
+    assert.equal(seen[0][1].skipped, "analysis-rpc-cooldown");
+  });
+
   it("shares one discovery session runner across watch loops and keeps candidate calls on analysis RPC", async () => {
     const discoveryProvider = { role: "discovery" };
     const analysisProvider = { role: "analysis" };
     const calls = [];
     const bindings = createWatchRpcBindings({
       analysisProvider,
+      discoveryProvider,
       discoverySessions: {
         run: async (work) => work(discoveryProvider),
       },
@@ -370,7 +419,7 @@ describe("scanner orchestration", () => {
       ["boundary", discoveryProvider],
       ["logs", discoveryProvider],
       ["analyze", analysisProvider],
-      ["classify", analysisProvider],
+      ["classify", discoveryProvider],
     ]);
   });
 
