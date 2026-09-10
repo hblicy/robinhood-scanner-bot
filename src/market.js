@@ -74,6 +74,7 @@ export async function geckoNewPools(
     now = Date.now,
     maxAgeMinutes = SETTINGS.maxAgeMinutes,
     timeoutMs = 12000,
+    classifyPair = null,
   } = {}
 ) {
   const events = [];
@@ -93,9 +94,14 @@ export async function geckoNewPools(
       const quoteRaw = relAddr(rel.quote_token?.data?.id);
       if (!tokenRaw) throw new Error(`Gecko base_token invalid on page ${page} row ${rowIndex}`);
       if (!quoteRaw) throw new Error(`Gecko quote_token invalid on page ${page} row ${rowIndex}`);
-      const picked = resolvePair(tokenRaw, quoteRaw);
+      const classified = classifyPair
+        ? classifyPair(tokenRaw, quoteRaw, { leftSide: "base", rightSide: "quote" })
+        : null;
+      if (classifyPair && classified?.candidateKind !== "meme") continue;
+      const picked = classified ?? resolvePair(tokenRaw, quoteRaw);
       if (!picked) continue;
-      const { token, quote } = picked;
+      const token = getAddress(picked.targetToken ?? picked.token);
+      const quote = getAddress(picked.referenceAsset ?? picked.quote);
       const venue = normalizeGeckoVenue(rel.dex?.data?.id);
       const poolAddress = isEthAddress(a.address) ? getAddress(a.address) : null;
       const validPoolId = /^0x[0-9a-fA-F]{64}$/.test(String(a.address || ""));
@@ -119,8 +125,19 @@ export async function geckoNewPools(
         venue,
         pool: poolAddress,
         poolId,
-        token: getAddress(token),
+        token,
         quote,
+        quoteToken: quote,
+        targetToken: token,
+        referenceAsset: quote,
+        targetSide: picked.targetSide ?? "base",
+        pairDirection: picked.pairDirection ?? "base/quote",
+        targetAssetKind: picked.targetAssetKind ?? "meme",
+        referenceAssetKind: picked.referenceAssetKind ?? "unknown",
+        referenceAssetIssuer: picked.referenceAssetIssuer ?? null,
+        assetSource: picked.assetSource ?? null,
+        assetVerifiedAt: picked.assetVerifiedAt ?? null,
+        referenceRestrictions: [...(picked.referenceRestrictions ?? [])],
         createdAt,
         market: {
           scoreKnown: hasCompleteGeckoScoreFacts(a),
@@ -152,16 +169,18 @@ export function selectDexPair(pairs, { token, pool = null, quote = null, chain =
   const sameIdentity = String(chain).toLowerCase() === "solana"
     ? (left, right) => Boolean(left && right) && String(left) === String(right)
     : sameAddress;
-  const matchingToken = (Array.isArray(pairs) ? pairs : []).filter(
-    (p) =>
-      String(p.chainId).toLowerCase() === String(chain).toLowerCase() &&
-      sameIdentity(p.baseToken?.address, token)
+  const matchingToken = (Array.isArray(pairs) ? pairs : []).filter((p) =>
+    String(p.chainId).toLowerCase() === String(chain).toLowerCase()
+      && (sameIdentity(p.baseToken?.address, token) || sameIdentity(p.quoteToken?.address, token))
   );
   if (pool || quote) {
     if (!pool || !quote) return null;
     return (
       matchingToken.find(
-        (p) => sameIdentity(p.pairAddress, pool) && sameIdentity(p.quoteToken?.address, quote)
+        (p) => sameIdentity(p.pairAddress, pool) && (
+          (sameIdentity(p.baseToken?.address, token) && sameIdentity(p.quoteToken?.address, quote))
+          || (sameIdentity(p.quoteToken?.address, token) && sameIdentity(p.baseToken?.address, quote))
+        )
       ) || null
     );
   }
@@ -174,17 +193,21 @@ export async function dexScreener(token, binding = {}, { profile = CHAIN, fetchI
   const pairs = Array.isArray(json) ? json : json?.pairs || [];
   const p = selectDexPair(pairs, { token, chain: profile.dexScreenerSlug || profile.geckoNetwork, ...binding });
   if (!p) return null;
+  const targetIsBase = sameAddress(p.baseToken?.address, token)
+    || String(profile.family).toLowerCase() === "solana" && p.baseToken?.address === token;
+  const target = targetIsBase ? p.baseToken : p.quoteToken;
+  const reference = targetIsBase ? p.quoteToken : p.baseToken;
   const socials = p.info?.socials || [];
   const websites = p.info?.websites || [];
   return {
     pairAddress: p.pairAddress,
     dexId: p.dexId,
     url: p.url,
-    symbol: p.baseToken?.symbol,
-    name: p.baseToken?.name,
-    quoteSymbol: p.quoteToken?.symbol,
-    baseAddress: p.baseToken?.address || null,
-    quoteAddress: p.quoteToken?.address || null,
+    symbol: target?.symbol,
+    name: target?.name,
+    quoteSymbol: reference?.symbol,
+    baseAddress: target?.address || null,
+    quoteAddress: reference?.address || null,
     marketBound: Boolean(binding.pool && binding.quote),
     priceUsd: num(p.priceUsd),
     mcapUsd: num(p.marketCap) || num(p.fdv),

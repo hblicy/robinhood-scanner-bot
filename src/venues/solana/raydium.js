@@ -10,9 +10,10 @@ const LAYOUTS = Object.freeze({
   "raydium-amm-v4": { discriminator: [1], count: 21, creator: 17, authority: 5, pool: 4, mintA: 8, mintB: 9, vaultA: 10, vaultB: 11, lifecyclePhase: "new_pool" },
 });
 
-function createAdapter(profile, program) {
+function createAdapter(profile, program, classifyPair) {
   const layout = LAYOUTS[program.id];
   const quotes = new Set(profile.quotes.map((quote) => quote.address));
+  const classify = classifyPair ?? quotes;
   return Object.freeze({ ...program, version: 1, parseTransaction(context) {
     const instructions = programInstructions(context.transaction, program.programId);
     if (instructions.length === 0 && hasAnyInstructions(context.transaction)) throw new Error(`program-owner-mismatch ${program.id} signature=${context.signature}`);
@@ -20,7 +21,7 @@ function createAdapter(profile, program) {
     for (const instruction of instructions) {
       if (!matchesDiscriminator(instruction.data, layout.discriminator)) continue;
       const a = requireAccounts(context, instruction, layout.count, program.id);
-      const pair = chooseTargetPair(a[layout.mintA], a[layout.mintB], quotes);
+      const pair = chooseTargetPair(a[layout.mintA], a[layout.mintB], classify);
       if (!pair) continue;
       events.push(normalizeCandidate({
         chain: "solana", chainFamily: "solana", venue: program.id, sourceKind: program.sourceKind, ...pair,
@@ -35,8 +36,8 @@ function createAdapter(profile, program) {
   } });
 }
 
-export function createRaydiumAdapters(profile) {
+export function createRaydiumAdapters(profile, { classifyPair = null } = {}) {
   const programs = profile.programs.filter((program) => LAYOUTS[program.id]);
   if (programs.length !== Object.keys(LAYOUTS).length) throw new Error("Solana profile is missing Raydium programs");
-  return Object.freeze(programs.map((program) => createAdapter(profile, program)));
+  return Object.freeze(programs.map((program) => createAdapter(profile, program, classifyPair)));
 }

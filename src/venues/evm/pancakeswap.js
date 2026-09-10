@@ -1,6 +1,7 @@
 import { Interface, getAddress } from "ethers";
 import { PANCAKE_INFINITY_CL_ABI } from "../../abis.js";
 import { createUniswapV2Adapter, createUniswapV3Adapter } from "./uniswap.js";
+import { createLegacyPairClassifier, withLegacyPairAliases } from "../../assets/pair.js";
 
 const infinityInterface = new Interface(PANCAKE_INFINITY_CL_ABI);
 
@@ -12,9 +13,18 @@ export function createPancakeV3Adapter(options) {
   return createUniswapV3Adapter(options);
 }
 
-export function createPancakeInfinityAdapter({ id, address, quoteAddresses, version = 1 }) {
+export function createPancakeInfinityAdapter({
+  id,
+  address,
+  quoteAddresses = [],
+  classifyPair,
+  version = 1,
+}) {
   const poolManager = getAddress(address);
-  const quotes = new Set(quoteAddresses.map((value) => getAddress(value).toLowerCase()));
+  const classify = classifyPair ?? createLegacyPairClassifier({
+    referenceAssets: quoteAddresses,
+    normalizeAddress: getAddress,
+  });
   return Object.freeze({
     id,
     sourceKind: "dex",
@@ -23,14 +33,10 @@ export function createPancakeInfinityAdapter({ id, address, quoteAddresses, vers
     topics: Object.freeze([infinityInterface.getEvent("Initialize").topicHash]),
     parse(log) {
       const args = infinityInterface.parseLog(log).args;
-      const currency0 = getAddress(args.currency0);
-      const currency1 = getAddress(args.currency1);
-      const zeroIsQuote = quotes.has(currency0.toLowerCase());
-      const oneIsQuote = quotes.has(currency1.toLowerCase());
-      if (zeroIsQuote === oneIsQuote) return null;
+      const picked = withLegacyPairAliases(classify(args.currency0, args.currency1));
+      if (!picked) return null;
       return {
-        token: zeroIsQuote ? currency1 : currency0,
-        quoteToken: zeroIsQuote ? currency0 : currency1,
+        ...picked,
         pool: poolManager,
         poolId: String(args.id).toLowerCase(),
         creator: null,
