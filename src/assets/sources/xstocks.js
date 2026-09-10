@@ -160,10 +160,10 @@ export async function refreshXStocksCatalogs({
   pages,
   readers,
   existingDocuments = {},
-  write,
+  publish,
   now = Date.now,
 }) {
-  if (typeof write !== "function") throw new Error("xStocks catalog writer is required");
+  if (typeof publish !== "function") throw new Error("xStocks catalog batch publisher is required");
   const payload = combineXStocksPages(pages);
   const incoming = Object.fromEntries(Object.entries(TARGETS).map(([chain, target]) => [
     chain,
@@ -175,7 +175,7 @@ export async function refreshXStocksCatalogs({
     chain,
     mergeDocuments(existingDocuments[chain], document),
   ]));
-  for (const chain of Object.keys(TARGETS)) await write(chain, documents[chain]);
+  await publish(documents);
   return documents;
 }
 

@@ -66,6 +66,59 @@ function atomicWriteJson(file, document) {
   }
 }
 
+export function atomicWriteJsonBatch(documents, {
+  directory = path.resolve("config", "assets"),
+  fsImpl = fs,
+  transactionId = randomUUID(),
+} = {}) {
+  if (!documents || typeof documents !== "object" || Array.isArray(documents)) {
+    throw new Error("asset catalog batch must be an object");
+  }
+  const entries = Object.entries(documents).map(([chain, document]) => {
+    if (!/^[a-z0-9-]+$/.test(chain)) throw new Error(`invalid asset catalog chain: ${chain}`);
+    const target = path.resolve(directory, `${chain}.json`);
+    return {
+      target,
+      temporary: `${target}.${transactionId}.tmp`,
+      backup: `${target}.${transactionId}.bak`,
+      document,
+      hadTarget: false,
+    };
+  });
+  if (entries.length === 0) throw new Error("asset catalog batch is empty");
+  fsImpl.mkdirSync(path.resolve(directory), { recursive: true });
+  try {
+    for (const entry of entries) {
+      fsImpl.writeFileSync(entry.temporary, `${JSON.stringify(entry.document, null, 2)}\n`, "utf8");
+    }
+    for (const entry of entries) {
+      entry.hadTarget = fsImpl.existsSync(entry.target);
+      if (entry.hadTarget) fsImpl.copyFileSync(entry.target, entry.backup);
+    }
+    for (const entry of entries) fsImpl.renameSync(entry.temporary, entry.target);
+  } catch (cause) {
+    const rollbackErrors = [];
+    for (const entry of [...entries].reverse()) {
+      try {
+        if (fsImpl.existsSync(entry.backup)) {
+          fsImpl.copyFileSync(entry.backup, entry.target);
+        } else if (!entry.hadTarget && fsImpl.existsSync(entry.target) && !fsImpl.existsSync(entry.temporary)) {
+          fsImpl.rmSync(entry.target, { force: true });
+        }
+      } catch (rollbackCause) {
+        rollbackErrors.push(`${entry.target}: ${rollbackCause.message}`);
+      }
+    }
+    const suffix = rollbackErrors.length ? `; rollback failed: ${rollbackErrors.join(", ")}` : "";
+    throw new Error(`asset catalog batch publish failed: ${cause.message}${suffix}`, { cause });
+  } finally {
+    for (const entry of entries) {
+      if (fsImpl.existsSync(entry.temporary)) fsImpl.rmSync(entry.temporary, { force: true });
+      if (fsImpl.existsSync(entry.backup)) fsImpl.rmSync(entry.backup, { force: true });
+    }
+  }
+}
+
 function readJsonIfPresent(file) {
   try {
     return JSON.parse(fs.readFileSync(file, "utf8"));
@@ -97,7 +150,7 @@ async function solanaAccountMap(connection, addresses) {
 export async function runXStocksRefresh({
   fetchImpl = fetch,
   env = process.env,
-  write = (chain, document) => atomicWriteJson(path.resolve("config", "assets", `${chain}.json`), document),
+  publish = (documents) => atomicWriteJsonBatch(documents),
   now = Date.now,
 } = {}) {
   const pages = await fetchAllXStocksPages({ fetchImpl });
@@ -129,7 +182,7 @@ export async function runXStocksRefresh({
         chain,
         readJsonIfPresent(path.resolve("config", "assets", `${chain}.json`)),
       ])),
-      write,
+      publish,
       now,
     });
   } finally {

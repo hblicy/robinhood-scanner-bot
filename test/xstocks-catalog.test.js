@@ -1,6 +1,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { PublicKey } from "@solana/web3.js";
 import {
   parseXStocksAssets,
@@ -8,6 +10,7 @@ import {
 } from "../src/assets/sources/xstocks.js";
 import {
   formatAssetRefreshResult,
+  atomicWriteJsonBatch,
   loadRefreshEnvironment,
 } from "../scripts/refresh-asset-catalog.js";
 
@@ -71,14 +74,14 @@ describe("xStocks official asset catalog", () => {
         bsc: async (address) => address.endsWith("4444") ? "0x" : "0x6000",
       },
       existingDocuments: {},
-      write: async (chain, document) => writes.push([chain, document]),
+      publish: async (documents) => writes.push(documents),
       now: () => 1_789_000_000_000,
     }), /bytecode/i);
     assert.equal(writes.length, 0);
   });
 
   it("merges verified xStocks into an existing BSC stock catalog", async () => {
-    const writes = [];
+    const publications = [];
     const result = await refreshXStocksCatalogs({
       pages: [fixture],
       readers: {
@@ -108,12 +111,66 @@ describe("xStocks official asset catalog", () => {
           }]
         }
       },
-      write: async (chain, document) => writes.push([chain, document]),
+      publish: async (documents) => publications.push(documents),
       now: () => 1_789_000_000_000,
     });
-    assert.equal(writes.length, 3);
+    assert.equal(publications.length, 1);
+    assert.deepEqual(publications[0], result);
     assert.equal(result.bsc.assets.length, 3);
     assert.ok(result.bsc.assets.some(({ issuer }) => issuer === "BTech Holdings"));
+  });
+
+  it("publishes the three verified catalogs as one batch", async () => {
+    const publications = [];
+    await assert.rejects(() => refreshXStocksCatalogs({
+      pages: [fixture],
+      readers: {
+        solana: async () => ({ exists: true, owner: "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb" }),
+        ethereum: async () => "0x6000",
+        bsc: async () => "0x6000",
+      },
+      existingDocuments: {},
+      publish: async (documents) => {
+        publications.push(documents);
+        throw new Error("disk full");
+      },
+      now: () => 1_789_000_000_000,
+    }), /disk full/i);
+    assert.equal(publications.length, 1);
+    assert.deepEqual(Object.keys(publications[0]), ["solana", "ethereum", "bsc"]);
+  });
+
+  it("rolls back every catalog when a batch rename fails", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "xstocks-batch-"));
+    const originals = Object.fromEntries(["solana", "ethereum", "bsc"].map((chain) => [
+      chain,
+      { chain, generation: "old" },
+    ]));
+    try {
+      for (const [chain, document] of Object.entries(originals)) {
+        fs.writeFileSync(path.join(directory, `${chain}.json`), JSON.stringify(document), "utf8");
+      }
+      let failed = false;
+      const fsImpl = {
+        ...fs,
+        renameSync(from, to) {
+          if (!failed && to.endsWith("ethereum.json")) {
+            failed = true;
+            throw new Error("disk full");
+          }
+          return fs.renameSync(from, to);
+        },
+      };
+      assert.throws(() => atomicWriteJsonBatch(
+        Object.fromEntries(Object.keys(originals).map((chain) => [chain, { chain, generation: "new" }])),
+        { directory, fsImpl, transactionId: "test" }
+      ), /batch publish failed.*disk full/i);
+      for (const [chain, original] of Object.entries(originals)) {
+        assert.deepEqual(JSON.parse(fs.readFileSync(path.join(directory, `${chain}.json`), "utf8")), original);
+      }
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   it("formats a multi-chain refresh result without assuming a single catalog", () => {
