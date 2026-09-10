@@ -6,6 +6,7 @@ import { getAddress, JsonRpcProvider } from "ethers";
 import { Connection, PublicKey } from "@solana/web3.js";
 import { createAssetCatalog, serializeAssetCatalog } from "../src/assets/catalog.js";
 import { fetchJson } from "../src/assets/sources/http-json.js";
+import { readEnvFile } from "../src/env.js";
 import {
   combineXStocksPages,
   fetchAllXStocksPages,
@@ -135,6 +136,13 @@ export async function runXStocksRefresh({
     ethereum.destroy();
     bsc.destroy();
   }
+}
+
+export function loadRefreshEnvironment({
+  file = path.resolve(".env"),
+  processEnv = process.env,
+} = {}) {
+  return { ...readEnvFile(file), ...processEnv };
 }
 
 function attributeValue(attributes, name) {
@@ -277,16 +285,19 @@ export async function refreshAssetCatalog({
   return serialized;
 }
 
-export async function runAssetRefresh(argv = process.argv.slice(2)) {
+export async function runAssetRefresh(
+  argv = process.argv.slice(2),
+  { env = loadRefreshEnvironment() } = {}
+) {
   const chain = argv[0];
   const source = SOURCES[chain];
   if (!source) throw new Error(`unsupported asset source ${chain || "<missing>"}`);
   if (!source.enabled) throw new Error(`asset source ${chain} disabled-unverified: ${source.reason}`);
-  if (chain === "xstocks") return runXStocksRefresh();
+  if (chain === "xstocks") return runXStocksRefresh({ env });
   const output = path.resolve("config", "assets", `${chain}.json`);
   if (chain === "base") {
-    const rpcUrl = process.env.BASE_ANALYSIS_RPC_URL
-      || process.env.BASE_DISCOVERY_RPC_URL
+    const rpcUrl = env.BASE_ANALYSIS_RPC_URL
+      || env.BASE_DISCOVERY_RPC_URL
       || "https://mainnet.base.org";
     const provider = new JsonRpcProvider(rpcUrl, 8453, { staticNetwork: true });
     try {

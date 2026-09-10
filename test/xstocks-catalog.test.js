@@ -6,7 +6,10 @@ import {
   parseXStocksAssets,
   refreshXStocksCatalogs,
 } from "../src/assets/sources/xstocks.js";
-import { formatAssetRefreshResult } from "../scripts/refresh-asset-catalog.js";
+import {
+  formatAssetRefreshResult,
+  loadRefreshEnvironment,
+} from "../scripts/refresh-asset-catalog.js";
 
 const fixture = JSON.parse(fs.readFileSync(
   new URL("fixtures/assets/xstocks-assets-response.json", import.meta.url),
@@ -119,5 +122,14 @@ describe("xStocks official asset catalog", () => {
       ethereum: { assets: [{}] },
       bsc: { assets: [{}, {}, {}] },
     }), "asset catalogs refreshed: solana=2 ethereum=1 bsc=3");
+  });
+
+  it("loads refresh RPC settings from .env and lets process values override them", () => {
+    const env = loadRefreshEnvironment({
+      file: new URL("fixtures/refresh.env", import.meta.url),
+      processEnv: { SOLANA_RPC_URL: "https://from-process.example" },
+    });
+    assert.equal(env.SOLANA_RPC_URL, "https://from-process.example");
+    assert.equal(env.BSC_ANALYSIS_RPC_URL, "https://bsc-from-file.example");
   });
 });
