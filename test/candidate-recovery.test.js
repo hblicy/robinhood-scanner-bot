@@ -10,6 +10,7 @@ import {
   candidateRecoveryId,
   createCandidateRecovery,
   isRetryableCandidateFailure,
+  syncCandidateRecoveryKeys,
 } from "../src/candidate-recovery.js";
 import { candidateKey } from "../src/runtime.js";
 import { createStore } from "../src/store.js";
@@ -132,4 +133,36 @@ test("a failed candidate recovery is reactivated and executed after rediscovery"
   assert.equal(executions, 1);
   assert.equal(result.completed, 1);
   assert.equal(store.snapshot().pendingChecks[id].status, "completed");
+});
+
+test("an exhausted candidate recovery is released and reactivated in the same process", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "candidate-recovery-live-"));
+  dirs.push(dir);
+  const store = createStore({ dataDir: dir, now: () => 10_000 });
+  const recoveryKeys = new Set();
+  const schedule = createCandidateRecoveryScheduler({
+    store,
+    recoveryKeys,
+    now: () => 10_000,
+  });
+  await schedule(event, new Error("initial failure"));
+
+  const handlers = { candidate_recovery: async () => { throw new Error("still unavailable"); } };
+  for (const at of [130_000, 310_000, 610_000]) {
+    await runPendingChecks({ store, handlers, now: () => at });
+    syncCandidateRecoveryKeys(recoveryKeys, store.snapshot());
+  }
+
+  const id = candidateRecoveryId(event);
+  assert.equal(store.snapshot().pendingChecks[id].status, "failed");
+  assert.equal(recoveryKeys.has(candidateKey(event)), false);
+
+  const reactivated = await createCandidateRecoveryScheduler({
+    store,
+    recoveryKeys,
+    now: () => 700_000,
+  })(event, new Error("rediscovered"));
+  assert.equal(reactivated.status, "pending");
+  assert.equal(reactivated.attempts, 0);
+  assert.equal(recoveryKeys.has(candidateKey(event)), true);
 });

@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { DATA_DIR, SETTINGS } from "./config.js";
 import { advanceProgramCursor, createSolanaCursorState } from "./solana/cursor.js";
 import { safeErrorMessage } from "./safety.js";
@@ -589,7 +590,13 @@ export function createStore({
       });
     },
 
-    applyCheckResult(id, { token, nextToken, notification = null, completedAt = now() }) {
+    applyCheckResult(id, {
+      token,
+      nextToken,
+      expectedToken = null,
+      notification = null,
+      completedAt = now(),
+    }) {
       const key = String(token || "").toLowerCase();
       if (!key || !nextToken || typeof nextToken !== "object") {
         throw new Error(`pending check ${id} requires token state`);
@@ -597,6 +604,7 @@ export function createStore({
       return commit((draft) => {
         const entry = requireEntry(draft.pendingChecks, id, "pending check");
         if (entry.status !== "pending") return null;
+        if (expectedToken && !isDeepStrictEqual(draft.tokens[key], expectedToken)) return null;
         draft.tokens[key] = structuredClone(nextToken);
         const watchlist = new Set(draft.watchlist.map((value) => String(value).toLowerCase()));
         if (nextToken.watchlist) watchlist.add(key);

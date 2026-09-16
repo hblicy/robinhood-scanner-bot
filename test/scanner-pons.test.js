@@ -264,6 +264,83 @@ test("a failed superseded Pons inspection cannot become pending again", async ()
   assert.equal(store.snapshot().pendingChecks[`${EVENT_ID}:pons_inspection`].status, "expired");
 });
 
+test("a Pons inspection retries from current state after a lifecycle event without a replacement check", async () => {
+  const store = tempStore();
+  await watchPonsRange(dependencies(store));
+  let releaseInspection;
+  let inspectionStarted;
+  const started = new Promise((resolve) => { inspectionStarted = resolve; });
+  const gate = new Promise((resolve) => { releaseInspection = resolve; });
+  let inspections = 0;
+  let currentTime = 20_000;
+  const handlers = createInspectionCheckHandlers({
+    provider: {},
+    store,
+    now: () => currentTime,
+    inspect: async () => {
+      inspections += 1;
+      if (inspections === 1) {
+        inspectionStarted();
+        await gate;
+      }
+      return {
+        token: TOKEN,
+        identity: "pons-v2",
+        protocolPhase: "not_graduated",
+        monitorState: "observed",
+        marketReady: false,
+        riskDataStatus: "known",
+        reasons: [],
+        curve: { status: "sufficient", tradeCount: 5, uniqueTraders: 3, bidirectional: true },
+        timedOut: false,
+        errors: [],
+      };
+    },
+  });
+  const running = runPendingChecks({ store, handlers, now: () => 20_000, limit: 1 });
+  await started;
+
+  const rescuedEventId = `4663:${"0x" + "12".repeat(32)}:4`;
+  const current = store.snapshot().tokens[TOKEN.toLowerCase()];
+  store.commitPonsRange({
+    toBlock: 121,
+    transitions: [{
+      eventId: rescuedEventId,
+      blockNumber: 121,
+      token: TOKEN,
+      nextToken: {
+        ...current,
+        protocolPhase: "rescued",
+        monitorState: "killed",
+        watchlist: false,
+        killReason: "graduation-rescued-no-pool",
+        facts: {
+          ...current.facts,
+          lifecycleEvents: [...current.facts.lifecycleEvents, rescuedEventId],
+        },
+        updatedAt: 21_000,
+      },
+      notifications: [],
+      checks: [],
+    }],
+  });
+  releaseInspection();
+
+  const staleRun = await running;
+  let state = store.snapshot();
+  assert.equal(staleRun.completed, 0);
+  assert.equal(state.tokens[TOKEN.toLowerCase()].protocolPhase, "rescued");
+  assert.equal(state.pendingChecks[`${EVENT_ID}:pons_inspection`].status, "pending");
+
+  currentTime = 22_000;
+  const retryRun = await runPendingChecks({ store, handlers, now: () => 22_000, limit: 1 });
+  state = store.snapshot();
+  assert.equal(retryRun.completed, 1);
+  assert.equal(state.tokens[TOKEN.toLowerCase()].protocolPhase, "rescued");
+  assert.equal(state.tokens[TOKEN.toLowerCase()].facts.lifecycleEvents.at(-1), rescuedEventId);
+  assert.equal(state.pendingChecks[`${EVENT_ID}:pons_inspection`].status, "completed");
+});
+
 test("pending checks can request an expected business retry without throwing", async () => {
   const store = tempStore();
   store.scheduleCheck({

@@ -44,9 +44,10 @@
 6. 旧任务全部标记 `expired`，原因为 `superseded-by:<canonical-id>`。如果 canonical ID 已存在，则只做旧任务终结，不重复创建。
 7. 整理和 canonical 创建在一次状态写入中完成；写盘失败时内存状态也不得改变。
 
-新 Pons 生命周期事件不再创建四个或两个同质任务，而是每个事件只创建一个 `pons_inspection`。提交同一 token 的更新生命周期事件时，原子地把该 token 仍在 pending 的旧 `pons_inspection` 标记为 `expired/superseded-by:<new-id>`，避免启动后再次形成重复积压。
+新 Pons launch 和 graduation 事件不再创建四个或两个同质任务，而是各创建一个 `pons_inspection`。提交同一 token 且带 replacement inspection 的更新生命周期事件时，原子地把该 token 仍在 pending 的旧 `pons_inspection` 标记为 `expired/superseded-by:<new-id>`，避免启动后再次形成重复积压。对于 `launch_swept`、`tokens_locked` 等不创建 replacement inspection 的更新，inspection 写回使用完整 token 快照 CAS；状态已经变化时丢弃旧结果并保留任务，下一轮基于最新生命周期状态重新检查。
 
 `activeCandidateRecoveryKeys` 只把 `status === "pending"` 的 candidate recovery 视为活跃任务，避免 `failed` 或 `expired` 记录阻止未来合法恢复。
+watch pending worker 每轮结束后从持久状态重新同步内存 recovery key，保证任务在同一进程内进入终态后也能释放去重键。
 
 ## Pending check 执行与公平性
 

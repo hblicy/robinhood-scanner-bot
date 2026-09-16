@@ -33,6 +33,7 @@ import {
   activeCandidateRecoveryKeys,
   createCandidateRecovery,
   isRetryableCandidateFailure,
+  syncCandidateRecoveryKeys,
 } from "./candidate-recovery.js";
 import {
   createCandidateRouteStats,
@@ -310,7 +311,7 @@ export function createInspectionCheckHandlers({
       evidenceConfirmed: transitionType === "hard_kill",
     } : null;
     if (notification) notification.text = formatLifecycleNotification(notification);
-    return { token: check.token, nextToken, notification };
+    return { token: check.token, nextToken, expectedToken: previous, notification };
   };
   return { pons_inspection: handle };
 }
@@ -1313,7 +1314,9 @@ async function watch({ mode = "live", context = null } = {}) {
           startBucket: pendingBucketCursor,
         });
         pendingBucketCursor = result.nextBucketCursor;
-        const activity = formatPendingWorkerActivity(result, store.snapshot());
+        const snapshot = store.snapshot();
+        syncCandidateRecoveryKeys(recoveryKeys, snapshot);
+        const activity = formatPendingWorkerActivity(result, snapshot);
         if (activity) console.log(activity);
         if (result.failed) console.error(`pending checks: ${result.failed} checks exhausted retries`);
         await sleep(settings.outboxPollMs);
