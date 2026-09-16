@@ -18,6 +18,49 @@ afterEach(() => {
 });
 
 describe("Robinhood multichain application", () => {
+  it("loads Telegram configuration from the project-root .env", () => {
+    const projectRoot = tempRoot();
+    fs.writeFileSync(path.join(projectRoot, ".env"), [
+      "TELEGRAM_BOT_TOKEN=file-token",
+      "TELEGRAM_CHAT_ID=file-chat",
+      "ROBINHOOD_TELEGRAM_CHAT_ID=robinhood-file-chat",
+    ].join("\n"));
+
+    const app = createApp({
+      chainKey: "robinhood",
+      env: {},
+      dependencies: {
+        projectRoot,
+        createRpcContext: () => ({}),
+        commands: { watch: async () => {}, scan: async () => {}, check: async () => {} },
+      },
+    });
+
+    assert.equal(app.config.telegram.token, "file-token");
+    assert.equal(app.config.telegram.chatId, "robinhood-file-chat");
+  });
+
+  it("lets explicit environment override project-root .env values", () => {
+    const projectRoot = tempRoot();
+    fs.writeFileSync(path.join(projectRoot, ".env"), [
+      "TELEGRAM_BOT_TOKEN=file-token",
+      "ROBINHOOD_TELEGRAM_CHAT_ID=file-chat",
+    ].join("\n"));
+
+    const app = createApp({
+      chainKey: "robinhood",
+      env: { TELEGRAM_BOT_TOKEN: "process-token" },
+      dependencies: {
+        projectRoot,
+        createRpcContext: () => ({}),
+        commands: { watch: async () => {}, scan: async () => {}, check: async () => {} },
+      },
+    });
+
+    assert.equal(app.config.telegram.token, "process-token");
+    assert.equal(app.config.telegram.chatId, "file-chat");
+  });
+
   it("fails closed when an interrupted asset refresh journal is present", () => {
     const projectRoot = tempRoot();
     const assetDirectory = path.join(projectRoot, "config", "assets");

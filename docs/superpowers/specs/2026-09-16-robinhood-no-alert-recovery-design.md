@@ -95,6 +95,10 @@ watch pending worker 每轮结束后从持久状态重新同步内存 recovery k
 - 超龄或被替代任务：进入 `expired`，不再调用任何外部数据源。
 - Telegram 发送失败：保留现有 outbox 可靠重试语义，不回滚已经确认的链上游标。
 
+## 配置加载
+
+`createApp` 从实际 `projectRoot/.env` 读取文件配置，再用调用方显式传入的 `env`（默认 `process.env`）覆盖同名键。这样标准 `npm run watch -- --chain robinhood` 能读取 Telegram 与链级配置，同时保留容器、systemd 和测试通过进程环境覆盖 `.env` 的能力。`loadChainConfig` 继续保持纯解析函数，不自行访问文件系统；日志和测试不得输出凭据值。
+
 ## 测试设计
 
 使用测试驱动方式覆盖：

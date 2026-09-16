@@ -1358,3 +1358,53 @@ git commit -m "修复：防止生命周期覆盖检查结果"
 ```
 
 Expected: 全量测试 0 fail；diff check 无输出；提交只包含本竞态修复及对应文档。
+
+### Task 8: 恢复默认命令的 `.env` Telegram 配置
+
+**Files:**
+- Modify: `src/app.js:1-20,569-575`
+- Test: `test/robinhood-app.test.js`
+- Modify: `docs/superpowers/specs/2026-09-16-robinhood-no-alert-recovery-design.md`
+
+- [x] **Step 1: 写 `.env` 加载与显式环境覆盖测试**
+
+在临时 `projectRoot/.env` 写入测试 token、通用 chat ID 和 Robinhood chat ID。以 `env: {}` 创建应用时断言读取文件值；再传入显式 token/chat ID，断言显式环境覆盖文件值。测试只使用固定假凭据。
+
+- [x] **Step 2: 运行测试确认 RED**
+
+```bash
+node --test --test-name-pattern="loads Telegram configuration" test/robinhood-app.test.js
+```
+
+Expected: FAIL，当前 `createApp` 只把传入的空 `env` 交给 `loadChainConfig`。
+
+- [x] **Step 3: 实现最小配置合并**
+
+在 `src/app.js` 导入 `readEnvFile`，先解析 `projectRoot`，再执行：
+
+```js
+const fileEnv = readEnvFile(path.join(projectRoot, ".env"));
+const loaded = loadChainConfig(chainKey, { ...fileEnv, ...env });
+```
+
+保持调用方显式环境优先，不修改 `loadChainConfig`，不向日志输出配置值。
+
+- [x] **Step 4: 运行定向与完整回归**
+
+```bash
+node --test test/robinhood-app.test.js test/evm-apps.test.js test/solana-app.test.js test/chain-profiles.test.js
+npm test
+git diff --check
+```
+
+Expected: 全部通过，0 fail。
+
+- [x] **Step 5: 提交并更新现有 PR**
+
+```bash
+git add src/app.js test/robinhood-app.test.js docs/superpowers/specs/2026-09-16-robinhood-no-alert-recovery-design.md docs/superpowers/plans/2026-09-16-robinhood-no-alert-recovery.md
+git commit -m "修复：恢复环境文件中的推送配置"
+git push
+```
+
+Expected: PR #15 更新到新提交；不创建重复 PR。
