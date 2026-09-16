@@ -32,6 +32,23 @@ function write(dir, file, value) {
   fs.writeFileSync(path.join(dir, file), value);
 }
 
+function stateFile(overrides = {}) {
+  return {
+    schemaVersion: 5,
+    seen: {},
+    positions: {},
+    trades: [],
+    cursors: { onchain: null, ponsV2: 100, solanaPrograms: {} },
+    tokens: {},
+    watchlist: [],
+    heat: null,
+    appliedEvents: {},
+    outbox: {},
+    pendingChecks: {},
+    ...overrides,
+  };
+}
+
 function openStore(dir, overrides = {}) {
   return createStore({
     dataDir: dir,
@@ -47,6 +64,167 @@ afterEach(() => {
 });
 
 describe("createStore", () => {
+  it("migrates v5 to v6 without losing lifecycle data", () => {
+    const dir = tempDir();
+    const raw = stateFile({
+      tokens: { [TOKEN.toLowerCase()]: tokenState({ birthAt: 500 }) },
+      pendingChecks: {
+        [`${EVENT_ID}:holders`]: {
+          id: `${EVENT_ID}:holders`,
+          eventId: EVENT_ID,
+          type: "holders",
+          token: TOKEN,
+          dueAt: 600,
+          status: "pending",
+          attempts: 3,
+          nextAttemptAt: 700,
+          createdAt: 500,
+          completedAt: null,
+          lastError: "rate limited",
+        },
+      },
+    });
+    write(dir, "state.json", JSON.stringify(raw));
+
+    const store = createStore({ dataDir: dir, now: () => 1_000 });
+    const saved = JSON.parse(fs.readFileSync(path.join(dir, "state.json"), "utf8"));
+
+    assert.equal(saved.schemaVersion, 6);
+    assert.deepEqual(saved.tokens, raw.tokens);
+    assert.deepEqual(saved.pendingChecks, raw.pendingChecks);
+    assert.deepEqual(store.snapshot().cursors, raw.cursors);
+  });
+
+  it("rejects an unsupported pending-check status", () => {
+    const dir = tempDir();
+    write(dir, "state.json", JSON.stringify(stateFile({
+      pendingChecks: {
+        bad: { id: "bad", type: "holders", status: "forgotten", nextAttemptAt: 1, createdAt: 1 },
+      },
+    })));
+    assert.throws(() => createStore({ dataDir: dir }), /pending check bad has invalid status/);
+  });
+
+  it("expires a production-sized legacy Pons backlog without deleting audit records", () => {
+    const dir = tempDir();
+    const now = 2_000_000;
+    const tokens = {};
+    const pendingChecks = {};
+    const types = ["curve_flow", "holders", "deployer_24h", "line_a"];
+    for (let index = 1; index <= 509; index += 1) {
+      const token = `0x${String(index).padStart(40, "0")}`;
+      const eventId = `4663:0x${String(index).padStart(64, "0")}:0`;
+      tokens[token] = tokenState({ token, birthAt: 1_000 });
+      for (const type of types) {
+        const id = `${eventId}:${type}`;
+        pendingChecks[id] = {
+          id,
+          eventId,
+          type,
+          token,
+          dueAt: 1_000,
+          status: "pending",
+          attempts: 4,
+          nextAttemptAt: 1_500,
+          createdAt: 1_000,
+          completedAt: null,
+          lastError: "timeout",
+        };
+      }
+    }
+    write(dir, "state.json", JSON.stringify(stateFile({ tokens, pendingChecks })));
+    const store = createStore({ dataDir: dir, now: () => now });
+
+    const result = store.reconcilePendingChecks({ at: now, maxAgeMinutes: 30 });
+    const state = store.snapshot();
+
+    assert.deepEqual(result, {
+      scanned: 2036,
+      expired: 2036,
+      canonicalCreated: 0,
+      reasons: { "outside-alert-window": 2036 },
+    });
+    assert.equal(Object.keys(state.pendingChecks).length, 2036);
+    assert.equal(Object.values(state.pendingChecks).every((check) => check.status === "expired"), true);
+  });
+
+  it("consolidates fresh legacy checks once and remains idempotent", () => {
+    const dir = tempDir();
+    const now = 100_000;
+    const pendingChecks = Object.fromEntries(
+      ["curve_flow", "holders", "deployer_24h", "line_a"].map((type, index) => {
+        const id = `${EVENT_ID}:${type}`;
+        return [id, {
+          id,
+          eventId: EVENT_ID,
+          type,
+          token: TOKEN,
+          dueAt: 90_000 + index,
+          status: "pending",
+          attempts: index,
+          nextAttemptAt: 95_000 + index,
+          createdAt: 80_000 + index,
+          completedAt: null,
+          lastError: `error-${index}`,
+        }];
+      })
+    );
+    write(dir, "state.json", JSON.stringify(stateFile({
+      tokens: { [TOKEN.toLowerCase()]: tokenState({ birthAt: 90_000 }) },
+      pendingChecks,
+    })));
+    const store = createStore({ dataDir: dir, now: () => now });
+
+    const first = store.reconcilePendingChecks({ at: now, maxAgeMinutes: 30 });
+    const second = store.reconcilePendingChecks({ at: now, maxAgeMinutes: 30 });
+    const state = store.snapshot();
+    const canonical = state.pendingChecks[`${EVENT_ID}:pons_inspection`];
+
+    assert.equal(first.canonicalCreated, 1);
+    assert.equal(first.expired, 4);
+    assert.deepEqual(second, { scanned: 0, expired: 0, canonicalCreated: 0, reasons: {} });
+    assert.equal(canonical.type, "pons_inspection");
+    assert.equal(canonical.attempts, 3);
+    assert.equal(canonical.nextAttemptAt, 95_000);
+    assert.equal(Object.values(state.pendingChecks).filter((check) => check.status === "pending").length, 1);
+  });
+
+  it("keeps in-memory pending checks unchanged when reconciliation cannot persist", () => {
+    const dir = tempDir();
+    const id = `${EVENT_ID}:holders`;
+    write(dir, "state.json", JSON.stringify(stateFile({
+      schemaVersion: 6,
+      tokens: { [TOKEN.toLowerCase()]: tokenState({ birthAt: 1_000 }) },
+      pendingChecks: {
+        [id]: {
+          id,
+          eventId: EVENT_ID,
+          type: "holders",
+          token: TOKEN,
+          dueAt: 1_000,
+          status: "pending",
+          attempts: 0,
+          nextAttemptAt: 1_000,
+          createdAt: 1_000,
+          completedAt: null,
+          lastError: null,
+        },
+      },
+    })));
+    const store = createStore({
+      dataDir: dir,
+      now: () => 2_000_000,
+      writeState: () => { throw new Error("rename failed"); },
+    });
+    const before = store.snapshot();
+
+    assert.throws(
+      () => store.reconcilePendingChecks({ at: 2_000_000, maxAgeMinutes: 30 }),
+      /rename failed/
+    );
+    assert.deepEqual(store.snapshot(), before);
+  });
+
   it("schedules a generic pending check idempotently without resetting retry state", () => {
     const store = openStore(tempDir());
     const check = {
@@ -149,7 +327,7 @@ describe("createStore", () => {
     const original = fs.readFileSync(path.join(dir, "positions.json"), "utf8");
     createStore({ dataDir: dir, now: () => 1, maxSeenEntries: 10, seenTtlMs: 1000 });
     const persisted = JSON.parse(fs.readFileSync(path.join(dir, "state.json"), "utf8"));
-    assert.equal(persisted.schemaVersion, 5);
+    assert.equal(persisted.schemaVersion, 6);
     assert.deepEqual(persisted.positions, positions);
     assert.equal(fs.readFileSync(path.join(dir, "positions.json"), "utf8"), original);
   });
@@ -182,7 +360,7 @@ describe("createStore", () => {
     openStore(dir);
 
     const state = JSON.parse(fs.readFileSync(path.join(dir, "state.json"), "utf8"));
-    assert.equal(state.schemaVersion, 5);
+    assert.equal(state.schemaVersion, 6);
     assert.equal(state.seen.a.token, "a");
     assert.equal(state.trades.length, 1);
     assert.deepEqual(state.cursors, { onchain: null, ponsV2: null, solanaPrograms: {} });
@@ -248,7 +426,7 @@ describe("createStore", () => {
     const store = openStore(dir);
     const state = store.snapshot();
 
-    assert.equal(state.schemaVersion, 5);
+    assert.equal(state.schemaVersion, 6);
     assert.deepEqual(state.positions, positions);
     assert.deepEqual(state.trades, trades);
     assert.equal(state.cursors.onchain, 91);
@@ -257,7 +435,7 @@ describe("createStore", () => {
     assert.deepEqual(state.watchlist, []);
     assert.deepEqual(state.outbox, {});
     assert.deepEqual(state.pendingChecks, {});
-    assert.equal(JSON.parse(fs.readFileSync(path.join(dir, "state.json"))).schemaVersion, 5);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(dir, "state.json"))).schemaVersion, 6);
   });
 
   it("migrates v4 state and atomically commits a Solana program cursor with applied events", () => {
@@ -283,7 +461,7 @@ describe("createStore", () => {
       events: [{ eventId: "solana|sig|0", slot: 101 }],
     });
     const state = store.snapshot();
-    assert.equal(state.schemaVersion, 5);
+    assert.equal(state.schemaVersion, 6);
     assert.equal(state.cursors.onchain, 91);
     assert.equal(state.cursors.ponsV2, 92);
     assert.equal(state.cursors.solanaPrograms.pump.signature, "sig");
