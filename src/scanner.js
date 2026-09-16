@@ -49,6 +49,11 @@ import {
 } from "./analysis-rpc-circuit.js";
 import { intervalForRpcBudget } from "./rpc-usage-budget.js";
 import { formatHourlyUsage } from "./startup-summary.js";
+import {
+  formatPendingReconciliation,
+  formatScannerHealth,
+  formatWorkerActivity,
+} from "./scanner-health.js";
 
 const DEFAULT_ANALYSIS_CONCURRENCY = 1;
 class NonRetryablePendingCheckError extends Error {
@@ -1129,6 +1134,22 @@ export function notificationsEnabledForMode(mode) {
   throw new Error(`unknown watch mode: ${mode}`);
 }
 
+export function reconcileWatchPendingChecks({
+  store,
+  settings,
+  mode,
+  now = Date.now,
+  log = console.log,
+}) {
+  if (mode !== "live") return null;
+  const reconciliation = store.reconcilePendingChecks({
+    at: now(),
+    maxAgeMinutes: settings.maxAgeMinutes,
+  });
+  log(formatPendingReconciliation(reconciliation));
+  return reconciliation;
+}
+
 async function watch({ mode = "live", context = null } = {}) {
   const runtime = createWatchRuntime(context);
   const { settings, store, rpc } = runtime;
@@ -1144,6 +1165,7 @@ async function watch({ mode = "live", context = null } = {}) {
       discoveryRpc: context.config.rpc.discoveryUrl,
       analysisRpc: context.config.rpc.analysisUrl,
     } : CHAIN);
+    reconcileWatchPendingChecks({ store, settings, mode });
     const { analysisProvider } = rpc;
     if (settings.onchainScan) {
       await runWatchStartupChecks({ ...rpc.startup, store, notificationsEnabled });
@@ -1264,6 +1286,8 @@ async function watch({ mode = "live", context = null } = {}) {
             store,
             send: runtime.sendText,
           });
+          const activity = formatWorkerActivity("outbox", result);
+          if (activity) console.log(activity);
           if (result.failed) console.error(`outbox: ${result.failed} notifications exhausted retries`);
           await sleep(settings.outboxPollMs);
         }
@@ -1278,6 +1302,8 @@ async function watch({ mode = "live", context = null } = {}) {
           startBucket: pendingBucketCursor,
         });
         pendingBucketCursor = result.nextBucketCursor;
+        const activity = formatWorkerActivity("pending-checks", result);
+        if (activity) console.log(activity);
         if (result.failed) console.error(`pending checks: ${result.failed} checks exhausted retries`);
         await sleep(settings.outboxPollMs);
       }
@@ -1313,6 +1339,7 @@ async function watch({ mode = "live", context = null } = {}) {
       loops.push((async () => {
         while (true) {
           console.log(formatHourlyUsage(context.config, Date.now()));
+          console.log(formatScannerHealth(store.snapshot(), Date.now()));
           const hour = Math.floor(Date.now() / 3_600_000);
           await sleep(Math.max(1, (hour + 1) * 3_600_000 - Date.now()));
         }

@@ -9,6 +9,7 @@ import {
   initialOnchainCursor,
   processEvents,
   processOnchainRange,
+  reconcileWatchPendingChecks,
   runReadOnlyCandidates,
   runWatchIteration,
   scanOnce,
@@ -1596,5 +1597,32 @@ describe("scanner orchestration", () => {
       }
     );
     assert.equal(rpcCalls, 0);
+  });
+
+  it("reconciles pending checks only for live watch mode", () => {
+    const calls = [];
+    const store = {
+      reconcilePendingChecks: (input) => {
+        calls.push(input);
+        return { scanned: 0, expired: 0, canonicalCreated: 0, reasons: {} };
+      },
+    };
+    const logs = [];
+    reconcileWatchPendingChecks({
+      store,
+      settings: { maxAgeMinutes: 30 },
+      mode: "live",
+      now: () => 1_000,
+      log: (line) => logs.push(line),
+    });
+    reconcileWatchPendingChecks({
+      store,
+      settings: { maxAgeMinutes: 30 },
+      mode: "recovery",
+      now: () => 2_000,
+      log: (line) => logs.push(line),
+    });
+    assert.deepEqual(calls, [{ at: 1_000, maxAgeMinutes: 30 }]);
+    assert.deepEqual(logs, ["pending-reconcile scanned=0 expired=0 canonicalCreated=0 reasons=none"]);
   });
 });
