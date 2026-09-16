@@ -526,6 +526,19 @@ export async function initialOnchainCursor({
   return Math.min(head, Math.max(savedCursor ?? -1, firstRelevantBlock - 1));
 }
 
+export const ONCHAIN_SCAN_CHUNK_BLOCKS = 200;
+
+async function runOnchainStage(stage, work, context = "") {
+  try {
+    return await work();
+  } catch (cause) {
+    throw new Error(
+      `onchain stage=${stage}${context} failed: ${safeErrorMessage(cause)}`,
+      { cause }
+    );
+  }
+}
+
 export async function runWatchIteration(state, dependencies) {
   const { settings } = dependencies;
   const errors = [];
@@ -533,49 +546,71 @@ export async function runWatchIteration(state, dependencies) {
   const runOnchain = async () => {
     if (!settings.onchainScan) return;
     try {
+      const onchainStartedAt = dependencies.now();
       const runDiscoverySession = dependencies.runDiscoverySession ??
         ((work) => work(dependencies.provider));
       const result = await runDiscoverySession(async (provider) => {
-        const latestHead = await dependencies.getBlockNumber(provider);
+        const latestHead = await runOnchainStage(
+          "head",
+          () => dependencies.getBlockNumber(provider)
+        );
         const safeHead = latestHead - (settings.confirmationBlocks ?? 0);
         let lastBlock = state.lastBlock;
+        let scanFrom = null;
         if (safeHead >= 0 && lastBlock == null) {
-          lastBlock = await initialOnchainCursor({
+          lastBlock = await runOnchainStage("boundary", () => initialOnchainCursor({
             head: safeHead,
             savedCursor: dependencies.getOnchainCursor(),
             maxAgeMinutes: settings.maxAgeMinutes,
             now: dependencies.now,
             findFirstBlockAtOrAfter: (target, head) =>
               dependencies.findFirstBlockAtOrAfter(target, head, provider),
-          });
+          }));
+          if (lastBlock >= 0 && dependencies.getOnchainCursor() == null) {
+            await runOnchainStage(
+              "bootstrap-cursor",
+              () => dependencies.setOnchainCursor(lastBlock)
+            );
+            state.lastBlock = lastBlock;
+          }
+          if (lastBlock < 0) scanFrom = 0;
         }
-        if (safeHead < 0 || safeHead <= lastBlock) {
+        if (safeHead < 0 || (lastBlock >= 0 && safeHead <= lastBlock)) {
           return { safeHead, lastBlock, scanned: null };
         }
-        const from = lastBlock + 1;
-        const scanned = await processOnchainRange(
-          { from, head: safeHead },
-          {
-            scanOnchain: (start, end) => dependencies.scanOnchain(start, end, provider),
-            handleEvents: (events) => dependencies.handleEvents(
-              events.map((event) => ({ ...event, observedAt: event.observedAt ?? observedAt })),
-              "onchain"
-            ),
-          }
+        const from = scanFrom ?? lastBlock + 1;
+        const to = Math.min(safeHead, from + ONCHAIN_SCAN_CHUNK_BLOCKS - 1);
+        const scanned = await runOnchainStage(
+          "range",
+          () => processOnchainRange(
+            { from, head: to },
+            {
+              scanOnchain: (start, end) => dependencies.scanOnchain(start, end, provider),
+              handleEvents: (events) => dependencies.handleEvents(
+                events.map((event) => ({ ...event, observedAt: event.observedAt ?? observedAt })),
+                "onchain"
+              ),
+            }
+          ),
+          ` from=${from} to=${to}`
         );
-        return { safeHead, lastBlock, from, scanned };
+        return { safeHead, lastBlock, from, to, scanned };
       });
-      if (result.scanned?.events.length) {
+      if (result.scanned) {
         dependencies.log(
-          `onchain ${result.from}-${result.safeHead}: ${result.scanned.events.length} pools, ${result.scanned.accepted} new`
+          `onchain from=${result.from} to=${result.to} safeHead=${result.safeHead}`
+          + ` cursorLag=${Math.max(0, result.safeHead - result.to)}`
+          + ` durationMs=${Math.max(0, dependencies.now() - onchainStartedAt)}`
+          + ` events=${result.scanned.events.length} accepted=${result.scanned.accepted}`
+          + ` failed=${result.scanned.failed}`
         );
       }
       if (result.scanned?.complete) {
-        dependencies.setOnchainCursor(result.safeHead);
-        state.lastBlock = result.safeHead;
+        dependencies.setOnchainCursor(result.to);
+        state.lastBlock = result.to;
       } else if (result.scanned) {
         dependencies.log(
-          `onchain ${result.from}-${result.safeHead}: ${result.scanned.failed} failed; cursor not advanced`
+          `onchain ${result.from}-${result.to}: ${result.scanned.failed} failed; cursor not advanced`
         );
       } else if (state.lastBlock == null) {
         state.lastBlock = result.lastBlock;
