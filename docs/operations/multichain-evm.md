@@ -24,6 +24,31 @@ npm run watch:robinhood
 
 首次没有游标时只恢复年龄窗口内的状态，不发历史 Telegram。确认游标持续前进、链 ID 正确、无 429 风暴后，再逐链把 `*_ALERT_MODE` 改为 `live`。
 
+### Robinhood 升级与恢复验收
+
+停止旧进程后，先备份整个状态目录，再安装锁定依赖并运行测试：
+
+```bash
+cd /home/ubuntu/robinhood-scanner-bot
+cp -a data "data.backup.$(date +%Y%m%d-%H%M%S)"
+npm ci
+npm test
+```
+
+按 README 中带 `-L -Logfile logs/robinhood.log` 的 `screen` 命令启动。启动后查看日志，并用下列命令检查状态计数；命令不输出任务正文或凭据：
+
+```bash
+tail -n 200 logs/robinhood.log
+node -e '
+const fs=require("fs");
+const s=JSON.parse(fs.readFileSync("data/robinhood/state.json","utf8"));
+const count=(items,key)=>Object.values(items||{}).reduce((r,x)=>(r[x?.[key]||"unknown"]=(r[x?.[key]||"unknown"]||0)+1,r),{});
+console.log({schemaVersion:s.schemaVersion,cursors:s.cursors,pending:count(s.pendingChecks,"status"),outbox:count(s.outbox,"status")});
+'
+```
+
+验收标准：`schemaVersion` 为 `6`；旧 Pons 检查进入 `expired` 或被收敛为单个有效检查；`cursors.onchain` 非 `null` 且连续推进；观察 30 分钟，pending 总量不应无界增长。没有候选满足既有推送策略时，Telegram 没有候选消息不代表扫描器故障。故障报告不得粘贴 `.env`、完整 RPC URL、Telegram token 或 chat ID。
+
 ## RPC 与失败语义
 
 每条链的 `*_DISCOVERY_RPC_URL` 承担高频区块和日志发现，`*_ANALYSIS_RPC_URL` 承担候选深检并作为整轮发现回退。两者相同时共享一个限流器，不会对同一失败端点重复回退。网络错误、超时、429、5xx 会脱敏记录并重试；ABI、链 ID、固定协议配置等永久错误会退出，避免错误推进游标。
