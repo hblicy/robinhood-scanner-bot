@@ -1314,3 +1314,47 @@ git log --oneline origin/main..HEAD
 ```
 
 Expected: 全量测试 0 fail；diff check 无输出；工作树干净；提交仅覆盖本计划六个任务和已确认的设计/计划文档。不要在本地测试中连接生产 Telegram，也不要修改 `.env` 或 `data/`。
+
+### Task 7: 防止 Pons 生命周期提交覆盖并发 inspection
+
+**Files:**
+- Modify: `src/scanner.js:138-142`
+- Modify: `src/store.js:361-429`
+- Test: `test/scanner-pons.test.js`
+- Modify: `docs/superpowers/specs/2026-09-16-robinhood-no-alert-recovery-design.md`
+
+- [x] **Step 1: 写失败回归测试**
+
+在 `watchPonsRange` 已读取旧 token 快照后暂停生命周期扫描，先让 `pons_inspection` 完成并持久化风险结果，再恢复生命周期扫描。断言第一次提交因 CAS 冲突被拒绝、Pons 游标不推进且 inspection 结果保留；第二次重放基于最新状态成功提交并推进游标。
+
+- [x] **Step 2: 运行测试确认 RED**
+
+```bash
+node --test --test-name-pattern="Pons lifecycle commit retries" test/scanner-pons.test.js
+```
+
+Expected: FAIL，旧实现会推进游标并覆盖 inspection 结果。
+
+- [x] **Step 3: 实现最小 CAS**
+
+`watchPonsRange` 把读取的 `snapshot.tokens` 同 transitions 一起传给 `commitPonsRange`。`commitPonsRange` 在原子 draft 中逐 token 深比较当前值与预览快照；任一 token 冲突时返回 `null`，不应用 transitions、不写入新游标。`watchPonsRange` 将 `null` 转换为可识别冲突错误，使现有 Pons watch loop 下一轮重放该区间。
+
+- [x] **Step 4: 更新设计说明并运行 GREEN**
+
+```bash
+node --test test/scanner-pons.test.js test/store.test.js
+```
+
+Expected: PASS，0 fail。
+
+- [x] **Step 5: 完整验证并提交**
+
+```bash
+npm test
+git diff --check origin/main...HEAD
+git status --short --branch
+git add src/scanner.js src/store.js test/scanner-pons.test.js docs/superpowers/specs/2026-09-16-robinhood-no-alert-recovery-design.md docs/superpowers/plans/2026-09-16-robinhood-no-alert-recovery.md
+git commit -m "修复：防止生命周期覆盖检查结果"
+```
+
+Expected: 全量测试 0 fail；diff check 无输出；提交只包含本竞态修复及对应文档。

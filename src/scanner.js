@@ -138,7 +138,14 @@ export async function previewPonsRange({
 export async function watchPonsRange(options) {
   const snapshot = options.store.snapshot();
   const result = await previewPonsRange({ ...options, initialTokens: snapshot.tokens });
-  options.store.commitPonsRange({ toBlock: options.toBlock, transitions: result.transitions });
+  const committed = options.store.commitPonsRange({
+    toBlock: options.toBlock,
+    transitions: result.transitions,
+    expectedTokens: snapshot.tokens,
+  });
+  if (committed == null) {
+    throw new Error("Pons token state changed during range preview");
+  }
   return result;
 }
 

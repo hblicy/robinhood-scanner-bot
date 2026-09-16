@@ -358,7 +358,7 @@ export function createStore({
       });
     },
 
-    commitPonsRange({ toBlock, transitions }) {
+    commitPonsRange({ toBlock, transitions, expectedTokens = null }) {
       if (!Number.isInteger(toBlock) || toBlock < 0) {
         throw new Error("Pons V2 cursor must be a non-negative integer");
       }
@@ -366,6 +366,18 @@ export function createStore({
         throw new Error(`Pons V2 cursor cannot move backwards from ${state.cursors.ponsV2} to ${toBlock}`);
       }
       if (!Array.isArray(transitions)) throw new Error("Pons transitions must contain an array");
+      if (expectedTokens != null && (!expectedTokens || typeof expectedTokens !== "object" || Array.isArray(expectedTokens))) {
+        throw new Error("Pons expected token state must contain an object");
+      }
+      if (expectedTokens) {
+        for (const transition of transitions) {
+          const token = String(transition?.token || "").toLowerCase();
+          if (!token || !transition?.nextToken || typeof transition.nextToken !== "object") {
+            throw new Error(`Pons transition ${String(transition?.eventId || "")} requires token state`);
+          }
+          if (!isDeepStrictEqual(state.tokens[token], expectedTokens[token])) return null;
+        }
+      }
       return commit((draft) => {
         for (const transition of transitions) {
           const eventId = String(transition?.eventId || "");

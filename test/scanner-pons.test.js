@@ -341,6 +341,75 @@ test("a Pons inspection retries from current state after a lifecycle event witho
   assert.equal(state.pendingChecks[`${EVENT_ID}:pons_inspection`].status, "completed");
 });
 
+test("Pons lifecycle commit retries instead of overwriting a concurrent inspection", async () => {
+  const store = tempStore();
+  await watchPonsRange(dependencies(store));
+
+  let releaseScan;
+  let scanStarted;
+  const started = new Promise((resolve) => { scanStarted = resolve; });
+  const gate = new Promise((resolve) => { releaseScan = resolve; });
+  const sweptEvent = {
+    ...launchEvent(),
+    kind: "launch_swept",
+    eventId: `4663:${"0x" + "34".repeat(32)}:2`,
+    blockNumber: 121,
+    args: { quoteOut: "10", tokenOut: "20" },
+  };
+  const lifecycleRun = watchPonsRange(dependencies(store, {
+    fromBlock: 121,
+    toBlock: 121,
+    now: () => 21_000,
+    scanRange: async () => {
+      scanStarted();
+      await gate;
+      return [sweptEvent];
+    },
+    readLaunch: async () => launchRecord(1),
+  }));
+  await started;
+
+  const handlers = createInspectionCheckHandlers({
+    provider: {},
+    store,
+    now: () => 20_000,
+    inspect: async () => ({
+      token: TOKEN,
+      identity: "pons-v2",
+      protocolPhase: "not_graduated",
+      monitorState: "killed",
+      marketReady: false,
+      riskDataStatus: "known",
+      reasons: ["cannot-sell"],
+      curve: { status: "sufficient", tradeCount: 5, uniqueTraders: 3, bidirectional: true },
+      timedOut: false,
+      errors: [],
+    }),
+  });
+  const inspection = await runPendingChecks({ store, handlers, now: () => 20_000, limit: 1 });
+  assert.equal(inspection.completed, 1);
+  releaseScan();
+
+  await assert.rejects(lifecycleRun, /Pons token state changed during range preview/);
+  let state = store.snapshot();
+  assert.equal(state.cursors.ponsV2, 120);
+  assert.equal(state.tokens[TOKEN.toLowerCase()].monitorState, "killed");
+  assert.equal(state.tokens[TOKEN.toLowerCase()].facts.inspection.reasons[0], "cannot-sell");
+
+  await watchPonsRange(dependencies(store, {
+    fromBlock: 121,
+    toBlock: 121,
+    now: () => 22_000,
+    scanRange: async () => [sweptEvent],
+    readLaunch: async () => launchRecord(1),
+  }));
+  state = store.snapshot();
+  assert.equal(state.cursors.ponsV2, 121);
+  assert.equal(state.tokens[TOKEN.toLowerCase()].protocolPhase, "swept");
+  assert.equal(state.tokens[TOKEN.toLowerCase()].monitorState, "killed");
+  assert.equal(state.tokens[TOKEN.toLowerCase()].facts.inspection.reasons[0], "cannot-sell");
+});
+
 test("pending checks can request an expected business retry without throwing", async () => {
   const store = tempStore();
   store.scheduleCheck({
