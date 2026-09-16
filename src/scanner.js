@@ -65,18 +65,16 @@ const candidates = new CandidateQueue({
 let draining = false;
 
 function lifecycleChecks(event, state, now) {
-  const types = event.kind === "token_launched"
-    ? ["curve_flow", "holders", "deployer_24h", "line_a"]
-    : event.kind === "pool_graduated"
-      ? ["market", "line_c"]
-      : [];
-  return types.map((type) => ({
-    id: `${event.eventId}:${type}`,
+  if (event.kind !== "token_launched" && event.kind !== "pool_graduated") {
+    return [];
+  }
+  return [{
+    id: `${event.eventId}:pons_inspection`,
     eventId: event.eventId,
-    type,
+    type: "pons_inspection",
     token: state.token,
     dueAt: now,
-  }));
+  }];
 }
 
 async function buildPonsTransitions(events, {
@@ -298,14 +296,7 @@ export function createInspectionCheckHandlers({
     if (notification) notification.text = formatLifecycleNotification(notification);
     return { token: check.token, nextToken, notification };
   };
-  return Object.fromEntries([
-    "curve_flow",
-    "holders",
-    "deployer_24h",
-    "line_a",
-    "market",
-    "line_c",
-  ].map((type) => [type, handle]));
+  return { pons_inspection: handle };
 }
 
 function heatPoolCategory(pool) {

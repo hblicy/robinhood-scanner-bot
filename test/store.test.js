@@ -516,6 +516,38 @@ describe("createStore", () => {
     assert.deepEqual(state.appliedEvents, {});
   });
 
+  it("expires an older pending Pons inspection when a newer lifecycle event is committed", () => {
+    const store = openStore(tempDir());
+    const oldId = `${EVENT_ID}:pons_inspection`;
+    const nextEventId = `4663:${"0x" + "cd".repeat(32)}:2`;
+    const nextId = `${nextEventId}:pons_inspection`;
+    store.commitPonsRange({
+      toBlock: 120,
+      transitions: [{
+        eventId: EVENT_ID,
+        blockNumber: 120,
+        token: TOKEN,
+        nextToken: tokenState({ birthAt: 900 }),
+        checks: [{ id: oldId, eventId: EVENT_ID, type: "pons_inspection", token: TOKEN, dueAt: 1_000 }],
+      }],
+    });
+    store.commitPonsRange({
+      toBlock: 121,
+      transitions: [{
+        eventId: nextEventId,
+        blockNumber: 121,
+        token: TOKEN,
+        nextToken: tokenState({ birthAt: 900, protocolPhase: "pool_created" }),
+        checks: [{ id: nextId, eventId: nextEventId, type: "pons_inspection", token: TOKEN, dueAt: 1_000 }],
+      }],
+    });
+
+    const state = store.snapshot();
+    assert.equal(state.pendingChecks[oldId].status, "expired");
+    assert.equal(state.pendingChecks[oldId].expirationReason, `superseded-by:${nextId}`);
+    assert.equal(state.pendingChecks[nextId].status, "pending");
+  });
+
   it("transitions outbox and pending checks without losing adjacent entries", () => {
     const store = openStore(tempDir());
     store.commitPonsRange({

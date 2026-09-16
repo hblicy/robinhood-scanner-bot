@@ -91,7 +91,10 @@ test("atomically commits realtime Pons state and checks without raw lifecycle no
   assert.equal(state.tokens[TOKEN.toLowerCase()].protocolPhase, "not_graduated");
   assert.ok(state.appliedEvents[EVENT_ID]);
   assert.equal(Object.keys(state.outbox).length, 0);
-  assert.ok(state.pendingChecks[`${EVENT_ID}:curve_flow`]);
+  const inspectionId = `${EVENT_ID}:pons_inspection`;
+  assert.ok(state.pendingChecks[inspectionId]);
+  assert.equal(state.pendingChecks[inspectionId].type, "pons_inspection");
+  assert.equal(Object.keys(state.pendingChecks).length, 1);
 });
 
 test("replaying the same Pons range does not duplicate state or notifications", async () => {
@@ -101,7 +104,7 @@ test("replaying the same Pons range does not duplicate state or notifications", 
   const state = store.snapshot();
   assert.equal(Object.keys(state.appliedEvents).length, 1);
   assert.equal(Object.keys(state.outbox).length, 0);
-  assert.equal(Object.keys(state.pendingChecks).length, 4);
+  assert.equal(Object.keys(state.pendingChecks).length, 1);
   assert.equal(state.watchlist.length, 0);
 });
 
@@ -142,18 +145,15 @@ test("third-party check failures do not roll back the Pons cursor", async () => 
   const result = await runPendingChecks({
     store,
     handlers: {
-      curve_flow: async () => { throw new Error("Gecko unavailable"); },
-      holders: async () => null,
-      deployer_24h: async () => null,
-      line_a: async () => null,
+      pons_inspection: async () => { throw new Error("Gecko unavailable"); },
     },
     now: () => 10_000,
   });
   const state = store.snapshot();
   assert.equal(result.retried, 1);
   assert.equal(state.cursors.ponsV2, 120);
-  assert.match(state.pendingChecks[`${EVENT_ID}:curve_flow`].lastError, /Gecko unavailable/);
-  assert.equal(state.pendingChecks[`${EVENT_ID}:curve_flow`].nextAttemptAt, 15_000);
+  assert.match(state.pendingChecks[`${EVENT_ID}:pons_inspection`].lastError, /Gecko unavailable/);
+  assert.equal(state.pendingChecks[`${EVENT_ID}:pons_inspection`].nextAttemptAt, 15_000);
 });
 
 test("pending checks can request an expected business retry without throwing", async () => {
@@ -207,30 +207,35 @@ test("candidate check errors use retry offsets anchored to first analysis", asyn
 test("inspection pending checks atomically update risk state and enqueue a transition", async () => {
   const store = tempStore();
   await watchPonsRange(dependencies(store));
+  let inspections = 0;
   const handlers = createInspectionCheckHandlers({
     provider: {},
     store,
     now: () => 20_000,
-    inspect: async () => ({
-      token: TOKEN,
-      identity: "pons-v2",
-      protocolPhase: "not_graduated",
-      monitorState: "killed",
-      marketReady: false,
-      riskDataStatus: "known",
-      reasons: ["cannot-sell"],
-      curve: { status: "sufficient", tradeCount: 5, uniqueTraders: 3, bidirectional: false },
-      timedOut: false,
-      errors: [],
-    }),
+    inspect: async () => {
+      inspections += 1;
+      return {
+        token: TOKEN,
+        identity: "pons-v2",
+        protocolPhase: "not_graduated",
+        monitorState: "killed",
+        marketReady: false,
+        riskDataStatus: "known",
+        reasons: ["cannot-sell"],
+        curve: { status: "sufficient", tradeCount: 5, uniqueTraders: 3, bidirectional: false },
+        timedOut: false,
+        errors: [],
+      };
+    },
   });
   const result = await runPendingChecks({ store, handlers, now: () => 20_000, limit: 1 });
   const state = store.snapshot();
+  assert.equal(inspections, 1);
   assert.equal(result.completed, 1);
   assert.equal(state.tokens[TOKEN.toLowerCase()].monitorState, "killed");
   assert.equal(state.tokens[TOKEN.toLowerCase()].killReason, "cannot-sell");
-  assert.equal(state.pendingChecks[`${EVENT_ID}:curve_flow`].status, "completed");
-  assert.ok(state.outbox[`${EVENT_ID}:curve_flow:hard_kill`]);
+  assert.equal(state.pendingChecks[`${EVENT_ID}:pons_inspection`].status, "completed");
+  assert.ok(state.outbox[`${EVENT_ID}:pons_inspection:hard_kill`]);
 });
 
 test("timed-out inspections remain retryable without changing token state", async () => {
@@ -247,7 +252,7 @@ test("timed-out inspections remain retryable without changing token state", asyn
   const state = store.snapshot();
   assert.equal(result.retried, 1);
   assert.deepEqual(state.tokens[TOKEN.toLowerCase()], before);
-  assert.match(state.pendingChecks[`${EVENT_ID}:curve_flow`].lastError, /holders/);
+  assert.match(state.pendingChecks[`${EVENT_ID}:pons_inspection`].lastError, /holders/);
 });
 
 test("required factory identity read failure prevents range commit", async () => {
@@ -368,7 +373,7 @@ test("a saved Pons cursor schedules realtime checks without raw launch notificat
 
   const state = store.snapshot();
   assert.equal(Object.keys(state.outbox).length, 0);
-  assert.ok(state.pendingChecks[`${EVENT_ID}:line_a`]);
+  assert.ok(state.pendingChecks[`${EVENT_ID}:pons_inspection`]);
 });
 
 test("a Pons discovery fallback restarts the whole range and commits only the fallback head", async () => {

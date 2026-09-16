@@ -396,6 +396,13 @@ export function createStore({
           }
           for (const check of transition.checks || []) {
             if (!check?.id) throw new Error(`Pons transition ${eventId} check id is required`);
+            if (check.type === "pons_inspection") {
+              for (const existing of Object.values(draft.pendingChecks)) {
+                if (existing.status !== "pending" || existing.type !== "pons_inspection") continue;
+                if (String(existing.token || "").toLowerCase() !== token || existing.id === check.id) continue;
+                expireCheckEntry(existing, now(), `superseded-by:${check.id}`);
+              }
+            }
             if (!draft.pendingChecks[check.id]) {
               draft.pendingChecks[check.id] = {
                 ...structuredClone(check),
