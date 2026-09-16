@@ -9,6 +9,7 @@ import {
   initialOnchainCursor,
   processEvents,
   processOnchainRange,
+  reconcileWatchPendingChecks,
   runReadOnlyCandidates,
   runWatchIteration,
   scanOnce,
@@ -169,7 +170,7 @@ describe("scanner orchestration", () => {
       store: {
         scheduleCheck(check) {
           saved = check;
-          return check;
+          return { ...check, status: "pending" };
         },
       },
       recoveryKeys,
@@ -1418,6 +1419,121 @@ describe("scanner orchestration", () => {
     assert.match(result.errors[0].message, /gecko unavailable/i);
   });
 
+  it("persists the bootstrap cursor and advances one 200-block segment per iteration", async () => {
+    let cursor = null;
+    const cursors = [];
+    const ranges = [];
+    const state = { lastBlock: null, lastGecko: 0 };
+    const dependencies = {
+      settings: {
+        onchainScan: true,
+        geckoScan: false,
+        confirmationBlocks: 0,
+        maxAgeMinutes: 30,
+      },
+      now: () => 1_000,
+      getBlockNumber: async () => 600,
+      getOnchainCursor: () => cursor,
+      findFirstBlockAtOrAfter: async () => 100,
+      scanOnchain: async (from, to) => { ranges.push([from, to]); return []; },
+      handleEvents: async () => ({ accepted: 0, handled: 0, failed: 0 }),
+      setOnchainCursor: (value) => { cursor = value; cursors.push(value); },
+      geckoNewPools: async () => [],
+      log: () => {},
+    };
+
+    await runWatchIteration(state, dependencies);
+    await runWatchIteration(state, dependencies);
+
+    assert.deepEqual(cursors, [99, 299, 499]);
+    assert.deepEqual(ranges, [[100, 299], [300, 499]]);
+    assert.equal(state.lastBlock, 499);
+  });
+
+  it("resumes from a persisted onchain cursor without recalculating the time boundary", async () => {
+    const ranges = [];
+    const cursors = [];
+    const state = { lastBlock: null, lastGecko: 0 };
+    await runWatchIteration(state, {
+      settings: { onchainScan: true, geckoScan: false, confirmationBlocks: 0, maxAgeMinutes: 30 },
+      now: () => 1_000,
+      getBlockNumber: async () => 600,
+      getOnchainCursor: () => 299,
+      findFirstBlockAtOrAfter: async () => { throw new Error("boundary must not be recalculated"); },
+      scanOnchain: async (from, to) => { ranges.push([from, to]); return []; },
+      handleEvents: async () => ({ accepted: 0, handled: 0, failed: 0 }),
+      setOnchainCursor: (value) => cursors.push(value),
+      geckoNewPools: async () => [],
+      log: () => {},
+    });
+
+    assert.deepEqual(ranges, [[300, 499]]);
+    assert.deepEqual(cursors, [499]);
+    assert.equal(state.lastBlock, 499);
+  });
+
+  it("scans genesis block zero before committing a non-negative cursor", async () => {
+    const cursors = [];
+    const ranges = [];
+    await runWatchIteration({ lastBlock: null, lastGecko: 0 }, {
+      settings: { onchainScan: true, geckoScan: false, confirmationBlocks: 0, maxAgeMinutes: 30 },
+      now: () => 1_000,
+      getBlockNumber: async () => 50,
+      getOnchainCursor: () => null,
+      findFirstBlockAtOrAfter: async () => 0,
+      scanOnchain: async (from, to) => { ranges.push([from, to]); return []; },
+      handleEvents: async () => ({ accepted: 0, handled: 0, failed: 0 }),
+      setOnchainCursor: (value) => cursors.push(value),
+      geckoNewPools: async () => [],
+      log: () => {},
+    });
+    assert.deepEqual(ranges, [[0, 50]]);
+    assert.deepEqual(cursors, [50]);
+  });
+
+  it("keeps a failed segment at its previously committed cursor", async () => {
+    let cursor = 99;
+    const ranges = [];
+    const state = { lastBlock: 99, lastGecko: 0 };
+    const dependencies = {
+      settings: { onchainScan: true, geckoScan: false, confirmationBlocks: 0, maxAgeMinutes: 30 },
+      now: () => 1_000,
+      getBlockNumber: async () => 600,
+      getOnchainCursor: () => cursor,
+      findFirstBlockAtOrAfter: async () => 100,
+      scanOnchain: async (from, to) => {
+        ranges.push([from, to]);
+        return [{ token: "0x1111111111111111111111111111111111111111" }];
+      },
+      handleEvents: async () => ({ accepted: 1, handled: 0, failed: 1 }),
+      setOnchainCursor: (value) => { cursor = value; },
+      geckoNewPools: async () => [],
+      log: () => {},
+    };
+    await runWatchIteration(state, dependencies);
+    await runWatchIteration(state, dependencies);
+    assert.deepEqual(ranges, [[100, 299], [100, 299]]);
+    assert.equal(cursor, 99);
+    assert.equal(state.lastBlock, 99);
+  });
+
+  it("logs the failed onchain stage and exact retry range", async () => {
+    const logs = [];
+    await runWatchIteration({ lastBlock: 99, lastGecko: 0 }, {
+      settings: { onchainScan: true, geckoScan: false, confirmationBlocks: 0, maxAgeMinutes: 30 },
+      now: () => 1_000,
+      getBlockNumber: async () => 600,
+      getOnchainCursor: () => 99,
+      findFirstBlockAtOrAfter: async () => 100,
+      scanOnchain: async () => { throw new Error("rpc timeout"); },
+      handleEvents: async () => ({ accepted: 0, handled: 0, failed: 0 }),
+      setOnchainCursor: () => { throw new Error("cursor must not advance"); },
+      geckoNewPools: async () => [],
+      log: (line) => logs.push(line),
+    });
+    assert.match(logs.join("\n"), /stage=range from=100 to=299.*rpc timeout/);
+  });
+
   it("restarts onchain discovery from the committed cursor at the fallback head", async () => {
     const official = { name: "official", head: 102 };
     const analysis = { name: "analysis", head: 98 };
@@ -1503,5 +1619,32 @@ describe("scanner orchestration", () => {
       }
     );
     assert.equal(rpcCalls, 0);
+  });
+
+  it("reconciles pending checks only for live watch mode", () => {
+    const calls = [];
+    const store = {
+      reconcilePendingChecks: (input) => {
+        calls.push(input);
+        return { scanned: 0, expired: 0, canonicalCreated: 0, reasons: {} };
+      },
+    };
+    const logs = [];
+    reconcileWatchPendingChecks({
+      store,
+      settings: { maxAgeMinutes: 30 },
+      mode: "live",
+      now: () => 1_000,
+      log: (line) => logs.push(line),
+    });
+    reconcileWatchPendingChecks({
+      store,
+      settings: { maxAgeMinutes: 30 },
+      mode: "recovery",
+      now: () => 2_000,
+      log: (line) => logs.push(line),
+    });
+    assert.deepEqual(calls, [{ at: 1_000, maxAgeMinutes: 30 }]);
+    assert.deepEqual(logs, ["pending-reconcile scanned=0 expired=0 canonicalCreated=0 reasons=none"]);
   });
 });

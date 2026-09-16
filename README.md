@@ -58,14 +58,17 @@ npm run refresh-assets -- xstocks
 Linux 服务器可以在 `screen` 中持续运行：
 
 ```bash
-screen -S robinhood
-cd ~/robinhood-scanner-bot
-npm run watch
-# Ctrl+A，再按 D：退出 screen 但保持机器人运行
+cd /home/ubuntu/robinhood-scanner-bot
+mkdir -p logs
+screen -dmS robinhood -L -Logfile logs/robinhood.log \
+  bash -lc 'cd /home/ubuntu/robinhood-scanner-bot && exec npm run watch:robinhood'
+
+screen -ls
+tail -f /home/ubuntu/robinhood-scanner-bot/logs/robinhood.log
 screen -r robinhood
 ```
 
-五个进程必须使用不同的 screen 名称。每条链只允许一个 `watch` 实例，状态分别写入 `data/ethereum`、`data/base`、`data/bsc`、`data/robinhood`、`data/solana`，不会跨链共享游标或已处理记录。
+启用 `screen -L` 后，发生故障时先保存日志再重启。日志报告不得包含 `.env`、完整 RPC URL、Telegram token 或 chat ID。五个进程必须使用不同的 screen 名称。每条链只允许一个 `watch` 实例，状态分别写入 `data/ethereum`、`data/base`、`data/bsc`、`data/robinhood`、`data/solana`，不会跨链共享游标或已处理记录。
 
 ## 多链推送规则
 
@@ -212,7 +215,7 @@ ANALYSIS_RPC_URL=https://robinhood-mainnet.g.alchemy.com/v2/<API_KEY>
 
 ## 扫描恢复与本地状态
 
-`watch` 会以 schema v5 原子写入对应链目录下的 `state.json`，维护：
+`watch` 会以 schema v6 原子写入对应链目录下的 `state.json`，维护：
 
 - 已处理候选 `seen`，用于去重；
 - `cursors.onchain`，表示 EVM 最后一个全部候选均处理成功的区块；
@@ -224,9 +227,9 @@ ANALYSIS_RPC_URL=https://robinhood-mainnet.g.alchemy.com/v2/<API_KEY>
 
 Pons 链上阶段为 `not_graduated → swept → pool_created`，`rescued` 是不可回退终态；观察状态另行使用 `observed/watchlisted/curve_dead/decay/killed`。`pool_created` 只说明链上毕业，只有 Hook、池绑定、流动性和双向交易证据完整时 `marketReady` 才为 `true`。三类状态不会互相代替。
 
-首次运行按区块时间二分定位年龄窗口起点。已有游标时，从“已保存游标”和“当前年龄窗口起点”中较新的位置继续。链上默认只处理落后最新高度 2 个区块的已确认范围。Factory 日志、身份 getter 和状态转换与 Pons 游标同次落盘；Telegram 或外部市场源失败不会回滚已确认的 Factory 游标，而会留在 outbox/pending check 中重试。超过 `MAX_AGE_MINUTES` 的辅助候选严格跳过。
+首次运行按区块时间二分定位年龄窗口起点，并先持久化普通链上 bootstrap 游标；之后每轮最多提交 200 个区块。已有游标时直接从已保存游标的下一块继续，不再重复计算年龄窗口边界；长时间停机后会补扫游标之后的区块，但超过 `MAX_AGE_MINUTES` 的辅助候选仍会严格跳过。链上默认只处理落后最新高度 2 个区块的已确认范围。Factory 日志、身份 getter 和状态转换与 Pons 游标同次落盘；Telegram 或外部市场源失败不会回滚已确认的 Factory 游标，而会留在 outbox/pending check 中重试。
 
-首次没有 Pons 游标时仅恢复链上状态、事件去重和游标，不创建历史 Telegram 或历史 pending checks。实时 Pons 原始 `new_launch`、`swept`、`graduated` 与市场热度只记录状态/终端日志；Telegram 生命周期白名单仅包含 `hard_kill`、`rescued`、`green`、`market_ready`。升级前已积压的其他类型会保留审计记录并标记为 `suppressed`。普通候选仍按 `MIN_SCORE` 输出完整评分报告，启动成功提示保持不变。
+首次没有 Pons 游标时仅恢复链上状态、事件去重和游标，不创建历史 Telegram 或历史 pending checks。实时 Pons 在 launch 和 graduation 事件各创建一个 `pons_inspection`；带 replacement inspection 的同币种新事件会让旧检查过期，不创建 replacement 的生命周期更新则通过状态快照 CAS 阻止旧结果覆盖，并在下一轮基于最新状态重试。三类 pending worker 公平轮询。实时 Pons 原始 `new_launch`、`swept`、`graduated` 与市场热度只记录状态/终端日志；Telegram 生命周期白名单仅包含 `hard_kill`、`rescued`、`green`、`market_ready`。升级前已积压的其他类型会保留审计记录并标记为 `suppressed`；旧 Pons 检查会保留审计记录并在 live 启动时整理为 `expired` 或单个有效检查。普通候选仍按 `MIN_SCORE` 输出完整评分报告，启动成功提示保持不变。
 
 普通 Uniswap V2 候选进入过深度检查、但卖出证据仍为 `unknown` 时，会把复查任务写入 `pendingChecks`，并按首次分析后的绝对时间 `+2 分钟 / +5 分钟 / +10 分钟` 最多复查三次；重启或离线不会重置时间锚点。变为 `blocked` 时无视分数立即推送风险，变为 `confirmed` 时只有达到最终分数门槛才推送，第三次仍未知则静默完成。`prefilter-score`、V3/V4、Pons 生命周期以及超过年龄窗口的候选不进入这套普通复查。
 
@@ -234,7 +237,7 @@ Pons 链上阶段为 `not_graduated → swept → pool_created`，`rescued` 是�
 
 `scan` 和 `check` 不创建锁、不修改业务状态 `state.json`，也不发送 Telegram；若使用 analysis RPC，会更新对应链的 `rpc-usage.json` 计数。配置文件通过局部解析读取，旧 `.env` 中的私钥或交易字段不会注入进程配置，也不会被程序访问。
 
-升级前建议先备份 `data/state.json`。Robinhood 旧状态会复制迁移到 `data/robinhood`；程序可从旧 schema v3/v4 迁移到 v5，不会删除旧版 `positions`、`trades` 或其他历史文件。
+升级前建议先备份整个 `data` 目录。Robinhood 旧状态会复制迁移到 `data/robinhood`；程序可从旧 schema v3/v4/v5 迁移到 v6，不会删除旧版 `positions`、`trades` 或其他历史文件。
 
 ## 明确不做
 

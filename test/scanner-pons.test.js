@@ -91,7 +91,10 @@ test("atomically commits realtime Pons state and checks without raw lifecycle no
   assert.equal(state.tokens[TOKEN.toLowerCase()].protocolPhase, "not_graduated");
   assert.ok(state.appliedEvents[EVENT_ID]);
   assert.equal(Object.keys(state.outbox).length, 0);
-  assert.ok(state.pendingChecks[`${EVENT_ID}:curve_flow`]);
+  const inspectionId = `${EVENT_ID}:pons_inspection`;
+  assert.ok(state.pendingChecks[inspectionId]);
+  assert.equal(state.pendingChecks[inspectionId].type, "pons_inspection");
+  assert.equal(Object.keys(state.pendingChecks).length, 1);
 });
 
 test("replaying the same Pons range does not duplicate state or notifications", async () => {
@@ -101,7 +104,7 @@ test("replaying the same Pons range does not duplicate state or notifications", 
   const state = store.snapshot();
   assert.equal(Object.keys(state.appliedEvents).length, 1);
   assert.equal(Object.keys(state.outbox).length, 0);
-  assert.equal(Object.keys(state.pendingChecks).length, 4);
+  assert.equal(Object.keys(state.pendingChecks).length, 1);
   assert.equal(state.watchlist.length, 0);
 });
 
@@ -142,18 +145,269 @@ test("third-party check failures do not roll back the Pons cursor", async () => 
   const result = await runPendingChecks({
     store,
     handlers: {
-      curve_flow: async () => { throw new Error("Gecko unavailable"); },
-      holders: async () => null,
-      deployer_24h: async () => null,
-      line_a: async () => null,
+      pons_inspection: async () => { throw new Error("Gecko unavailable"); },
     },
     now: () => 10_000,
   });
   const state = store.snapshot();
   assert.equal(result.retried, 1);
   assert.equal(state.cursors.ponsV2, 120);
-  assert.match(state.pendingChecks[`${EVENT_ID}:curve_flow`].lastError, /Gecko unavailable/);
-  assert.equal(state.pendingChecks[`${EVENT_ID}:curve_flow`].nextAttemptAt, 15_000);
+  assert.match(state.pendingChecks[`${EVENT_ID}:pons_inspection`].lastError, /Gecko unavailable/);
+  assert.equal(state.pendingChecks[`${EVENT_ID}:pons_inspection`].nextAttemptAt, 15_000);
+});
+
+test("a superseded Pons inspection cannot overwrite newer lifecycle state", async () => {
+  const store = tempStore();
+  await watchPonsRange(dependencies(store));
+  let releaseInspection;
+  let inspectionStarted;
+  const started = new Promise((resolve) => { inspectionStarted = resolve; });
+  const gate = new Promise((resolve) => { releaseInspection = resolve; });
+  const running = runPendingChecks({
+    store,
+    handlers: {
+      pons_inspection: async (check) => {
+        const staleToken = store.snapshot().tokens[check.token.toLowerCase()];
+        inspectionStarted();
+        await gate;
+        return {
+          token: check.token,
+          nextToken: { ...staleToken, monitorState: "killed", updatedAt: 20_000 },
+        };
+      },
+    },
+    now: () => 20_000,
+    limit: 1,
+  });
+  await started;
+
+  const newerEventId = `4663:${"0x" + "cd".repeat(32)}:2`;
+  store.commitPonsRange({
+    toBlock: 121,
+    transitions: [{
+      eventId: newerEventId,
+      blockNumber: 121,
+      token: TOKEN,
+      nextToken: {
+        ...store.snapshot().tokens[TOKEN.toLowerCase()],
+        protocolPhase: "pool_created",
+        monitorState: "watchlisted",
+        updatedAt: 21_000,
+      },
+      notifications: [],
+      checks: [{
+        id: `${newerEventId}:pons_inspection`,
+        eventId: newerEventId,
+        type: "pons_inspection",
+        token: TOKEN,
+        dueAt: 21_000,
+      }],
+    }],
+  });
+  releaseInspection();
+  const result = await running;
+
+  const state = store.snapshot();
+  assert.equal(result.completed, 0);
+  assert.equal(state.tokens[TOKEN.toLowerCase()].protocolPhase, "pool_created");
+  assert.equal(state.tokens[TOKEN.toLowerCase()].monitorState, "watchlisted");
+  assert.equal(state.pendingChecks[`${EVENT_ID}:pons_inspection`].status, "expired");
+});
+
+test("a failed superseded Pons inspection cannot become pending again", async () => {
+  const store = tempStore();
+  await watchPonsRange(dependencies(store));
+  let releaseInspection;
+  let inspectionStarted;
+  const started = new Promise((resolve) => { inspectionStarted = resolve; });
+  const gate = new Promise((resolve) => { releaseInspection = resolve; });
+  const running = runPendingChecks({
+    store,
+    handlers: {
+      pons_inspection: async () => {
+        inspectionStarted();
+        await gate;
+        throw new Error("late timeout");
+      },
+    },
+    now: () => 20_000,
+    limit: 1,
+  });
+  await started;
+
+  const newerEventId = `4663:${"0x" + "ef".repeat(32)}:3`;
+  store.commitPonsRange({
+    toBlock: 121,
+    transitions: [{
+      eventId: newerEventId,
+      blockNumber: 121,
+      token: TOKEN,
+      nextToken: {
+        ...store.snapshot().tokens[TOKEN.toLowerCase()],
+        protocolPhase: "pool_created",
+        updatedAt: 21_000,
+      },
+      notifications: [],
+      checks: [{
+        id: `${newerEventId}:pons_inspection`,
+        eventId: newerEventId,
+        type: "pons_inspection",
+        token: TOKEN,
+        dueAt: 21_000,
+      }],
+    }],
+  });
+  releaseInspection();
+  const result = await running;
+
+  assert.equal(result.retried, 0);
+  assert.equal(store.snapshot().pendingChecks[`${EVENT_ID}:pons_inspection`].status, "expired");
+});
+
+test("a Pons inspection retries from current state after a lifecycle event without a replacement check", async () => {
+  const store = tempStore();
+  await watchPonsRange(dependencies(store));
+  let releaseInspection;
+  let inspectionStarted;
+  const started = new Promise((resolve) => { inspectionStarted = resolve; });
+  const gate = new Promise((resolve) => { releaseInspection = resolve; });
+  let inspections = 0;
+  let currentTime = 20_000;
+  const handlers = createInspectionCheckHandlers({
+    provider: {},
+    store,
+    now: () => currentTime,
+    inspect: async () => {
+      inspections += 1;
+      if (inspections === 1) {
+        inspectionStarted();
+        await gate;
+      }
+      return {
+        token: TOKEN,
+        identity: "pons-v2",
+        protocolPhase: "not_graduated",
+        monitorState: "observed",
+        marketReady: false,
+        riskDataStatus: "known",
+        reasons: [],
+        curve: { status: "sufficient", tradeCount: 5, uniqueTraders: 3, bidirectional: true },
+        timedOut: false,
+        errors: [],
+      };
+    },
+  });
+  const running = runPendingChecks({ store, handlers, now: () => 20_000, limit: 1 });
+  await started;
+
+  const rescuedEventId = `4663:${"0x" + "12".repeat(32)}:4`;
+  const current = store.snapshot().tokens[TOKEN.toLowerCase()];
+  store.commitPonsRange({
+    toBlock: 121,
+    transitions: [{
+      eventId: rescuedEventId,
+      blockNumber: 121,
+      token: TOKEN,
+      nextToken: {
+        ...current,
+        protocolPhase: "rescued",
+        monitorState: "killed",
+        watchlist: false,
+        killReason: "graduation-rescued-no-pool",
+        facts: {
+          ...current.facts,
+          lifecycleEvents: [...current.facts.lifecycleEvents, rescuedEventId],
+        },
+        updatedAt: 21_000,
+      },
+      notifications: [],
+      checks: [],
+    }],
+  });
+  releaseInspection();
+
+  const staleRun = await running;
+  let state = store.snapshot();
+  assert.equal(staleRun.completed, 0);
+  assert.equal(state.tokens[TOKEN.toLowerCase()].protocolPhase, "rescued");
+  assert.equal(state.pendingChecks[`${EVENT_ID}:pons_inspection`].status, "pending");
+
+  currentTime = 22_000;
+  const retryRun = await runPendingChecks({ store, handlers, now: () => 22_000, limit: 1 });
+  state = store.snapshot();
+  assert.equal(retryRun.completed, 1);
+  assert.equal(state.tokens[TOKEN.toLowerCase()].protocolPhase, "rescued");
+  assert.equal(state.tokens[TOKEN.toLowerCase()].facts.lifecycleEvents.at(-1), rescuedEventId);
+  assert.equal(state.pendingChecks[`${EVENT_ID}:pons_inspection`].status, "completed");
+});
+
+test("Pons lifecycle commit retries instead of overwriting a concurrent inspection", async () => {
+  const store = tempStore();
+  await watchPonsRange(dependencies(store));
+
+  let releaseScan;
+  let scanStarted;
+  const started = new Promise((resolve) => { scanStarted = resolve; });
+  const gate = new Promise((resolve) => { releaseScan = resolve; });
+  const sweptEvent = {
+    ...launchEvent(),
+    kind: "launch_swept",
+    eventId: `4663:${"0x" + "34".repeat(32)}:2`,
+    blockNumber: 121,
+    args: { quoteOut: "10", tokenOut: "20" },
+  };
+  const lifecycleRun = watchPonsRange(dependencies(store, {
+    fromBlock: 121,
+    toBlock: 121,
+    now: () => 21_000,
+    scanRange: async () => {
+      scanStarted();
+      await gate;
+      return [sweptEvent];
+    },
+    readLaunch: async () => launchRecord(1),
+  }));
+  await started;
+
+  const handlers = createInspectionCheckHandlers({
+    provider: {},
+    store,
+    now: () => 20_000,
+    inspect: async () => ({
+      token: TOKEN,
+      identity: "pons-v2",
+      protocolPhase: "not_graduated",
+      monitorState: "killed",
+      marketReady: false,
+      riskDataStatus: "known",
+      reasons: ["cannot-sell"],
+      curve: { status: "sufficient", tradeCount: 5, uniqueTraders: 3, bidirectional: true },
+      timedOut: false,
+      errors: [],
+    }),
+  });
+  const inspection = await runPendingChecks({ store, handlers, now: () => 20_000, limit: 1 });
+  assert.equal(inspection.completed, 1);
+  releaseScan();
+
+  await assert.rejects(lifecycleRun, /Pons token state changed during range preview/);
+  let state = store.snapshot();
+  assert.equal(state.cursors.ponsV2, 120);
+  assert.equal(state.tokens[TOKEN.toLowerCase()].monitorState, "killed");
+  assert.equal(state.tokens[TOKEN.toLowerCase()].facts.inspection.reasons[0], "cannot-sell");
+
+  await watchPonsRange(dependencies(store, {
+    fromBlock: 121,
+    toBlock: 121,
+    now: () => 22_000,
+    scanRange: async () => [sweptEvent],
+    readLaunch: async () => launchRecord(1),
+  }));
+  state = store.snapshot();
+  assert.equal(state.cursors.ponsV2, 121);
+  assert.equal(state.tokens[TOKEN.toLowerCase()].protocolPhase, "swept");
+  assert.equal(state.tokens[TOKEN.toLowerCase()].monitorState, "killed");
+  assert.equal(state.tokens[TOKEN.toLowerCase()].facts.inspection.reasons[0], "cannot-sell");
 });
 
 test("pending checks can request an expected business retry without throwing", async () => {
@@ -173,7 +427,13 @@ test("pending checks can request an expected business retry without throwing", a
   });
 
   const saved = store.snapshot().pendingChecks["candidate-recheck:business"];
-  assert.deepEqual(result, { completed: 0, retried: 1, failed: 0 });
+  assert.deepEqual(result, {
+    selected: 1,
+    completed: 0,
+    retried: 1,
+    failed: 0,
+    nextBucketCursor: 1,
+  });
   assert.equal(saved.status, "pending");
   assert.equal(saved.attempts, 1);
   assert.equal(saved.nextAttemptAt, 5_000);
@@ -198,39 +458,68 @@ test("candidate check errors use retry offsets anchored to first analysis", asyn
   });
 
   const saved = store.snapshot().pendingChecks["candidate-recheck:anchored"];
-  assert.deepEqual(result, { completed: 0, retried: 1, failed: 0 });
+  assert.deepEqual(result, {
+    selected: 1,
+    completed: 0,
+    retried: 1,
+    failed: 0,
+    nextBucketCursor: 1,
+  });
   assert.equal(saved.attempts, 1);
   assert.equal(saved.nextAttemptAt, 301_000);
   assert.match(saved.lastError, /RPC unavailable/);
 });
 
+test("pending checks return the next fair-scheduling bucket", async () => {
+  const store = tempStore();
+  store.scheduleCheck({
+    id: "candidate-recovery:cursor",
+    type: "candidate_recovery",
+    dueAt: 1_000,
+  });
+  const result = await runPendingChecks({
+    store,
+    handlers: { candidate_recovery: async () => undefined },
+    now: () => 2_000,
+    limit: 1,
+    startBucket: 2,
+  });
+  assert.equal(result.selected, 1);
+  assert.equal(result.nextBucketCursor, 0);
+});
+
 test("inspection pending checks atomically update risk state and enqueue a transition", async () => {
   const store = tempStore();
   await watchPonsRange(dependencies(store));
+  let inspections = 0;
   const handlers = createInspectionCheckHandlers({
     provider: {},
     store,
     now: () => 20_000,
-    inspect: async () => ({
-      token: TOKEN,
-      identity: "pons-v2",
-      protocolPhase: "not_graduated",
-      monitorState: "killed",
-      marketReady: false,
-      riskDataStatus: "known",
-      reasons: ["cannot-sell"],
-      curve: { status: "sufficient", tradeCount: 5, uniqueTraders: 3, bidirectional: false },
-      timedOut: false,
-      errors: [],
-    }),
+    inspect: async () => {
+      inspections += 1;
+      return {
+        token: TOKEN,
+        identity: "pons-v2",
+        protocolPhase: "not_graduated",
+        monitorState: "killed",
+        marketReady: false,
+        riskDataStatus: "known",
+        reasons: ["cannot-sell"],
+        curve: { status: "sufficient", tradeCount: 5, uniqueTraders: 3, bidirectional: false },
+        timedOut: false,
+        errors: [],
+      };
+    },
   });
   const result = await runPendingChecks({ store, handlers, now: () => 20_000, limit: 1 });
   const state = store.snapshot();
+  assert.equal(inspections, 1);
   assert.equal(result.completed, 1);
   assert.equal(state.tokens[TOKEN.toLowerCase()].monitorState, "killed");
   assert.equal(state.tokens[TOKEN.toLowerCase()].killReason, "cannot-sell");
-  assert.equal(state.pendingChecks[`${EVENT_ID}:curve_flow`].status, "completed");
-  assert.ok(state.outbox[`${EVENT_ID}:curve_flow:hard_kill`]);
+  assert.equal(state.pendingChecks[`${EVENT_ID}:pons_inspection`].status, "completed");
+  assert.ok(state.outbox[`${EVENT_ID}:pons_inspection:hard_kill`]);
 });
 
 test("timed-out inspections remain retryable without changing token state", async () => {
@@ -247,7 +536,7 @@ test("timed-out inspections remain retryable without changing token state", asyn
   const state = store.snapshot();
   assert.equal(result.retried, 1);
   assert.deepEqual(state.tokens[TOKEN.toLowerCase()], before);
-  assert.match(state.pendingChecks[`${EVENT_ID}:curve_flow`].lastError, /holders/);
+  assert.match(state.pendingChecks[`${EVENT_ID}:pons_inspection`].lastError, /holders/);
 });
 
 test("required factory identity read failure prevents range commit", async () => {
@@ -368,7 +657,7 @@ test("a saved Pons cursor schedules realtime checks without raw launch notificat
 
   const state = store.snapshot();
   assert.equal(Object.keys(state.outbox).length, 0);
-  assert.ok(state.pendingChecks[`${EVENT_ID}:line_a`]);
+  assert.ok(state.pendingChecks[`${EVENT_ID}:pons_inspection`]);
 });
 
 test("a Pons discovery fallback restarts the whole range and commits only the fallback head", async () => {

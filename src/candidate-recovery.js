@@ -40,6 +40,16 @@ export function isRetryableCandidateFailure(error) {
 
 export function activeCandidateRecoveryKeys(snapshot) {
   return new Set(Object.values(snapshot?.pendingChecks || {})
-    .filter((check) => check?.type === "candidate_recovery" && check.status !== "completed")
+    .filter((check) => check?.type === "candidate_recovery" && check.status === "pending")
     .map((check) => candidateKey(check.event)));
+}
+
+export function syncCandidateRecoveryKeys(recoveryKeys, snapshot) {
+  if (!(recoveryKeys instanceof Set)) {
+    throw new Error("candidate recovery synchronization requires a key set");
+  }
+  const active = activeCandidateRecoveryKeys(snapshot);
+  recoveryKeys.clear();
+  for (const key of active) recoveryKeys.add(key);
+  return recoveryKeys;
 }

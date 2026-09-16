@@ -1,12 +1,46 @@
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { DATA_DIR, SETTINGS } from "./config.js";
 import { advanceProgramCursor, createSolanaCursorState } from "./solana/cursor.js";
 import { safeErrorMessage } from "./safety.js";
+import { selectDueChecks } from "./pending-checks.js";
 
-const STATE_VERSION = 5;
+const STATE_VERSION = 6;
 const MIN_APPLIED_EVENT_TTL_MS = 7 * 86_400_000;
+const PENDING_CHECK_STATUSES = new Set(["pending", "completed", "failed", "expired"]);
+const LEGACY_PONS_CHECK_TYPES = new Set([
+  "curve_flow",
+  "holders",
+  "deployer_24h",
+  "line_a",
+  "market",
+  "line_c",
+]);
+
+function expireCheckEntry(entry, expiredAt, expirationReason) {
+  entry.status = "expired";
+  entry.expiredAt = expiredAt;
+  entry.expirationReason = expirationReason;
+}
+
+function incrementReason(summary, reason) {
+  summary.expired += 1;
+  summary.reasons[reason] = (summary.reasons[reason] || 0) + 1;
+}
+
+function validatePendingChecks(checks) {
+  for (const [id, entry] of Object.entries(checks)) {
+    if (!PENDING_CHECK_STATUSES.has(entry?.status)) {
+      throw new Error(`state.json pending check ${id} has invalid status`);
+    }
+  }
+}
+
+function isEvmAddress(value) {
+  return /^0x[0-9a-f]{40}$/.test(String(value || "").toLowerCase());
+}
 
 function readJson(dataDir, file, fallback) {
   const filePath = path.join(dataDir, file);
@@ -71,8 +105,8 @@ export function migrateState(raw) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
     throw new Error("state.json must contain an object");
   }
-  if (![3, 4, STATE_VERSION].includes(raw.schemaVersion)) {
-    throw new Error(`state.json must use schemaVersion 3, 4, or ${STATE_VERSION}`);
+  if (![3, 4, 5, STATE_VERSION].includes(raw.schemaVersion)) {
+    throw new Error(`state.json must use schemaVersion 3, 4, 5, or ${STATE_VERSION}`);
   }
   validateObject(raw.seen, "seen");
   const positions = raw.positions === undefined ? {} : raw.positions;
@@ -109,6 +143,7 @@ export function migrateState(raw) {
   validateObject(lifecycle.appliedEvents, "appliedEvents");
   validateObject(lifecycle.outbox, "outbox");
   validateObject(lifecycle.pendingChecks, "pendingChecks");
+  validatePendingChecks(lifecycle.pendingChecks);
   return {
     schemaVersion: STATE_VERSION,
     seen: structuredClone(raw.seen),
@@ -323,7 +358,7 @@ export function createStore({
       });
     },
 
-    commitPonsRange({ toBlock, transitions }) {
+    commitPonsRange({ toBlock, transitions, expectedTokens = null }) {
       if (!Number.isInteger(toBlock) || toBlock < 0) {
         throw new Error("Pons V2 cursor must be a non-negative integer");
       }
@@ -331,6 +366,18 @@ export function createStore({
         throw new Error(`Pons V2 cursor cannot move backwards from ${state.cursors.ponsV2} to ${toBlock}`);
       }
       if (!Array.isArray(transitions)) throw new Error("Pons transitions must contain an array");
+      if (expectedTokens != null && (!expectedTokens || typeof expectedTokens !== "object" || Array.isArray(expectedTokens))) {
+        throw new Error("Pons expected token state must contain an object");
+      }
+      if (expectedTokens) {
+        for (const transition of transitions) {
+          const token = String(transition?.token || "").toLowerCase();
+          if (!token || !transition?.nextToken || typeof transition.nextToken !== "object") {
+            throw new Error(`Pons transition ${String(transition?.eventId || "")} requires token state`);
+          }
+          if (!isDeepStrictEqual(state.tokens[token], expectedTokens[token])) return null;
+        }
+      }
       return commit((draft) => {
         for (const transition of transitions) {
           const eventId = String(transition?.eventId || "");
@@ -363,6 +410,13 @@ export function createStore({
           }
           for (const check of transition.checks || []) {
             if (!check?.id) throw new Error(`Pons transition ${eventId} check id is required`);
+            if (check.type === "pons_inspection") {
+              for (const existing of Object.values(draft.pendingChecks)) {
+                if (existing.status !== "pending" || existing.type !== "pons_inspection") continue;
+                if (String(existing.token || "").toLowerCase() !== token || existing.id === check.id) continue;
+                expireCheckEntry(existing, now(), `superseded-by:${check.id}`);
+              }
+            }
             if (!draft.pendingChecks[check.id]) {
               draft.pendingChecks[check.id] = {
                 ...structuredClone(check),
@@ -427,11 +481,74 @@ export function createStore({
       });
     },
 
-    listDueChecks(at = now(), limit = 20) {
-      return Object.values(state.pendingChecks)
-        .filter((entry) => entry.status === "pending" && entry.nextAttemptAt <= at)
-        .sort((a, b) => a.nextAttemptAt - b.nextAttemptAt || a.createdAt - b.createdAt)
-        .slice(0, limit)
+    reconcilePendingChecks({ at = now(), maxAgeMinutes }) {
+      if (!Number.isFinite(at) || !Number.isFinite(maxAgeMinutes) || maxAgeMinutes <= 0) {
+        throw new Error("pending-check reconciliation requires a finite time and positive maxAgeMinutes");
+      }
+      return commit((draft) => {
+        const summary = { scanned: 0, expired: 0, canonicalCreated: 0, reasons: {} };
+        const groups = new Map();
+        const expire = (entry, reason) => {
+          expireCheckEntry(entry, at, reason);
+          incrementReason(summary, reason);
+        };
+
+        for (const entry of Object.values(draft.pendingChecks)) {
+          if (entry?.status !== "pending" || !LEGACY_PONS_CHECK_TYPES.has(entry.type)) continue;
+          summary.scanned += 1;
+          const token = String(entry.token || "").toLowerCase();
+          const tokenState = draft.tokens[token];
+          if (!tokenState) {
+            expire(entry, "token-state-missing");
+            continue;
+          }
+          const valid = isEvmAddress(token)
+            && String(entry.eventId || "")
+            && Number.isFinite(tokenState.birthAt)
+            && Number.isFinite(entry.dueAt)
+            && Number.isFinite(entry.nextAttemptAt)
+            && Number.isFinite(entry.createdAt);
+          if (!valid) {
+            expire(entry, "invalid-pending-check");
+            continue;
+          }
+          if (at - tokenState.birthAt > maxAgeMinutes * 60_000) {
+            expire(entry, "outside-alert-window");
+            continue;
+          }
+          const group = groups.get(token) || [];
+          group.push(entry);
+          groups.set(token, group);
+        }
+
+        for (const checks of groups.values()) {
+          checks.sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id));
+          const source = checks.at(-1);
+          const canonicalId = `${source.eventId}:pons_inspection`;
+          if (!draft.pendingChecks[canonicalId]) {
+            draft.pendingChecks[canonicalId] = {
+              id: canonicalId,
+              eventId: source.eventId,
+              type: "pons_inspection",
+              token: source.token,
+              dueAt: Math.min(...checks.map((check) => check.dueAt)),
+              status: "pending",
+              attempts: Math.max(...checks.map((check) => Number(check.attempts || 0))),
+              nextAttemptAt: Math.min(...checks.map((check) => check.nextAttemptAt)),
+              createdAt: Math.min(...checks.map((check) => check.createdAt)),
+              completedAt: null,
+              lastError: source.lastError ?? null,
+            };
+            summary.canonicalCreated += 1;
+          }
+          for (const entry of checks) expire(entry, `superseded-by:${canonicalId}`);
+        }
+        return summary;
+      });
+    },
+
+    listDueChecks(at = now(), limit = 20, startBucket = 0) {
+      return selectDueChecks(Object.values(state.pendingChecks), { at, limit, startBucket })
         .map((entry) => structuredClone(entry));
     },
 
@@ -440,7 +557,14 @@ export function createStore({
         throw new Error("pending check requires id, type and dueAt");
       }
       return commit((draft) => {
-        if (draft.pendingChecks[check.id]) return draft.pendingChecks[check.id];
+        const existing = draft.pendingChecks[check.id];
+        if (existing) {
+          if (check.type !== "candidate_recovery"
+            || existing.type !== "candidate_recovery"
+            || existing.status === "pending") {
+            return existing;
+          }
+        }
         draft.pendingChecks[check.id] = {
           ...structuredClone(check),
           eventId: check.eventId ?? null,
@@ -458,6 +582,7 @@ export function createStore({
     completeCheck(id, completedAt = now()) {
       return commit((draft) => {
         const entry = requireEntry(draft.pendingChecks, id, "pending check");
+        if (entry.status !== "pending") return null;
         entry.status = "completed";
         entry.completedAt = completedAt;
         entry.lastError = null;
@@ -468,6 +593,7 @@ export function createStore({
     rescheduleCheck(id, retry) {
       return commit((draft) => {
         const entry = requireEntry(draft.pendingChecks, id, "pending check");
+        if (entry.status !== "pending") return null;
         entry.status = retry.status || "pending";
         entry.attempts = retry.attempts;
         entry.nextAttemptAt = retry.nextAttemptAt;
@@ -476,13 +602,21 @@ export function createStore({
       });
     },
 
-    applyCheckResult(id, { token, nextToken, notification = null, completedAt = now() }) {
+    applyCheckResult(id, {
+      token,
+      nextToken,
+      expectedToken = null,
+      notification = null,
+      completedAt = now(),
+    }) {
       const key = String(token || "").toLowerCase();
       if (!key || !nextToken || typeof nextToken !== "object") {
         throw new Error(`pending check ${id} requires token state`);
       }
       return commit((draft) => {
         const entry = requireEntry(draft.pendingChecks, id, "pending check");
+        if (entry.status !== "pending") return null;
+        if (expectedToken && !isDeepStrictEqual(draft.tokens[key], expectedToken)) return null;
         draft.tokens[key] = structuredClone(nextToken);
         const watchlist = new Set(draft.watchlist.map((value) => String(value).toLowerCase()));
         if (nextToken.watchlist) watchlist.add(key);

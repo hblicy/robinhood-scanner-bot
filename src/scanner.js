@@ -16,6 +16,7 @@ import { alertReport, formatAlert, formatLifecycleNotification, sendTelegram } f
 import { CandidateQueue, createSerialExecutor } from "./queue.js";
 import { candidateKey, handleCandidate } from "./runtime.js";
 import { safeErrorMessage } from "./safety.js";
+import { PENDING_CHECK_BUCKET_COUNT } from "./pending-checks.js";
 import { acquireInstanceLock } from "./instance-lock.js";
 import { createPonsTokenState, reducePonsEvent } from "./lifecycle.js";
 import { classifyPonsRecord, readPonsLaunch, scanPonsRange, verifyPonsDeployment } from "./pons.js";
@@ -32,6 +33,7 @@ import {
   activeCandidateRecoveryKeys,
   createCandidateRecovery,
   isRetryableCandidateFailure,
+  syncCandidateRecoveryKeys,
 } from "./candidate-recovery.js";
 import {
   createCandidateRouteStats,
@@ -48,6 +50,12 @@ import {
 } from "./analysis-rpc-circuit.js";
 import { intervalForRpcBudget } from "./rpc-usage-budget.js";
 import { formatHourlyUsage } from "./startup-summary.js";
+import {
+  formatPendingWorkerActivity,
+  formatPendingReconciliation,
+  formatScannerHealth,
+  formatWorkerActivity,
+} from "./scanner-health.js";
 
 const DEFAULT_ANALYSIS_CONCURRENCY = 1;
 class NonRetryablePendingCheckError extends Error {
@@ -65,18 +73,16 @@ const candidates = new CandidateQueue({
 let draining = false;
 
 function lifecycleChecks(event, state, now) {
-  const types = event.kind === "token_launched"
-    ? ["curve_flow", "holders", "deployer_24h", "line_a"]
-    : event.kind === "pool_graduated"
-      ? ["market", "line_c"]
-      : [];
-  return types.map((type) => ({
-    id: `${event.eventId}:${type}`,
+  if (event.kind !== "token_launched" && event.kind !== "pool_graduated") {
+    return [];
+  }
+  return [{
+    id: `${event.eventId}:pons_inspection`,
     eventId: event.eventId,
-    type,
+    type: "pons_inspection",
     token: state.token,
     dueAt: now,
-  }));
+  }];
 }
 
 async function buildPonsTransitions(events, {
@@ -132,7 +138,14 @@ export async function previewPonsRange({
 export async function watchPonsRange(options) {
   const snapshot = options.store.snapshot();
   const result = await previewPonsRange({ ...options, initialTokens: snapshot.tokens });
-  options.store.commitPonsRange({ toBlock: options.toBlock, transitions: result.transitions });
+  const committed = options.store.commitPonsRange({
+    toBlock: options.toBlock,
+    transitions: result.transitions,
+    expectedTokens: snapshot.tokens,
+  });
+  if (committed == null) {
+    throw new Error("Pons token state changed during range preview");
+  }
   return result;
 }
 
@@ -142,9 +155,17 @@ export async function runPendingChecks({
   now = Date.now,
   limit = 20,
   maxAttempts = 5,
+  startBucket = 0,
 }) {
-  const result = { completed: 0, retried: 0, failed: 0 };
-  for (const check of store.listDueChecks(now(), limit)) {
+  const checks = store.listDueChecks(now(), limit, startBucket);
+  const result = {
+    selected: checks.length,
+    completed: 0,
+    retried: 0,
+    failed: 0,
+    nextBucketCursor: (startBucket + 1) % PENDING_CHECK_BUCKET_COUNT,
+  };
+  for (const check of checks) {
     try {
       const handler = handlers?.[check.type];
       if (typeof handler !== "function") throw new Error(`no pending-check handler for ${check.type}`);
@@ -153,20 +174,20 @@ export async function runPendingChecks({
         if (!Number.isFinite(update.retryAt)) {
           throw new Error(`pending check ${check.id} returned invalid retryAt`);
         }
-        store.rescheduleCheck(check.id, {
+        const saved = store.rescheduleCheck(check.id, {
           status: "pending",
           attempts: Number(check.attempts || 0) + 1,
           nextAttemptAt: update.retryAt,
           lastError: safeErrorMessage(update.lastError || "evidence pending"),
         });
+        if (!saved) continue;
         result.retried += 1;
         continue;
       }
-      if (update?.nextToken && update?.token) {
-        store.applyCheckResult(check.id, { ...update, completedAt: now() });
-      } else {
-        store.completeCheck(check.id, now());
-      }
+      const completed = update?.nextToken && update?.token
+        ? store.applyCheckResult(check.id, { ...update, completedAt: now() })
+        : store.completeCheck(check.id, now());
+      if (!completed) continue;
       result.completed += 1;
     } catch (cause) {
       if (cause instanceof NonRetryablePendingCheckError) throw cause.cause || cause;
@@ -181,12 +202,13 @@ export async function runPendingChecks({
       const retryAt = Number.isFinite(check.firstAnalyzedAt) && Number.isFinite(anchoredOffset)
         ? check.firstAnalyzedAt + anchoredOffset
         : nextRetryAt(now(), attempts);
-      store.rescheduleCheck(check.id, {
+      const saved = store.rescheduleCheck(check.id, {
         status: exhausted ? "failed" : "pending",
         attempts,
         nextAttemptAt: retryAt,
         lastError: safeErrorMessage(cause),
       });
+      if (!saved) continue;
       if (exhausted) result.failed += 1;
       else result.retried += 1;
     }
@@ -296,16 +318,9 @@ export function createInspectionCheckHandlers({
       evidenceConfirmed: transitionType === "hard_kill",
     } : null;
     if (notification) notification.text = formatLifecycleNotification(notification);
-    return { token: check.token, nextToken, notification };
+    return { token: check.token, nextToken, expectedToken: previous, notification };
   };
-  return Object.fromEntries([
-    "curve_flow",
-    "holders",
-    "deployer_24h",
-    "line_a",
-    "market",
-    "line_c",
-  ].map((type) => [type, handle]));
+  return { pons_inspection: handle };
 }
 
 function heatPoolCategory(pool) {
@@ -526,6 +541,19 @@ export async function initialOnchainCursor({
   return Math.min(head, Math.max(savedCursor ?? -1, firstRelevantBlock - 1));
 }
 
+export const ONCHAIN_SCAN_CHUNK_BLOCKS = 200;
+
+async function runOnchainStage(stage, work, context = "") {
+  try {
+    return await work();
+  } catch (cause) {
+    throw new Error(
+      `onchain stage=${stage}${context} failed: ${safeErrorMessage(cause)}`,
+      { cause }
+    );
+  }
+}
+
 export async function runWatchIteration(state, dependencies) {
   const { settings } = dependencies;
   const errors = [];
@@ -533,49 +561,77 @@ export async function runWatchIteration(state, dependencies) {
   const runOnchain = async () => {
     if (!settings.onchainScan) return;
     try {
+      const onchainStartedAt = dependencies.now();
       const runDiscoverySession = dependencies.runDiscoverySession ??
         ((work) => work(dependencies.provider));
       const result = await runDiscoverySession(async (provider) => {
-        const latestHead = await dependencies.getBlockNumber(provider);
+        const latestHead = await runOnchainStage(
+          "head",
+          () => dependencies.getBlockNumber(provider)
+        );
         const safeHead = latestHead - (settings.confirmationBlocks ?? 0);
         let lastBlock = state.lastBlock;
+        let scanFrom = null;
         if (safeHead >= 0 && lastBlock == null) {
-          lastBlock = await initialOnchainCursor({
-            head: safeHead,
-            savedCursor: dependencies.getOnchainCursor(),
-            maxAgeMinutes: settings.maxAgeMinutes,
-            now: dependencies.now,
-            findFirstBlockAtOrAfter: (target, head) =>
-              dependencies.findFirstBlockAtOrAfter(target, head, provider),
-          });
+          const savedCursor = dependencies.getOnchainCursor();
+          if (savedCursor != null) {
+            lastBlock = savedCursor;
+            state.lastBlock = savedCursor;
+          } else {
+            lastBlock = await runOnchainStage("boundary", () => initialOnchainCursor({
+              head: safeHead,
+              savedCursor: null,
+              maxAgeMinutes: settings.maxAgeMinutes,
+              now: dependencies.now,
+              findFirstBlockAtOrAfter: (target, head) =>
+                dependencies.findFirstBlockAtOrAfter(target, head, provider),
+            }));
+          }
+          if (lastBlock >= 0 && savedCursor == null) {
+            await runOnchainStage(
+              "bootstrap-cursor",
+              () => dependencies.setOnchainCursor(lastBlock)
+            );
+            state.lastBlock = lastBlock;
+          }
+          if (lastBlock < 0) scanFrom = 0;
         }
-        if (safeHead < 0 || safeHead <= lastBlock) {
+        if (safeHead < 0 || (lastBlock >= 0 && safeHead <= lastBlock)) {
           return { safeHead, lastBlock, scanned: null };
         }
-        const from = lastBlock + 1;
-        const scanned = await processOnchainRange(
-          { from, head: safeHead },
-          {
-            scanOnchain: (start, end) => dependencies.scanOnchain(start, end, provider),
-            handleEvents: (events) => dependencies.handleEvents(
-              events.map((event) => ({ ...event, observedAt: event.observedAt ?? observedAt })),
-              "onchain"
-            ),
-          }
+        const from = scanFrom ?? lastBlock + 1;
+        const to = Math.min(safeHead, from + ONCHAIN_SCAN_CHUNK_BLOCKS - 1);
+        const scanned = await runOnchainStage(
+          "range",
+          () => processOnchainRange(
+            { from, head: to },
+            {
+              scanOnchain: (start, end) => dependencies.scanOnchain(start, end, provider),
+              handleEvents: (events) => dependencies.handleEvents(
+                events.map((event) => ({ ...event, observedAt: event.observedAt ?? observedAt })),
+                "onchain"
+              ),
+            }
+          ),
+          ` from=${from} to=${to}`
         );
-        return { safeHead, lastBlock, from, scanned };
+        return { safeHead, lastBlock, from, to, scanned };
       });
-      if (result.scanned?.events.length) {
+      if (result.scanned) {
         dependencies.log(
-          `onchain ${result.from}-${result.safeHead}: ${result.scanned.events.length} pools, ${result.scanned.accepted} new`
+          `onchain from=${result.from} to=${result.to} safeHead=${result.safeHead}`
+          + ` cursorLag=${Math.max(0, result.safeHead - result.to)}`
+          + ` durationMs=${Math.max(0, dependencies.now() - onchainStartedAt)}`
+          + ` events=${result.scanned.events.length} accepted=${result.scanned.accepted}`
+          + ` failed=${result.scanned.failed}`
         );
       }
       if (result.scanned?.complete) {
-        dependencies.setOnchainCursor(result.safeHead);
-        state.lastBlock = result.safeHead;
+        dependencies.setOnchainCursor(result.to);
+        state.lastBlock = result.to;
       } else if (result.scanned) {
         dependencies.log(
-          `onchain ${result.from}-${result.safeHead}: ${result.scanned.failed} failed; cursor not advanced`
+          `onchain ${result.from}-${result.to}: ${result.scanned.failed} failed; cursor not advanced`
         );
       } else if (state.lastBlock == null) {
         state.lastBlock = result.lastBlock;
@@ -975,6 +1031,9 @@ export function createCandidateRecoveryScheduler({ store, recoveryKeys, now = Da
   }
   return async (event, error) => {
     const check = store.scheduleCheck(createCandidateRecovery(event, now(), error));
+    if (check.status !== "pending") {
+      throw new Error(`candidate recovery ${check.id} was not scheduled as pending`);
+    }
     recoveryKeys.add(candidateKey(event));
     return check;
   };
@@ -1094,6 +1153,22 @@ export function notificationsEnabledForMode(mode) {
   throw new Error(`unknown watch mode: ${mode}`);
 }
 
+export function reconcileWatchPendingChecks({
+  store,
+  settings,
+  mode,
+  now = Date.now,
+  log = console.log,
+}) {
+  if (mode !== "live") return null;
+  const reconciliation = store.reconcilePendingChecks({
+    at: now(),
+    maxAgeMinutes: settings.maxAgeMinutes,
+  });
+  log(formatPendingReconciliation(reconciliation));
+  return reconciliation;
+}
+
 async function watch({ mode = "live", context = null } = {}) {
   const runtime = createWatchRuntime(context);
   const { settings, store, rpc } = runtime;
@@ -1109,6 +1184,7 @@ async function watch({ mode = "live", context = null } = {}) {
       discoveryRpc: context.config.rpc.discoveryUrl,
       analysisRpc: context.config.rpc.analysisUrl,
     } : CHAIN);
+    reconcileWatchPendingChecks({ store, settings, mode });
     const { analysisProvider } = rpc;
     if (settings.onchainScan) {
       await runWatchStartupChecks({ ...rpc.startup, store, notificationsEnabled });
@@ -1229,14 +1305,26 @@ async function watch({ mode = "live", context = null } = {}) {
             store,
             send: runtime.sendText,
           });
+          const activity = formatWorkerActivity("outbox", result);
+          if (activity) console.log(activity);
           if (result.failed) console.error(`outbox: ${result.failed} notifications exhausted retries`);
           await sleep(settings.outboxPollMs);
         }
       })());
     }
+    let pendingBucketCursor = 0;
     loops.push((async () => {
       while (true) {
-        const result = await runPendingChecks({ store, handlers: pendingHandlers });
+        const result = await runPendingChecks({
+          store,
+          handlers: pendingHandlers,
+          startBucket: pendingBucketCursor,
+        });
+        pendingBucketCursor = result.nextBucketCursor;
+        const snapshot = store.snapshot();
+        syncCandidateRecoveryKeys(recoveryKeys, snapshot);
+        const activity = formatPendingWorkerActivity(result, snapshot);
+        if (activity) console.log(activity);
         if (result.failed) console.error(`pending checks: ${result.failed} checks exhausted retries`);
         await sleep(settings.outboxPollMs);
       }
@@ -1272,6 +1360,7 @@ async function watch({ mode = "live", context = null } = {}) {
       loops.push((async () => {
         while (true) {
           console.log(formatHourlyUsage(context.config, Date.now()));
+          console.log(formatScannerHealth(store.snapshot(), Date.now()));
           const hour = Math.floor(Date.now() / 3_600_000);
           await sleep(Math.max(1, (hour + 1) * 3_600_000 - Date.now()));
         }
