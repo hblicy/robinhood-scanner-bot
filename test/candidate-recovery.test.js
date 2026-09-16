@@ -8,6 +8,7 @@ import {
   createCandidateRecovery,
   isRetryableCandidateFailure,
 } from "../src/candidate-recovery.js";
+import { candidateKey } from "../src/runtime.js";
 
 const event = {
   chain: "robinhood",
@@ -29,7 +30,7 @@ test("candidate recovery uses a separate deterministic pending-check identity", 
   assert.match(check.lastError, /rate limited/);
 });
 
-test("candidate recovery restores pending and failed keys but not completed keys", () => {
+test("candidate recovery restores only pending keys", () => {
   const id = candidateRecoveryId(event);
   const keys = activeCandidateRecoveryKeys({
     pendingChecks: {
@@ -44,6 +45,16 @@ test("candidate recovery restores pending and failed keys but not completed keys
           pool: "0x5000000000000000000000000000000000000005",
         },
       },
+      expired: {
+        id: `${id}:expired`,
+        type: "candidate_recovery",
+        status: "expired",
+        event: {
+          ...event,
+          token: "0x7000000000000000000000000000000000000007",
+          pool: "0x8000000000000000000000000000000000000008",
+        },
+      },
       done: {
         id: `${id}:done`,
         type: "candidate_recovery",
@@ -56,7 +67,8 @@ test("candidate recovery restores pending and failed keys but not completed keys
       },
     },
   });
-  assert.equal(keys.size, 2);
+  assert.equal(keys.size, 1);
+  assert.equal(keys.has(candidateKey(event)), true);
 });
 
 test("only expected transient candidate failures are retryable", () => {

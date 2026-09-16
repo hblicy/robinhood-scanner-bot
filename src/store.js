@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { DATA_DIR, SETTINGS } from "./config.js";
 import { advanceProgramCursor, createSolanaCursorState } from "./solana/cursor.js";
 import { safeErrorMessage } from "./safety.js";
+import { selectDueChecks } from "./pending-checks.js";
 
 const STATE_VERSION = 6;
 const MIN_APPLIED_EVENT_TTL_MS = 7 * 86_400_000;
@@ -533,11 +534,8 @@ export function createStore({
       });
     },
 
-    listDueChecks(at = now(), limit = 20) {
-      return Object.values(state.pendingChecks)
-        .filter((entry) => entry.status === "pending" && entry.nextAttemptAt <= at)
-        .sort((a, b) => a.nextAttemptAt - b.nextAttemptAt || a.createdAt - b.createdAt)
-        .slice(0, limit)
+    listDueChecks(at = now(), limit = 20, startBucket = 0) {
+      return selectDueChecks(Object.values(state.pendingChecks), { at, limit, startBucket })
         .map((entry) => structuredClone(entry));
     },
 

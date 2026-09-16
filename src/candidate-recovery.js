@@ -40,6 +40,6 @@ export function isRetryableCandidateFailure(error) {
 
 export function activeCandidateRecoveryKeys(snapshot) {
   return new Set(Object.values(snapshot?.pendingChecks || {})
-    .filter((check) => check?.type === "candidate_recovery" && check.status !== "completed")
+    .filter((check) => check?.type === "candidate_recovery" && check.status === "pending")
     .map((check) => candidateKey(check.event)));
 }

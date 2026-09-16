@@ -173,7 +173,13 @@ test("pending checks can request an expected business retry without throwing", a
   });
 
   const saved = store.snapshot().pendingChecks["candidate-recheck:business"];
-  assert.deepEqual(result, { completed: 0, retried: 1, failed: 0 });
+  assert.deepEqual(result, {
+    selected: 1,
+    completed: 0,
+    retried: 1,
+    failed: 0,
+    nextBucketCursor: 1,
+  });
   assert.equal(saved.status, "pending");
   assert.equal(saved.attempts, 1);
   assert.equal(saved.nextAttemptAt, 5_000);
@@ -198,10 +204,34 @@ test("candidate check errors use retry offsets anchored to first analysis", asyn
   });
 
   const saved = store.snapshot().pendingChecks["candidate-recheck:anchored"];
-  assert.deepEqual(result, { completed: 0, retried: 1, failed: 0 });
+  assert.deepEqual(result, {
+    selected: 1,
+    completed: 0,
+    retried: 1,
+    failed: 0,
+    nextBucketCursor: 1,
+  });
   assert.equal(saved.attempts, 1);
   assert.equal(saved.nextAttemptAt, 301_000);
   assert.match(saved.lastError, /RPC unavailable/);
+});
+
+test("pending checks return the next fair-scheduling bucket", async () => {
+  const store = tempStore();
+  store.scheduleCheck({
+    id: "candidate-recovery:cursor",
+    type: "candidate_recovery",
+    dueAt: 1_000,
+  });
+  const result = await runPendingChecks({
+    store,
+    handlers: { candidate_recovery: async () => undefined },
+    now: () => 2_000,
+    limit: 1,
+    startBucket: 2,
+  });
+  assert.equal(result.selected, 1);
+  assert.equal(result.nextBucketCursor, 0);
 });
 
 test("inspection pending checks atomically update risk state and enqueue a transition", async () => {

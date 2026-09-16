@@ -16,6 +16,7 @@ import { alertReport, formatAlert, formatLifecycleNotification, sendTelegram } f
 import { CandidateQueue, createSerialExecutor } from "./queue.js";
 import { candidateKey, handleCandidate } from "./runtime.js";
 import { safeErrorMessage } from "./safety.js";
+import { PENDING_CHECK_BUCKET_COUNT } from "./pending-checks.js";
 import { acquireInstanceLock } from "./instance-lock.js";
 import { createPonsTokenState, reducePonsEvent } from "./lifecycle.js";
 import { classifyPonsRecord, readPonsLaunch, scanPonsRange, verifyPonsDeployment } from "./pons.js";
@@ -140,9 +141,17 @@ export async function runPendingChecks({
   now = Date.now,
   limit = 20,
   maxAttempts = 5,
+  startBucket = 0,
 }) {
-  const result = { completed: 0, retried: 0, failed: 0 };
-  for (const check of store.listDueChecks(now(), limit)) {
+  const checks = store.listDueChecks(now(), limit, startBucket);
+  const result = {
+    selected: checks.length,
+    completed: 0,
+    retried: 0,
+    failed: 0,
+    nextBucketCursor: (startBucket + 1) % PENDING_CHECK_BUCKET_COUNT,
+  };
+  for (const check of checks) {
     try {
       const handler = handlers?.[check.type];
       if (typeof handler !== "function") throw new Error(`no pending-check handler for ${check.type}`);
@@ -1225,9 +1234,15 @@ async function watch({ mode = "live", context = null } = {}) {
         }
       })());
     }
+    let pendingBucketCursor = 0;
     loops.push((async () => {
       while (true) {
-        const result = await runPendingChecks({ store, handlers: pendingHandlers });
+        const result = await runPendingChecks({
+          store,
+          handlers: pendingHandlers,
+          startBucket: pendingBucketCursor,
+        });
+        pendingBucketCursor = result.nextBucketCursor;
         if (result.failed) console.error(`pending checks: ${result.failed} checks exhausted retries`);
         await sleep(settings.outboxPollMs);
       }
