@@ -170,7 +170,7 @@ describe("scanner orchestration", () => {
       store: {
         scheduleCheck(check) {
           saved = check;
-          return check;
+          return { ...check, status: "pending" };
         },
       },
       recoveryKeys,
@@ -1447,6 +1447,28 @@ describe("scanner orchestration", () => {
 
     assert.deepEqual(cursors, [99, 299, 499]);
     assert.deepEqual(ranges, [[100, 299], [300, 499]]);
+    assert.equal(state.lastBlock, 499);
+  });
+
+  it("resumes from a persisted onchain cursor without recalculating the time boundary", async () => {
+    const ranges = [];
+    const cursors = [];
+    const state = { lastBlock: null, lastGecko: 0 };
+    await runWatchIteration(state, {
+      settings: { onchainScan: true, geckoScan: false, confirmationBlocks: 0, maxAgeMinutes: 30 },
+      now: () => 1_000,
+      getBlockNumber: async () => 600,
+      getOnchainCursor: () => 299,
+      findFirstBlockAtOrAfter: async () => { throw new Error("boundary must not be recalculated"); },
+      scanOnchain: async (from, to) => { ranges.push([from, to]); return []; },
+      handleEvents: async () => ({ accepted: 0, handled: 0, failed: 0 }),
+      setOnchainCursor: (value) => cursors.push(value),
+      geckoNewPools: async () => [],
+      log: () => {},
+    });
+
+    assert.deepEqual(ranges, [[300, 499]]);
+    assert.deepEqual(cursors, [499]);
     assert.equal(state.lastBlock, 499);
   });
 

@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  formatPendingWorkerActivity,
   formatPendingReconciliation,
   formatScannerHealth,
   formatWorkerActivity,
@@ -36,6 +37,25 @@ test("formats only non-zero worker activity fields", () => {
     "outbox delivered=1 retried=2"
   );
   assert.equal(formatWorkerActivity("outbox", { delivered: 0, retried: 0, failed: 0 }), null);
+});
+
+test("adds current pending-check status and type counts to worker activity", () => {
+  const output = formatPendingWorkerActivity(
+    { selected: 1, completed: 1, retried: 0, failed: 0, nextBucketCursor: 1 },
+    {
+      pendingChecks: {
+        one: { status: "pending", type: "pons_inspection", secret: "secret-key" },
+        two: { status: "pending", type: "candidate_recovery" },
+        three: { status: "expired", type: "holders" },
+      },
+    }
+  );
+
+  assert.equal(
+    output,
+    "pending-checks selected=1 completed=1 pendingStatus=expired=1,pending=2 pendingTypes=candidate_recovery=1,pons_inspection=1"
+  );
+  assert.doesNotMatch(output, /secret-key/);
 });
 
 test("formats startup reconciliation reason counts", () => {

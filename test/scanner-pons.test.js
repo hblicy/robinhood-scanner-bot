@@ -156,6 +156,114 @@ test("third-party check failures do not roll back the Pons cursor", async () => 
   assert.equal(state.pendingChecks[`${EVENT_ID}:pons_inspection`].nextAttemptAt, 15_000);
 });
 
+test("a superseded Pons inspection cannot overwrite newer lifecycle state", async () => {
+  const store = tempStore();
+  await watchPonsRange(dependencies(store));
+  let releaseInspection;
+  let inspectionStarted;
+  const started = new Promise((resolve) => { inspectionStarted = resolve; });
+  const gate = new Promise((resolve) => { releaseInspection = resolve; });
+  const running = runPendingChecks({
+    store,
+    handlers: {
+      pons_inspection: async (check) => {
+        const staleToken = store.snapshot().tokens[check.token.toLowerCase()];
+        inspectionStarted();
+        await gate;
+        return {
+          token: check.token,
+          nextToken: { ...staleToken, monitorState: "killed", updatedAt: 20_000 },
+        };
+      },
+    },
+    now: () => 20_000,
+    limit: 1,
+  });
+  await started;
+
+  const newerEventId = `4663:${"0x" + "cd".repeat(32)}:2`;
+  store.commitPonsRange({
+    toBlock: 121,
+    transitions: [{
+      eventId: newerEventId,
+      blockNumber: 121,
+      token: TOKEN,
+      nextToken: {
+        ...store.snapshot().tokens[TOKEN.toLowerCase()],
+        protocolPhase: "pool_created",
+        monitorState: "watchlisted",
+        updatedAt: 21_000,
+      },
+      notifications: [],
+      checks: [{
+        id: `${newerEventId}:pons_inspection`,
+        eventId: newerEventId,
+        type: "pons_inspection",
+        token: TOKEN,
+        dueAt: 21_000,
+      }],
+    }],
+  });
+  releaseInspection();
+  const result = await running;
+
+  const state = store.snapshot();
+  assert.equal(result.completed, 0);
+  assert.equal(state.tokens[TOKEN.toLowerCase()].protocolPhase, "pool_created");
+  assert.equal(state.tokens[TOKEN.toLowerCase()].monitorState, "watchlisted");
+  assert.equal(state.pendingChecks[`${EVENT_ID}:pons_inspection`].status, "expired");
+});
+
+test("a failed superseded Pons inspection cannot become pending again", async () => {
+  const store = tempStore();
+  await watchPonsRange(dependencies(store));
+  let releaseInspection;
+  let inspectionStarted;
+  const started = new Promise((resolve) => { inspectionStarted = resolve; });
+  const gate = new Promise((resolve) => { releaseInspection = resolve; });
+  const running = runPendingChecks({
+    store,
+    handlers: {
+      pons_inspection: async () => {
+        inspectionStarted();
+        await gate;
+        throw new Error("late timeout");
+      },
+    },
+    now: () => 20_000,
+    limit: 1,
+  });
+  await started;
+
+  const newerEventId = `4663:${"0x" + "ef".repeat(32)}:3`;
+  store.commitPonsRange({
+    toBlock: 121,
+    transitions: [{
+      eventId: newerEventId,
+      blockNumber: 121,
+      token: TOKEN,
+      nextToken: {
+        ...store.snapshot().tokens[TOKEN.toLowerCase()],
+        protocolPhase: "pool_created",
+        updatedAt: 21_000,
+      },
+      notifications: [],
+      checks: [{
+        id: `${newerEventId}:pons_inspection`,
+        eventId: newerEventId,
+        type: "pons_inspection",
+        token: TOKEN,
+        dueAt: 21_000,
+      }],
+    }],
+  });
+  releaseInspection();
+  const result = await running;
+
+  assert.equal(result.retried, 0);
+  assert.equal(store.snapshot().pendingChecks[`${EVENT_ID}:pons_inspection`].status, "expired");
+});
+
 test("pending checks can request an expected business retry without throwing", async () => {
   const store = tempStore();
   store.scheduleCheck({

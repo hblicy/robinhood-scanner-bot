@@ -544,7 +544,14 @@ export function createStore({
         throw new Error("pending check requires id, type and dueAt");
       }
       return commit((draft) => {
-        if (draft.pendingChecks[check.id]) return draft.pendingChecks[check.id];
+        const existing = draft.pendingChecks[check.id];
+        if (existing) {
+          if (check.type !== "candidate_recovery"
+            || existing.type !== "candidate_recovery"
+            || existing.status === "pending") {
+            return existing;
+          }
+        }
         draft.pendingChecks[check.id] = {
           ...structuredClone(check),
           eventId: check.eventId ?? null,
@@ -562,6 +569,7 @@ export function createStore({
     completeCheck(id, completedAt = now()) {
       return commit((draft) => {
         const entry = requireEntry(draft.pendingChecks, id, "pending check");
+        if (entry.status !== "pending") return null;
         entry.status = "completed";
         entry.completedAt = completedAt;
         entry.lastError = null;
@@ -572,6 +580,7 @@ export function createStore({
     rescheduleCheck(id, retry) {
       return commit((draft) => {
         const entry = requireEntry(draft.pendingChecks, id, "pending check");
+        if (entry.status !== "pending") return null;
         entry.status = retry.status || "pending";
         entry.attempts = retry.attempts;
         entry.nextAttemptAt = retry.nextAttemptAt;
@@ -587,6 +596,7 @@ export function createStore({
       }
       return commit((draft) => {
         const entry = requireEntry(draft.pendingChecks, id, "pending check");
+        if (entry.status !== "pending") return null;
         draft.tokens[key] = structuredClone(nextToken);
         const watchlist = new Set(draft.watchlist.map((value) => String(value).toLowerCase()));
         if (nextToken.watchlist) watchlist.add(key);

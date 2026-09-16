@@ -1,5 +1,8 @@
-import test from "node:test";
+import test, { afterEach } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import {
   CANDIDATE_RECOVERY_OFFSETS_MS,
   RetryableCandidateError,
@@ -9,6 +12,14 @@ import {
   isRetryableCandidateFailure,
 } from "../src/candidate-recovery.js";
 import { candidateKey } from "../src/runtime.js";
+import { createStore } from "../src/store.js";
+import { createCandidateRecoveryScheduler, runPendingChecks } from "../src/scanner.js";
+
+const dirs = [];
+
+afterEach(() => {
+  for (const dir of dirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
+});
 
 const event = {
   chain: "robinhood",
@@ -82,4 +93,43 @@ test("only expected transient candidate failures are retryable", () => {
     true
   );
   assert.equal(isRetryableCandidateFailure(new ReferenceError("analyzeCandidate is not defined")), false);
+});
+
+test("a failed candidate recovery is reactivated and executed after rediscovery", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "candidate-recovery-"));
+  dirs.push(dir);
+  const store = createStore({ dataDir: dir, now: () => 20_000 });
+  const id = candidateRecoveryId(event);
+  store.scheduleCheck(createCandidateRecovery(event, 1_000, new Error("first failure")));
+  store.rescheduleCheck(id, {
+    status: "failed",
+    attempts: 3,
+    nextAttemptAt: 601_000,
+    lastError: "exhausted",
+  });
+  assert.equal(activeCandidateRecoveryKeys(store.snapshot()).size, 0);
+
+  const recoveryKeys = new Set();
+  const schedule = createCandidateRecoveryScheduler({
+    store,
+    recoveryKeys,
+    now: () => 20_000,
+  });
+  const scheduled = await schedule(event, new Error("second failure"));
+
+  assert.equal(scheduled.status, "pending");
+  assert.equal(scheduled.attempts, 0);
+  assert.equal(scheduled.nextAttemptAt, 140_000);
+  assert.match(scheduled.lastError, /second failure/);
+  assert.equal(recoveryKeys.has(candidateKey(event)), true);
+
+  let executions = 0;
+  const result = await runPendingChecks({
+    store,
+    handlers: { candidate_recovery: async () => { executions += 1; } },
+    now: () => 140_000,
+  });
+  assert.equal(executions, 1);
+  assert.equal(result.completed, 1);
+  assert.equal(store.snapshot().pendingChecks[id].status, "completed");
 });

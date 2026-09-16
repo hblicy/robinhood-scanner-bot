@@ -26,6 +26,16 @@ export function formatWorkerActivity(name, result) {
   return fields.length ? `${name} ${fields.join(" ")}` : null;
 }
 
+export function formatPendingWorkerActivity(result, snapshot) {
+  const activity = formatWorkerActivity("pending-checks", result);
+  if (!activity) return null;
+  const pending = Object.values(snapshot?.pendingChecks || {})
+    .filter((entry) => entry?.status === "pending");
+  return `${activity}`
+    + ` pendingStatus=${formatCounts(counts(snapshot?.pendingChecks, "status")) || "none"}`
+    + ` pendingTypes=${formatCounts(counts(pending, "type")) || "none"}`;
+}
+
 export function formatScannerHealth(snapshot, at = Date.now()) {
   const pending = Object.values(snapshot?.pendingChecks || {})
     .filter((entry) => entry?.status === "pending");

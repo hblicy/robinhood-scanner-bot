@@ -50,6 +50,7 @@ import {
 import { intervalForRpcBudget } from "./rpc-usage-budget.js";
 import { formatHourlyUsage } from "./startup-summary.js";
 import {
+  formatPendingWorkerActivity,
   formatPendingReconciliation,
   formatScannerHealth,
   formatWorkerActivity,
@@ -165,20 +166,20 @@ export async function runPendingChecks({
         if (!Number.isFinite(update.retryAt)) {
           throw new Error(`pending check ${check.id} returned invalid retryAt`);
         }
-        store.rescheduleCheck(check.id, {
+        const saved = store.rescheduleCheck(check.id, {
           status: "pending",
           attempts: Number(check.attempts || 0) + 1,
           nextAttemptAt: update.retryAt,
           lastError: safeErrorMessage(update.lastError || "evidence pending"),
         });
+        if (!saved) continue;
         result.retried += 1;
         continue;
       }
-      if (update?.nextToken && update?.token) {
-        store.applyCheckResult(check.id, { ...update, completedAt: now() });
-      } else {
-        store.completeCheck(check.id, now());
-      }
+      const completed = update?.nextToken && update?.token
+        ? store.applyCheckResult(check.id, { ...update, completedAt: now() })
+        : store.completeCheck(check.id, now());
+      if (!completed) continue;
       result.completed += 1;
     } catch (cause) {
       if (cause instanceof NonRetryablePendingCheckError) throw cause.cause || cause;
@@ -193,12 +194,13 @@ export async function runPendingChecks({
       const retryAt = Number.isFinite(check.firstAnalyzedAt) && Number.isFinite(anchoredOffset)
         ? check.firstAnalyzedAt + anchoredOffset
         : nextRetryAt(now(), attempts);
-      store.rescheduleCheck(check.id, {
+      const saved = store.rescheduleCheck(check.id, {
         status: exhausted ? "failed" : "pending",
         attempts,
         nextAttemptAt: retryAt,
         lastError: safeErrorMessage(cause),
       });
+      if (!saved) continue;
       if (exhausted) result.failed += 1;
       else result.retried += 1;
     }
@@ -563,15 +565,21 @@ export async function runWatchIteration(state, dependencies) {
         let lastBlock = state.lastBlock;
         let scanFrom = null;
         if (safeHead >= 0 && lastBlock == null) {
-          lastBlock = await runOnchainStage("boundary", () => initialOnchainCursor({
-            head: safeHead,
-            savedCursor: dependencies.getOnchainCursor(),
-            maxAgeMinutes: settings.maxAgeMinutes,
-            now: dependencies.now,
-            findFirstBlockAtOrAfter: (target, head) =>
-              dependencies.findFirstBlockAtOrAfter(target, head, provider),
-          }));
-          if (lastBlock >= 0 && dependencies.getOnchainCursor() == null) {
+          const savedCursor = dependencies.getOnchainCursor();
+          if (savedCursor != null) {
+            lastBlock = savedCursor;
+            state.lastBlock = savedCursor;
+          } else {
+            lastBlock = await runOnchainStage("boundary", () => initialOnchainCursor({
+              head: safeHead,
+              savedCursor: null,
+              maxAgeMinutes: settings.maxAgeMinutes,
+              now: dependencies.now,
+              findFirstBlockAtOrAfter: (target, head) =>
+                dependencies.findFirstBlockAtOrAfter(target, head, provider),
+            }));
+          }
+          if (lastBlock >= 0 && savedCursor == null) {
             await runOnchainStage(
               "bootstrap-cursor",
               () => dependencies.setOnchainCursor(lastBlock)
@@ -1015,6 +1023,9 @@ export function createCandidateRecoveryScheduler({ store, recoveryKeys, now = Da
   }
   return async (event, error) => {
     const check = store.scheduleCheck(createCandidateRecovery(event, now(), error));
+    if (check.status !== "pending") {
+      throw new Error(`candidate recovery ${check.id} was not scheduled as pending`);
+    }
     recoveryKeys.add(candidateKey(event));
     return check;
   };
@@ -1302,7 +1313,7 @@ async function watch({ mode = "live", context = null } = {}) {
           startBucket: pendingBucketCursor,
         });
         pendingBucketCursor = result.nextBucketCursor;
-        const activity = formatWorkerActivity("pending-checks", result);
+        const activity = formatPendingWorkerActivity(result, store.snapshot());
         if (activity) console.log(activity);
         if (result.failed) console.error(`pending checks: ${result.failed} checks exhausted retries`);
         await sleep(settings.outboxPollMs);
