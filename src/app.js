@@ -45,6 +45,7 @@ import { createRpcUsageBudget } from "./rpc-usage-budget.js";
 import { createAssetCatalogCache, createAssetRefreshScheduler } from "./assets/cache.js";
 import { assertNoPendingAssetTransaction } from "./assets/transaction.js";
 import { createPairClassifier } from "./assets/pair.js";
+import { readEnvFile } from "./env.js";
 
 const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const LEGACY_STATE_FILES = Object.freeze([
@@ -567,8 +568,11 @@ function createSolanaApplication(loaded, { dependencies, projectRoot, readOnly }
 }
 
 export function createApp({ chainKey, command = "watch", env = process.env, dependencies = {} }) {
-  const loaded = loadChainConfig(chainKey, env);
   const projectRoot = path.resolve(dependencies.projectRoot ?? PROJECT_ROOT);
+  const loaded = loadChainConfig(chainKey, {
+    ...readEnvFile(path.join(projectRoot, ".env")),
+    ...env,
+  });
   const readOnly = command !== "watch";
   if (loaded.family === "solana") return createSolanaApplication(loaded, { dependencies, projectRoot, readOnly });
   const dataDir = path.join(projectRoot, "data", chainKey);
