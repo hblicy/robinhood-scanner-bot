@@ -1,4 +1,4 @@
-import { candidateKey } from "./runtime.js";
+import { candidateKey } from "./core/candidate.js";
 import { isDiscoveryFallbackError } from "./chain.js";
 import { safeErrorMessage } from "./safety.js";
 

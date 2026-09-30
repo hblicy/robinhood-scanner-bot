@@ -51,7 +51,7 @@ export function formatCandidateRouteStats(stats) {
 }
 
 export function supportsRobinhoodSellability(candidate) {
-  return candidate?.venue === "uniswap-v2";
+  return candidate?.venue === "uniswap-v2" || candidate?.venue === "uniswap-v2-robinhood";
 }
 
 export function scoreCandidateUpperBound(candidate, thresholds = {}) {

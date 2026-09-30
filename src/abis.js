@@ -30,6 +30,8 @@ export const V3_FACTORY_ABI = [
 
 export const V4_PM_ABI = [
   "event Initialize(bytes32 indexed id, address indexed currency0, address indexed currency1, uint24 fee, int24 tickSpacing, address hooks, uint160 sqrtPriceX96, int24 tick)",
+  // https://github.com/Uniswap/v4-core/blob/v4.0.0/src/interfaces/IPoolManager.sol
+  "event Swap(bytes32 indexed id,address indexed sender,int128 amount0,int128 amount1,uint160 sqrtPriceX96,uint128 liquidity,int24 tick,uint24 fee)",
 ];
 
 export const AERODROME_CLASSIC_FACTORY_ABI = [

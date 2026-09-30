@@ -97,3 +97,18 @@ test("moves exhausted notifications to a visible failed state", async () => {
   assert.equal(retries[0].status, "failed");
   assert.equal(retries[0].attempts, 5);
 });
+
+test("a sender returning false is retried and never recorded as delivered", async () => {
+  const retries = [];
+  let delivered = 0;
+  const store = {
+    listDueOutbox: () => [{ id: "notice-1", text: "hello", transitionType: "hard_kill", evidenceConfirmed: true }],
+    markOutboxDelivered: () => { delivered += 1; },
+    rescheduleOutbox: (_id, retry) => retries.push(retry),
+  };
+  const result = await drainOutbox({ store, send: async () => false, now: () => 1_000 });
+  assert.equal(delivered, 0);
+  assert.equal(result.retried, 1);
+  assert.equal(retries[0].status, "pending");
+  assert.match(retries[0].lastError, /not delivered/);
+});

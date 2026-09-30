@@ -1,8 +1,10 @@
 import { Interface, getAddress } from "ethers";
-import { ERC20_ABI } from "../../abis.js";
+import { ERC20_ABI, V4_PM_ABI } from "../../abis.js";
 
 const transferInterface = new Interface(ERC20_ABI);
 const transferTopic = transferInterface.getEvent("Transfer").topicHash.toLowerCase();
+const v4Interface = new Interface(V4_PM_ABI);
+const v4SwapTopic = v4Interface.getEvent("Swap").topicHash.toLowerCase();
 
 function sameAddress(left, right) {
   return typeof left === "string" && typeof right === "string"
@@ -31,6 +33,7 @@ export function observeSellReceipts({
   token,
   quote,
   pool,
+  poolId = null,
   vaults = [],
   excludedAddresses = [],
   quoteRecipientAddresses = [],
@@ -57,7 +60,22 @@ export function observeSellReceipts({
 
     let tokenIn = 0n;
     let quoteOut = 0n;
+    let swapTokenIn = 0n;
+    let swapQuoteOut = 0n;
     for (const log of receipt.logs ?? []) {
+      if (poolId != null && sameAddress(log.address, poolAddress)
+        && String(log.topics?.[0]).toLowerCase() === v4SwapTopic
+        && String(log.topics?.[1]).toLowerCase() === poolId.toLowerCase()) {
+        try {
+          const { args } = v4Interface.parseLog(log);
+          const tokenIsCurrency0 = tokenAddress.toLowerCase() < quoteAddress.toLowerCase();
+          swapTokenIn -= tokenIsCurrency0 ? args.amount0 : args.amount1;
+          swapQuoteOut += tokenIsCurrency0 ? args.amount1 : args.amount0;
+        } catch (cause) {
+          throw new Error(`invalid V4 Swap log in receipt ${receipt.transactionHash || "unknown"}`, { cause });
+        }
+        continue;
+      }
       if (String(log?.topics?.[0]).toLowerCase() !== transferTopic) continue;
       if (!sameAddress(log.address, tokenAddress) && !sameAddress(log.address, quoteAddress)) continue;
       const transfer = parseTransfer(log, receipt.transactionHash);
@@ -77,7 +95,8 @@ export function observeSellReceipts({
         quoteOut -= transfer.value;
       }
     }
-    if (tokenIn >= meaningfulThreshold && quoteOut > 0n) {
+    const swapBound = poolId == null || (swapTokenIn >= meaningfulThreshold && swapQuoteOut > 0n);
+    if (swapBound && tokenIn >= meaningfulThreshold && quoteOut > 0n) {
       sellers.add(seller);
       quoteOutflowReceipts++;
     }

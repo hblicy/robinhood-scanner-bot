@@ -6,10 +6,13 @@ import {
   getBlockNumber,
   getDiscoveryProvider,
   getDiscoverySessions,
+  getLogsChunked,
   isDiscoveryFallbackError,
   scanOnchain,
   sleep,
+  withRetry,
 } from "./chain.js";
+import { scanEvmRange } from "./evm/discovery.js";
 import { geckoNewPools, getDexPaprikaTopPools } from "./market.js";
 import { analyze } from "./analyze.js";
 import { alertReport, formatAlert, formatLifecycleNotification, sendTelegram } from "./notify.js";
@@ -255,7 +258,11 @@ export function createCandidateRecheckHandler({
         mode,
         analyze: analyzeCandidate,
         markSeen: () => {},
-        alertReport: sendAlert,
+        alertReport: async (report) => {
+          const delivered = await sendAlert(report);
+          if (delivered === false) throw new RetryableCandidateError("candidate notification was not delivered");
+          return delivered;
+        },
         log,
       }
     ));
@@ -283,6 +290,10 @@ export function createInspectionCheckHandlers({
     }
     if (report.identity !== "pons-v2") {
       throw new Error(`inspection Factory identity is ${report.identity || "unknown"}`);
+    }
+    if (report.errors?.length && report.monitorState !== "killed") {
+      const failures = report.errors.map(({ source, message }) => `${source}: ${message}`).join("; ");
+      throw new Error(`inspection sources failed: ${failures}`);
     }
 
     const nextToken = structuredClone(previous);
@@ -880,6 +891,33 @@ export function createWatchRpcBindings({
   };
 }
 
+async function scanConfiguredOnchain(config, fromBlock, toBlock, { provider }) {
+  const events = await scanEvmRange({
+    chain: config.profile,
+    provider,
+    fromBlock,
+    toBlock,
+    adapters: config.venues.filter((venue) => Array.isArray(venue.addresses)),
+    getLogs: getLogsChunked,
+    getBlockTimes: async ({ provider: discoveryProvider, blockNumbers }) => {
+      const entries = await Promise.all(blockNumbers.map(async (blockNumber) => {
+        const block = await withRetry(() => discoveryProvider.getBlock(blockNumber));
+        const timestamp = Number(block?.timestamp);
+        if (!Number.isFinite(timestamp)) throw new Error(`block ${blockNumber} timestamp unavailable`);
+        return [blockNumber, timestamp * 1000];
+      }));
+      return new Map(entries);
+    },
+  });
+  return events.map((event) => ({
+    ...event,
+    source: "onchain",
+    quote: event.quoteToken,
+    blockNumber: event.blockOrSlot,
+    txHash: event.transactionId,
+  }));
+}
+
 export function createWatchRuntime(context = null) {
   const config = context?.config ?? null;
   const settings = Object.freeze({ ...SETTINGS, ...(config?.settings ?? {}) });
@@ -889,6 +927,7 @@ export function createWatchRuntime(context = null) {
     analysisProvider: rpcContext.analysisProvider,
     discoveryProvider: rpcContext.discoveryPrimary,
     discoverySessions: rpcContext.discoverySessions,
+    scanOnchainImpl: (from, to, options) => scanConfiguredOnchain(config, from, to, options),
     analyzeImpl: config.services?.analyze ?? analyze,
   } : undefined);
   return {
@@ -901,6 +940,9 @@ export function createWatchRuntime(context = null) {
     getOnchainCursor: store.getOnchainCursor,
     setOnchainCursor: store.setOnchainCursor,
     venueRegistry: config?.venueRegistry ?? null,
+    supportsSellability: config?.securityRegistry
+      ? (event) => config.securityRegistry.supports(event)
+      : supportsRobinhoodSellability,
     rpcUsageBudget: config?.rpcUsageBudget ?? null,
     alertReport: config?.services?.alertReport ?? alertReport,
     sendText: config?.services?.sendText ?? sendTelegram,
@@ -923,6 +965,7 @@ export function buildWatchCandidateDependencies({
   analysisCircuit = createAnalysisRpcCircuit(),
   onAnalysisRpcOpen,
   venueRegistry = null,
+  supportsSellability = supportsRobinhoodSellability,
   rpcUsageBudget = null,
 }) {
   if (typeof rpc?.analyzeCandidate !== "function") {
@@ -939,7 +982,7 @@ export function buildWatchCandidateDependencies({
     alertReport: sendAlert,
     log,
     onAnalyzed,
-    supportsSellability: supportsRobinhoodSellability,
+    supportsSellability,
     venueRegistry,
     rpcUsageBudget,
     routeStats: createCandidateRouteStats(),
@@ -1008,6 +1051,11 @@ export async function processWatchCandidate(event, {
     return await handleCandidate(routed, { persistSeen: true }, {
       ...candidateDependencies,
       analyze: analyzeCandidate,
+      alertReport: async (report) => {
+        const delivered = await candidateDependencies.alertReport(report);
+        if (delivered === false) throw new RetryableCandidateError("candidate notification was not delivered");
+        return delivered;
+      },
     });
   } catch (error) {
     if (!(error instanceof AnalysisRpcCooldownError)) throw error;
@@ -1214,6 +1262,7 @@ async function watch({ mode = "live", context = null } = {}) {
       markSeen: runtime.markSeen,
       settings,
       venueRegistry: runtime.venueRegistry,
+      supportsSellability: runtime.supportsSellability,
       rpcUsageBudget: runtime.rpcUsageBudget,
       onAnalysisRpcOpen: notificationsEnabled
         ? async () => {
@@ -1389,7 +1438,7 @@ export function createScanRuntime(context = null) {
     analysisProvider: config.rpcContext.analysisProvider,
     getBlockNumber,
     findFirstBlockAtOrAfter,
-    scanOnchain,
+    scanOnchain: (from, to, options) => scanConfiguredOnchain(config, from, to, options),
     geckoNewPools: (pages) => geckoNewPools(pages, {
       maxAgeMinutes: settings.maxAgeMinutes,
       classifyPair: config.classifyPair ?? null,
@@ -1405,6 +1454,7 @@ export function createScanRuntime(context = null) {
       console.log(`Pons ${report.nextToken.protocolPhase} ${report.nextToken.token} ID ${report.eventId}`);
     },
     venueRegistry: config.venueRegistry ?? null,
+    supportsSellability: (event) => config.securityRegistry.supports(event),
     rpcUsageBudget: config.rpcUsageBudget ?? null,
     log: console.log,
   };

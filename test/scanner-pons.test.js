@@ -18,6 +18,7 @@ import {
 import { ADDR } from "../src/config.js";
 import { drainOutbox } from "../src/outbox.js";
 import { createPonsTokenState } from "../src/lifecycle.js";
+import { inspectToken } from "../src/check.js";
 
 const dirs = [];
 const TOKEN = getAddress("0x1111111111111111111111111111111111111111");
@@ -81,6 +82,88 @@ function dependencies(store, overrides = {}) {
     ...overrides,
   };
 }
+
+test("partial Pons source failures retry, then recovered metadata can trigger a hard-kill notice", async () => {
+  const store = tempStore();
+  await watchPonsRange(dependencies(store));
+  let currentTime = 10_000;
+  let metadataAttempts = 0;
+  const handlers = createInspectionCheckHandlers({
+    provider: {},
+    store,
+    now: () => currentTime,
+    inspect: (token) => inspectToken(token, {
+      provider: {},
+      now: () => currentTime,
+      readLaunch: async () => launchRecord(),
+      getBlockNumber: async () => 120,
+      findFirstBlockAtOrAfter: async () => 120,
+      loadCurveTrades: async () => [],
+      hydrateTraderAddresses: async (_provider, trades) => trades,
+      summarizeCurveFlow: () => ({ sampleStatus: "insufficient", tradeCount: 0, uniqueTraders: 0 }),
+      readToken: async () => {
+        metadataAttempts += 1;
+        if (metadataAttempts === 1) throw new Error("HTTP 429");
+        return { name: "Robinhood GIVEAWAY", symbol: "SCAM", holders: 5 };
+      },
+      readHolders: async () => [],
+      countLaunches: async () => 1,
+    }),
+  });
+  const first = await runPendingChecks({ store, handlers, now: () => currentTime });
+  assert.equal(first.completed, 0);
+  assert.equal(first.retried, 1);
+  const pending = store.snapshot().pendingChecks[`${EVENT_ID}:pons_inspection`];
+  assert.equal(pending.status, "pending");
+  assert.match(pending.lastError, /token_metadata.*HTTP 429/);
+  assert.equal(Object.keys(store.snapshot().outbox).length, 0);
+  currentTime = pending.nextAttemptAt;
+  const second = await runPendingChecks({ store, handlers, now: () => currentTime });
+  assert.equal(second.completed, 1);
+  assert.equal(metadataAttempts, 2);
+  const state = store.snapshot();
+  assert.equal(state.tokens[TOKEN.toLowerCase()].killReason, "forbidden-name");
+  assert.equal(Object.values(state.outbox)[0].transitionType, "hard_kill");
+});
+
+test("Pons source errors exhaust bounded retries without pretending to complete", async () => {
+  const store = tempStore();
+  await watchPonsRange(dependencies(store));
+  const handlers = createInspectionCheckHandlers({
+    provider: {}, store,
+    inspect: async () => ({ identity: "pons-v2", timedOut: false, monitorState: "observed", errors: [{ source: "holders", message: "HTTP 503" }] }),
+  });
+  const first = await runPendingChecks({ store, handlers, now: () => 10_000, maxAttempts: 2 });
+  assert.equal(first.retried, 1);
+  const second = await runPendingChecks({ store, handlers, now: () => 15_000, maxAttempts: 2 });
+  assert.equal(second.failed, 1);
+  assert.equal(store.snapshot().pendingChecks[`${EVENT_ID}:pons_inspection`].status, "failed");
+});
+
+test("Pons business-unknown evidence without source errors completes silently", async () => {
+  const store = tempStore();
+  await watchPonsRange(dependencies(store));
+  const handlers = createInspectionCheckHandlers({
+    provider: {}, store,
+    inspect: async () => ({ identity: "pons-v2", timedOut: false, monitorState: "observed", errors: [], curve: { status: "insufficient" } }),
+  });
+  const result = await runPendingChecks({ store, handlers, now: () => 10_000 });
+  assert.equal(result.completed, 1);
+  assert.equal(result.retried, 0);
+  assert.equal(Object.keys(store.snapshot().outbox).length, 0);
+});
+
+test("confirmed Pons hard-kill evidence is not delayed by unrelated unavailable sources", async () => {
+  const store = tempStore();
+  await watchPonsRange(dependencies(store));
+  const handlers = createInspectionCheckHandlers({
+    provider: {}, store,
+    inspect: async () => ({ identity: "pons-v2", timedOut: false, monitorState: "killed", reasons: ["forbidden-name"], errors: [{ source: "holders", message: "HTTP 503" }] }),
+  });
+  const result = await runPendingChecks({ store, handlers, now: () => 10_000 });
+  assert.equal(result.completed, 1);
+  assert.equal(Object.values(store.snapshot().outbox)[0].transitionType, "hard_kill");
+});
 
 test("atomically commits realtime Pons state and checks without raw lifecycle notification", async () => {
   const store = tempStore();

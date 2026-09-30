@@ -45,6 +45,34 @@ const confirmedSellability = async () => ({
 });
 
 describe("honeypotCheck", () => {
+  it("binds the canonical Robinhood V2 alias before inspecting sellability without a registry", async () => {
+    let bindings = 0;
+    const provider = {
+      getBlockNumber: async () => 77,
+      call: async ({ to, data }) => {
+        bindings++;
+        if (to.toLowerCase() === ADDR.V2_FACTORY.toLowerCase()) {
+          return factoryIface.encodeFunctionResult("getPair", [input.pool]);
+        }
+        const parsed = pairIface.parseTransaction({ data });
+        if (parsed.name === "token0") return pairIface.encodeFunctionResult("token0", [input.token]);
+        if (parsed.name === "token1") return pairIface.encodeFunctionResult("token1", [input.quote]);
+        throw new Error(`unexpected pair call ${parsed.name}`);
+      },
+    };
+    const result = await honeypotCheck({ ...input, venue: "uniswap-v2-robinhood" }, {
+      provider, retry: async (fn) => fn(),
+      bytecodeFlags: async () => ({ hasCode: true }),
+      quoteRoundTrip: async () => ({ buyOk: true, sellOk: true }),
+      inspectSellability: async (context) => {
+        assert.equal(context.venue, "uniswap-v2");
+        return confirmedSellability();
+      },
+    });
+    assert.equal(bindings, 3);
+    assert.equal(result.sellability.status, "confirmed");
+  });
+
   it("routes non-V2 candidates through the exact EVM security registry", async () => {
     let inspected;
     const result = await honeypotCheck({

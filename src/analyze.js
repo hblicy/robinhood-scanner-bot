@@ -200,6 +200,9 @@ export async function analyze(event, overrides = {}) {
       error: null,
       cause: null,
     });
+  const marketBinding = event.venue === "o1-v4-robinhood"
+    ? { pool: event.poolId, quote: event.quote }
+    : event.pool ? { pool: event.pool, quote: event.quote } : {};
   const [
     metaResult,
     ownerResult,
@@ -213,7 +216,7 @@ export async function analyze(event, overrides = {}) {
     settled(dependencies.readTokenMeta(token)),
     settled(dependencies.readOwner(token)),
     settled(dependencies.bytecodeFlags(token)),
-    settled(dependencies.dexScreener(token, event.pool ? { pool: event.pool, quote: event.quote } : {})),
+    settled(dependencies.dexScreener(token, marketBinding)),
     settled(dependencies.blockscoutToken(token)),
     settled(dependencies.blockscoutHolders(token, 25)),
     settled(dependencies.blockscoutCreator(token)),
@@ -516,7 +519,7 @@ export async function honeypotCheck(
   } catch {
     poolAddress = null;
   }
-  if (venue !== "uniswap-v2" || !poolAddress || poolAddress === ZeroAddress) {
+  if ((venue !== "uniswap-v2" && venue !== "uniswap-v2-robinhood") || !poolAddress || poolAddress === ZeroAddress) {
     const sellability = sellabilityResult(SELLABILITY.UNKNOWN, "unsupported-venue", { walletSignals });
     return normalizeHoneypotSellability({
       honeypot: null,
@@ -546,7 +549,7 @@ export async function honeypotCheck(
   const inspectionContext = {
     token,
     quote: quoteAddr,
-    venue,
+    venue: "uniswap-v2",
     pool: poolAddress,
     blockNumber,
     pairCreatedAt,

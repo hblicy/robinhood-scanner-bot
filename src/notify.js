@@ -17,8 +17,8 @@ export function formatAlert(report) {
   const sellabilityReason = formatSellabilityReason(sellability.status, sellability.reason);
   const lines = [];
   const chainName = report.chainName || report.chain || "Robinhood Chain";
-  lines.push(`${verdictIcon(verdict)} [${esc(chainName)}] ${verdictText(verdict)}  <b>${esc(meta.symbol)}</b>  ${score}/100`);
-  lines.push(`${esc(meta.name || "")}`);
+  lines.push(`${verdictIcon(verdict)} [${esc(chainName)}] ${verdictText(verdict)}  <b>${displayText(meta.symbol, 64)}</b>  ${score}/100`);
+  lines.push(displayText(meta.name, 128));
   lines.push("");
   lines.push(`<b>CA</b> <code>${token}</code>`);
   lines.push(`<b>池</b> ${esc(venue)} / ${esc(report.dex?.quoteSymbol || "WETH")}`);
@@ -113,7 +113,23 @@ export function formatAlert(report) {
   ].join(" · "));
   lines.push("");
   lines.push("<i>本程序只扫描报警，不包含模拟或实盘交易功能。</i>");
-  return lines.join("\n");
+  const text = lines.join("\n");
+  // Count the generated HTML after entity parsing, as required by sendMessage.
+  const visibleLength = text.replace(/<[^>]+>/g, "").replace(/&(?:amp|lt|gt);/g, "x").length;
+  if (visibleLength <= 4096) return text;
+  return [
+    `${verdictIcon(verdict)} [${displayText(chainName, 64)}] ${verdictText(verdict)}  <b>${displayText(meta.symbol, 64)}</b>  ${score}/100`,
+    displayText(meta.name, 128),
+    `<b>CA</b> <code>${token}</code>`,
+    `<b>池</b> ${displayText(venue, 64)} / ${displayText(report.dex?.quoteSymbol || "WETH", 64)}`,
+    `<b>卖出安全</b> ${sellabilityLabel(sellability.status)}  原因 ${displayText(sellability.reason || (sellability.status === "confirmed" ? "无" : "evidence-unavailable"), 128)}  真实卖家 ${sellability.meaningfulSellers}`,
+    ...(report.referenceAssetKind === "stock" ? [
+      `<b>股票底池</b> ${displayText(report.referenceAssetStandard || "stock", 32)} <code>${esc(report.referenceAsset || report.quoteToken || report.quote || "?")}</code>`,
+      `<b>股票底池限制</b> ${displayText(referenceRestrictions.join("、") || "无已知限制", 256)}`,
+    ] : []),
+    ...(red.length ? ["<b>红旗</b>", ...red.slice(0, 3).map((flag) => `• ${displayText(flag, 128)}`)] : []),
+    "<i>报告过长，部分详情已省略。本程序只扫描报警，不包含交易功能。</i>",
+  ].join("\n");
 }
 
 const LIFECYCLE_LABELS = {
@@ -182,10 +198,12 @@ export async function sendTelegramWith(text, {
           disable_web_page_preview: true,
         }),
       });
-      if (!res.ok) throw new Error(`telegram ${res.status}`);
+      if (!res.ok) throw Object.assign(new Error(`telegram ${res.status}`), { status: res.status });
       return true;
     } catch (error) {
-      lastError = error;
+      lastError = ctrl.signal.aborted
+        ? Object.assign(new Error("telegram request timed out", { cause: error }), { code: "TIMEOUT" })
+        : error;
       if (attempt < 2) await sleep(200 * (2 ** attempt));
     } finally {
       clearTimeout(timer);
@@ -211,6 +229,14 @@ function esc(s) {
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
+}
+
+function displayText(value, maxLength) {
+  const text = String(value ?? "");
+  const characters = Array.from(text);
+  return esc(characters.length > maxLength
+    ? characters.slice(0, maxLength - 1).join("") + "…"
+    : text);
 }
 
 function safeHttpLink(label, value) {

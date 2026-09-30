@@ -11,6 +11,24 @@ const CONFIRMED_SELLABILITY = {
 };
 
 describe("scanner runtime", () => {
+  it("finalizes a console-only candidate without requiring Telegram delivery", async () => {
+    let seen = 0;
+    let finalized = 0;
+    const event = { venue: "uniswap-v2", pool: "0xA", token: "0x1", source: "test" };
+    await handleCandidate(event, { persistSeen: true }, {
+      now: () => 1,
+      maxAgeMinutes: 30,
+      minScore: 55,
+      analyze: async () => ({ ...event, score: 80, verdict: "green", meta: { symbol: "TEST" }, honeypot: { honeypot: false }, sellability: CONFIRMED_SELLABILITY }),
+      alertReport: async () => false,
+      onAnalyzed: () => { finalized += 1; },
+      markSeen: () => { seen += 1; },
+      log: () => {},
+    });
+    assert.equal(finalized, 1);
+    assert.equal(seen, 1);
+  });
+
   it("persists post-analysis state before marking the candidate seen", async () => {
     const order = [];
     const event = { venue: "uniswap-v2", pool: "0xA", token: "0x1", createdAt: null, source: "test" };

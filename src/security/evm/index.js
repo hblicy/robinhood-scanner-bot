@@ -61,6 +61,7 @@ export function createObservedSellSecurityEntry({
         token: candidate.token,
         quote: candidate.quoteToken,
         pool: binding.pool || candidate.pool,
+        poolId: binding.poolId ?? null,
         vaults: binding.vaults,
         excludedAddresses: [...excludedAddresses, ...(binding.excludedAddresses ?? [])],
         quoteRecipientAddresses: [
