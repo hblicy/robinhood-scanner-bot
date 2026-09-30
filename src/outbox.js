@@ -24,7 +24,8 @@ export async function drainOutbox({
       continue;
     }
     try {
-      await send(entry.text, entry);
+      const delivered = await send(entry.text, entry);
+      if (delivered === false) throw new Error("outbox notification was not delivered");
       store.markOutboxDelivered(entry.id, now());
       result.delivered += 1;
     } catch (cause) {

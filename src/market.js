@@ -13,7 +13,8 @@ const V4_GECKO_VENUES = new Set([
   "uniswap-pools-trade",
 ]);
 const GECKO_VENUE_ALIASES = new Map([
-  ["uniswap-v2-robinhood", "uniswap-v2"],
+  ["uniswap-v2", "uniswap-v2-robinhood"],
+  ["uniswap-v2-robinhood", "uniswap-v2-robinhood"],
 ]);
 
 function normalizeGeckoVenue(value) {
@@ -121,6 +122,9 @@ export async function geckoNewPools(
       if (ageMin > maxAgeMinutes) continue;
       const tx = a.transactions?.m5 || a.transactions?.h1 || {};
       events.push({
+        chain: "robinhood",
+        chainFamily: "evm",
+        sourceKind: "dex",
         source: "gecko",
         venue,
         pool: poolAddress,

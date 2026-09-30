@@ -257,7 +257,7 @@ describe("geckoNewPools", () => {
       maxAgeMinutes: 30,
     });
 
-    assert.equal(events[0].venue, "uniswap-v2");
+    assert.equal(events[0].venue, "uniswap-v2-robinhood");
     assert.equal(events[1].venue, "mystery-dex");
   });
 

@@ -3,12 +3,14 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { getAddress } from "ethers";
+import { getAddress, Interface, zeroPadValue } from "ethers";
 import { EVM_PROFILES } from "../src/chains/evm-profiles.js";
 import { createAssetCatalog } from "../src/assets/catalog.js";
 import { createPairClassifier } from "../src/assets/pair.js";
 import { createO1Adapter } from "../src/venues/evm/o1.js";
 import { createO1SecurityEntry } from "../src/security/evm/o1.js";
+import { ERC20_ABI, V4_PM_ABI } from "../src/abis.js";
+import { readObservedSellReceipts } from "../src/security/evm/receipt-reader.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -16,7 +18,115 @@ function json(relativePath) {
   return JSON.parse(fs.readFileSync(path.join(root, relativePath), "utf8"));
 }
 
+function sellEvidence() {
+  const profile = EVM_PROFILES.robinhood;
+  const venue = profile.venues.find(({ id }) => id === "o1-v4-robinhood");
+  const catalog = createAssetCatalog(json("config/assets/robinhood.json"));
+  const adapter = createO1Adapter({ ...venue.contracts, classifyPair: createPairClassifier({
+    catalog, nativeQuotes: profile.quotes.map(({ address }) => address), normalizeAddress: getAddress,
+  }) });
+  const event = { ...adapter.parse(json("test/fixtures/evm/o1-token-launched.json")),
+    chain: profile.key, venue: venue.id, createdAt: 0, blockNumber: 99, analysisBlock: 100,
+  };
+  const entry = createO1SecurityEntry({ chain: profile.key, venue: venue.id, ...venue.contracts,
+    assetCatalog: catalog, now: () => 60_000,
+  });
+  const transfer = new Interface(ERC20_ABI);
+  const swap = new Interface([
+    "event Swap(bytes32 indexed id,address indexed sender,int128 amount0,int128 amount1,uint160 sqrtPriceX96,uint128 liquidity,int24 tick,uint24 fee)",
+  ]);
+  const receipts = [1, 2, 3].map((n) => {
+    const seller = getAddress(`0x${String(n).padStart(40, "0")}`);
+    const hash = `0x${String(n).repeat(64)}`;
+    const trade = structuredClone(json("test/fixtures/evm/o1-sell-swap.json"));
+    trade.topics[2] = zeroPadValue(seller, 32);
+    return { status: 1, from: seller, transactionHash: hash, logs: [
+      { ...transfer.encodeEventLog("Transfer", [seller, event.pool, 1000n]), address: event.token,
+        transactionHash: hash, blockNumber: 100, index: 0 },
+      { ...trade, transactionHash: hash, blockNumber: 100, index: 1 },
+      { ...transfer.encodeEventLog("Transfer", [event.pool, seller, 100n]), address: event.quoteToken,
+        transactionHash: hash, blockNumber: 100, index: 2 },
+    ] };
+  });
+  const inspect = () => entry.inspect(event, {
+    getObservedSellReceipts: (candidate, binding) => readObservedSellReceipts(candidate, binding, {
+      getLogs: async () => receipts.map((receipt) => receipt.logs[0]),
+      getTransactionReceipt: async (hash) => receipts.find(({ transactionHash }) => transactionHash === hash),
+    }),
+  });
+  return { event, receipts, inspect, swap };
+}
+
 describe("Robinhood stock launchpads", () => {
+  it("decodes the pinned V4 Swap regression fixture", () => {
+    const parsed = new Interface(V4_PM_ABI).parseLog(json("test/fixtures/evm/o1-sell-swap.json"));
+    assert.ok(parsed, "the fixed V4 Swap fixture must be recognized");
+    assert.equal(parsed.args.id, "0x6498034854ad1423aa1bcf5d099a6de2e90c9251f6ae39f1883c3571da3a9a5f");
+    assert.equal(parsed.args.amount0, -1000n);
+    assert.equal(parsed.args.amount1, 100n);
+  });
+
+  it("confirms three sellers only with target-pool sell Swaps and settlement transfers", async () => {
+    const { inspect } = sellEvidence();
+    const result = await inspect();
+    assert.equal(result.status, "confirmed");
+    assert.equal(result.bindingVerified, true);
+    assert.equal(result.meaningfulSellers, 3);
+  });
+
+  for (const scenario of ["upper-case-pool-id", "currency-one-token", "target-sell-other-buy"]) {
+    it(`preserves legitimate O1 ${scenario} sells`, async () => {
+      const { event, receipts, inspect, swap } = sellEvidence();
+      if (scenario === "upper-case-pool-id") event.poolId = `0x${event.poolId.slice(2).toUpperCase()}`;
+      if (scenario === "currency-one-token") {
+        event.token = getAddress("0xffffffffffffffffffffffffffffffffffffffff");
+        for (const receipt of receipts) {
+          receipt.logs[0].address = event.token;
+          const trade = swap.encodeEventLog("Swap", [event.poolId, receipt.from, 100n, -1000n, 2n ** 96n, 10000n, 0, 3000]);
+          receipt.logs[1] = { ...receipt.logs[1], ...trade };
+        }
+      }
+      if (scenario === "target-sell-other-buy") {
+        for (const receipt of receipts) {
+          const buy = swap.encodeEventLog("Swap", [`0x${"ab".repeat(32)}`, receipt.from, 1000n, -100n, 2n ** 96n, 10000n, 0, 3000]);
+          receipt.logs.push({ ...buy, address: event.pool });
+        }
+      }
+      const result = await inspect();
+      assert.equal(result.status, "confirmed");
+      assert.equal(result.meaningfulSellers, 3);
+    });
+  }
+
+  for (const scenario of ["different-pool", "no-swap", "wrong-manager", "target-buy-other-sell", "round-trip", "no-token-in", "no-quote-out"]) {
+    it(`keeps O1 ${scenario} receipts unknown through the real receipt reader`, async () => {
+      const { event, receipts, inspect, swap } = sellEvidence();
+      for (const receipt of receipts) {
+        const trade = receipt.logs[1];
+        if (scenario === "different-pool") trade.topics[1] = `0x${"ab".repeat(32)}`;
+        if (scenario === "no-swap") receipt.logs.splice(1, 1);
+        if (scenario === "wrong-manager") trade.address = event.token;
+        if (scenario === "no-token-in") receipt.logs[0].address = event.quoteToken;
+        if (scenario === "no-quote-out") receipt.logs.pop();
+        if (scenario === "target-buy-other-sell" || scenario === "round-trip") {
+          const buy = swap.encodeEventLog("Swap", [event.poolId, receipt.from, 1000n, -100n, 2n ** 96n, 10000n, 0, 3000]);
+          if (scenario === "target-buy-other-sell") trade.topics[1] = `0x${"ab".repeat(32)}`;
+          receipt.logs.push({ ...buy, address: event.pool });
+        }
+      }
+      const result = await inspect();
+      assert.equal(result.status, "unknown");
+      assert.equal(result.meaningfulSellers, 0);
+      assert.equal(result.quoteOutflowReceipts, 0);
+    });
+  }
+
+  it("keeps malformed target-pool Swap errors traceable instead of confirming evidence", async () => {
+    const { receipts, inspect } = sellEvidence();
+    receipts[0].logs[1].data = "0x";
+    await assert.rejects(inspect, /invalid V4 Swap log in receipt/);
+  });
+
   it("pins the official O1 Robinhood launch suite", () => {
     const o1 = EVM_PROFILES.robinhood.venues.find(({ id }) => id === "o1-v4-robinhood");
     assert.ok(o1);

@@ -1,7 +1,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { Keypair } from "@solana/web3.js";
-import { runSolanaOnce } from "../src/solana/runner.js";
+import { runSolanaOnce, watchSolana } from "../src/solana/runner.js";
+import { sendTelegramWith } from "../src/notify.js";
 
 const PROGRAM = Keypair.generate().publicKey.toBase58();
 const TOKEN = Keypair.generate().publicKey.toBase58();
@@ -33,6 +34,44 @@ function report(status, score = 80) {
 }
 
 describe("Solana runner", () => {
+  it("keeps live console-only watch running after an eligible candidate", async () => {
+    const stop = new Error("stop after the first iteration");
+    let commits = 0;
+    let seen = 0;
+    let sleeps = 0;
+    const config = {
+      venues: [{ id: "test", programId: PROGRAM, parseTransaction: () => [candidate()] }],
+      settings: { alertMode: "live", maxAgeMinutes: 30, minScore: 70 },
+      rpcContext: { discoverySessions: { run: (work) => work({
+        getSlot: async () => 11,
+        getSignaturesForAddress: async () => [
+          { signature: "6".repeat(64), slot: 11, err: null },
+          { signature: "5".repeat(64), slot: 10, err: null },
+        ],
+        getTransaction: async () => ({ blockTime: 1, transaction: { message: { accountKeys: [], instructions: [] } }, meta: { err: null } }),
+      }) } },
+      store: {
+        getSolanaProgramCursor: () => ({ signature: "5".repeat(64), slot: 10 }),
+        hasSeen: () => false,
+        markSeen: () => { seen++; },
+        commitSolanaProgramRange: () => { commits++; },
+      },
+      services: {
+        analyze: async () => report("confirmed"),
+        alertReport: () => sendTelegramWith("console report", {
+          settings: { telegramToken: "", telegramChat: "" }, log: () => {},
+        }),
+      },
+    };
+    await assert.rejects(() => watchSolana(config, {
+      acquireLock: async () => async () => {}, log: () => {},
+      sleep: async () => { sleeps++; throw stop; },
+    }), (error) => error === stop);
+    assert.equal(sleeps, 1);
+    assert.equal(commits, 1);
+    assert.equal(seen, 1);
+  });
+
   it("bootstraps missing cursors silently without historical transaction reads", async () => {
     let transactions = 0;
     let alerts = 0;

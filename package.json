@@ -29,6 +29,9 @@
     "ethers": "^6.13.5"
   },
   "overrides": {
-    "rpc-websockets": "9.2.0"
+    "rpc-websockets": "9.3.10",
+    "jayson": {
+      "uuid": "11.1.1"
+    }
   }
 }

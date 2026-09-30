@@ -57,6 +57,7 @@ export function createO1SecurityEntry({
       return {
         ok: true,
         pool: expected.poolManager,
+        poolId: candidate.poolId.toLowerCase(),
         excludedAddresses: [expected.factory, expected.hook],
         quoteRecipientAddresses: [expected.poolManager, expected.hook],
       };

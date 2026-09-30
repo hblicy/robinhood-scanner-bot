@@ -1,6 +1,10 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { analyze, RetryableAnalysisError } from "../src/analyze.js";
+import fs from "node:fs";
+import { createO1Adapter } from "../src/venues/evm/o1.js";
+import { EVM_PROFILES } from "../src/chains/evm-profiles.js";
+import { dexScreener } from "../src/market.js";
 
 const TOKEN = "0x1111111111111111111111111111111111111111";
 const QUOTE = "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73";
@@ -50,6 +54,38 @@ function dependencies(overrides = {}) {
 }
 
 describe("analyze data completeness", () => {
+  it("binds O1 market data to the fixture pool ID while preserving its security pool manager", async () => {
+    const venue = EVM_PROFILES.robinhood.venues.find(({ id }) => id === "o1-v4-robinhood");
+    const adapter = createO1Adapter({ ...venue.contracts,
+      classifyPair: (token, quote) => ({ candidateKind: "meme", targetToken: token, referenceAsset: quote }),
+    });
+    const parsed = adapter.parse(JSON.parse(fs.readFileSync(new URL("./fixtures/evm/o1-token-launched.json", import.meta.url), "utf8")));
+    const candidate = { ...parsed, chain: "robinhood", venue: venue.id, quote: parsed.quoteToken, createdAt: event.createdAt };
+    let securityInput;
+    const report = await analyze(candidate, dependencies({
+      dexScreener: (token, binding) => dexScreener(token, binding, {
+        profile: EVM_PROFILES.robinhood,
+        fetchImpl: async () => ({ ok: true, json: async () => [{
+          chainId: "robinhood", dexId: "uniswap-v4", pairAddress: candidate.poolId,
+          baseToken: { address: candidate.token, name: "Safe", symbol: "SAFE" },
+          quoteToken: { address: candidate.quote, name: "Stock", symbol: "STOCK" },
+          pairCreatedAt: candidate.createdAt, priceUsd: "1", priceNative: "1",
+          liquidity: { usd: 10000 }, marketCap: 50000,
+          volume: { m5: 1000, h1: 5000, h24: 10000 },
+          txns: { m5: { buys: 5, sells: 3 }, h1: { buys: 20, sells: 10 } },
+        }] }),
+      }),
+      honeypotCheck: async (value) => {
+        securityInput = value;
+        return { honeypot: null, complete: false, reason: "insufficient-meaningful-sells" };
+      },
+    }));
+    assert.equal(report.marketBound, true);
+    assert.equal(securityInput.pool, candidate.pool);
+    assert.equal(securityInput.poolId, candidate.poolId);
+    assert.equal(report.pool, candidate.pool);
+  });
+
   it("uses the selected chain scoring thresholds", async () => {
     const report = await analyze(event, dependencies({
       scoreThresholds: {

@@ -2,6 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { runEvmRangeOnce, watchEvm } from "../src/evm/runner.js";
 import { createAnalysisRpcCircuit } from "../src/analysis-rpc-circuit.js";
+import { sendTelegramWith } from "../src/notify.js";
 
 const candidate = {
   chain: "base",
@@ -79,6 +80,22 @@ function setup(overrides = {}) {
 }
 
 describe("generic EVM range runner", () => {
+  it("keeps live console-only watch running after an eligible candidate", async () => {
+    const stop = new Error("stop after the first iteration");
+    let sleeps = 0;
+    const value = setup({ cursor: 99, dependencies: {
+      alertReport: () => sendTelegramWith("console report", {
+        settings: { telegramToken: "", telegramChat: "" }, log: () => {},
+      }),
+      acquireLock: async () => async () => {},
+      sleep: async () => { sleeps++; throw stop; },
+    } });
+    await assert.rejects(() => watchEvm(value.config, value.dependencies), (error) => error === stop);
+    assert.equal(sleeps, 1);
+    assert.equal(value.cursor(), 100);
+    assert.equal(value.seen.size, 1);
+  });
+
   it("restores an empty chain cursor silently on the first backfill", async () => {
     const value = setup();
     const result = await runEvmRangeOnce(value.config, { persist: true }, value.dependencies);
